@@ -1,0 +1,817 @@
+from __future__ import annotations
+
+import html as html_lib
+import json
+import re
+import time
+import urllib.parse
+
+from playwright.sync_api import sync_playwright
+
+from src.core import (
+    DEFAULT_TIKTOK_CDP_URL,
+    XlsxRowWriter,
+    build_output_path,
+    connect_existing_chromium,
+    expand_compact_number,
+    extract_tiktok_video_title,
+    random_cooldown,
+    resolve_tiktok_card_container,
+    sanitize_csv_rows,
+    should_stop,
+)
+
+CONTEXT_SIZE = 5
+API_PAGE_SIZE = 35
+MAX_API_PAGES = 10
+MAX_PROFILE_SCROLLS = 80
+MIN_PROFILE_SCROLLS_BEFORE_STABLE_STOP = 12
+PROFILE_SCROLL_DELTA = 1500
+PROFILE_SCROLL_PAUSE = 0.8
+
+CSV_FIELDS = [
+    "博主链接",
+    "目标视频链接",
+    "视频链接",
+    "时间轴关系",
+    "视频标题",
+    "发布时间",
+    "播放量",
+    "点赞数",
+    "收藏数",
+    "分享数",
+    "评论数",
+]
+
+METRIC_LABEL_WORDS = {
+    "Like",
+    "Likes",
+    "Favorite",
+    "Favorites",
+    "Favourite",
+    "Favourites",
+    "Share",
+    "Shares",
+    "Comment",
+    "Comments",
+    "赞",
+    "点赞",
+    "收藏",
+    "分享",
+    "评论",
+    "評論",
+}
+
+def parse_input_pairs(txt_path: str) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    with open(txt_path, "r", encoding="utf-8") as f:
+        for line in f:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            parts = [part.strip() for part in stripped.split("\t") if part.strip()] if "\t" in stripped else stripped.split()
+            if not parts:
+                continue
+            target_url = clean_url(parts[0])
+            if "/video/" not in target_url:
+                continue
+            profile_url = clean_url(parts[1]) if len(parts) >= 2 else extract_profile_url_from_video_url(target_url)
+            pairs.append((target_url, profile_url))
+    return pairs
+
+def clean_url(url: str) -> str:
+    url = (url or "").strip()
+    if not url:
+        return ""
+    if url.startswith("//"):
+        url = "https:" + url
+    if url.startswith("/"):
+        url = "https://www.tiktok.com" + url
+    if not url.startswith("http"):
+        url = "https://" + url
+    return url.split("?")[0].split("#")[0].rstrip("/")
+
+def extract_tiktok_video_id(url: str) -> str:
+    match = re.search(r"/video/(\d+)", url or "")
+    return match.group(1) if match else ""
+
+def extract_profile_url_from_video_url(url: str) -> str:
+    match = re.search(r"tiktok\.com/(@[^/?#]+)/video/\d+", url or "")
+    return f"https://www.tiktok.com/{match.group(1)}" if match else ""
+
+def handle_from_profile_url(profile_url: str) -> str:
+    match = re.search(r"tiktok\.com/@([^/?#]+)", profile_url or "")
+    return match.group(1) if match else ""
+
+def unique_urls(urls: list[str]) -> list[str]:
+    unique: list[str] = []
+    seen = set()
+    for url in urls:
+        cleaned = clean_url(url)
+        if cleaned and cleaned not in seen:
+            unique.append(cleaned)
+            seen.add(cleaned)
+    return unique
+
+def relation_for_index(target_index: int, current_index: int) -> str:
+    if current_index < target_index:
+        return f"目标后发布第{target_index - current_index}条"
+    return f"目标前发布第{current_index - target_index}条"
+
+def format_count(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    if isinstance(value, (dict, list, tuple)):
+        return ""
+    text = str(value).strip()
+    if text.lower() in {"none", "null", "undefined", "nan"}:
+        return ""
+    return expand_compact_number(text)
+
+def format_plain_text(value) -> str:
+    if value is None or isinstance(value, bool):
+        return ""
+    if isinstance(value, (dict, list, tuple)):
+        return ""
+    text = str(value).strip()
+    return "" if text.lower() in {"none", "null", "undefined", "nan"} else text
+
+def clean_metric_text(text: str, removable_words=()) -> str:
+    cleaned = format_count(text).replace("\r", "\n")
+    if not cleaned:
+        return ""
+    for word in sorted(set(METRIC_LABEL_WORDS) | set(removable_words), key=lambda value: len(str(value)), reverse=True):
+        cleaned = re.sub(re.escape(str(word)), "", cleaned, flags=re.I)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" :-·|")
+    if not cleaned:
+        return ""
+    if cleaned.lower() in {word.lower() for word in METRIC_LABEL_WORDS}:
+        return ""
+    return expand_compact_number(cleaned) if re.search(r"\d", cleaned) else ""
+
+def format_publish_time(value) -> str:
+    try:
+        timestamp = int(value)
+        if timestamp > 0:
+            return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
+    except Exception:
+        pass
+    return format_plain_text(value)
+
+def iter_dicts(value):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from iter_dicts(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from iter_dicts(child)
+
+def parse_script_json(html: str, script_id: str):
+    pattern = rf'<script[^>]+id=["\']{re.escape(script_id)}["\'][^>]*>(.*?)</script>'
+    match = re.search(pattern, html, re.S)
+    if not match:
+        return None
+    try:
+        return json.loads(html_lib.unescape(match.group(1)).strip())
+    except Exception:
+        return None
+
+def page_state_sources(page) -> list[dict]:
+    sources: list[dict] = []
+    try:
+        raw = page.evaluate(
+            """() => JSON.stringify({
+                sigi: window.SIGI_STATE || null,
+                universal: window.__UNIVERSAL_DATA_FOR_REHYDRATION__ || null
+            })"""
+        )
+        if raw:
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                sources.append(data)
+    except Exception:
+        pass
+
+    try:
+        html = page.content()
+        for script_id in ("SIGI_STATE", "__UNIVERSAL_DATA_FOR_REHYDRATION__"):
+            data = parse_script_json(html, script_id)
+            if isinstance(data, dict):
+                sources.append(data)
+    except Exception:
+        pass
+
+    return sources
+
+def find_item_in_state(sources: list[dict], target_video_id: str) -> dict:
+    for source in sources:
+        for item_module_key in ("ItemModule", "itemModule"):
+            item_module = source.get(item_module_key)
+            if isinstance(item_module, dict):
+                item = item_module.get(target_video_id)
+                if isinstance(item, dict):
+                    return item
+
+        for node in iter_dicts(source):
+            item_struct = node.get("itemStruct")
+            if isinstance(item_struct, dict) and str(item_struct.get("id", "")) == target_video_id:
+                return item_struct
+            if str(node.get("id", "")) == target_video_id and ("stats" in node or "createTime" in node or "desc" in node):
+                return node
+    return {}
+
+def find_author_info(sources: list[dict], item: dict, fallback_profile_url: str) -> dict[str, str]:
+    author = item.get("author") if isinstance(item, dict) else None
+    author_id = format_plain_text(item.get("authorId") or item.get("author_id")) if isinstance(item, dict) else ""
+    unique_id = ""
+    sec_uid = ""
+    user_id = ""
+
+    if isinstance(author, dict):
+        unique_id = format_plain_text(author.get("uniqueId") or author.get("unique_id"))
+        sec_uid = format_plain_text(author.get("secUid") or author.get("sec_uid"))
+        user_id = format_plain_text(author.get("id") or author.get("uid"))
+    elif isinstance(author, str):
+        unique_id = author
+
+    fallback_handle = handle_from_profile_url(fallback_profile_url)
+    expected_ids = {value for value in (unique_id, fallback_handle, author_id, user_id) if value}
+
+    for source in sources:
+        users = source.get("UserModule", {}).get("users", {}) if isinstance(source.get("UserModule"), dict) else {}
+        if isinstance(users, dict):
+            for user in users.values():
+                if not isinstance(user, dict):
+                    continue
+                user_unique_id = format_plain_text(user.get("uniqueId") or user.get("unique_id"))
+                user_id_value = format_plain_text(user.get("id") or user.get("uid"))
+                if expected_ids and not ({user_unique_id, user_id_value} & expected_ids):
+                    continue
+                unique_id = unique_id or user_unique_id
+                sec_uid = sec_uid or format_plain_text(user.get("secUid") or user.get("sec_uid"))
+                user_id = user_id or user_id_value
+                break
+
+        for node in iter_dicts(source):
+            if "secUid" not in node and "sec_uid" not in node:
+                continue
+            node_unique_id = format_plain_text(node.get("uniqueId") or node.get("unique_id"))
+            node_user_id = format_plain_text(node.get("id") or node.get("uid"))
+            if expected_ids and not ({node_unique_id, node_user_id} & expected_ids):
+                continue
+            unique_id = unique_id or node_unique_id
+            sec_uid = sec_uid or format_plain_text(node.get("secUid") or node.get("sec_uid"))
+            user_id = user_id or node_user_id
+            if sec_uid:
+                break
+        if sec_uid:
+            break
+
+    unique_id = unique_id or fallback_handle
+    profile_url = f"https://www.tiktok.com/@{unique_id}" if unique_id else fallback_profile_url
+    return {
+        "sec_uid": sec_uid,
+        "unique_id": unique_id,
+        "user_id": user_id or author_id,
+        "profile_url": profile_url,
+    }
+
+def extract_target_metadata(page, target_video_id: str, fallback_profile_url: str) -> dict:
+    sources = page_state_sources(page)
+    item = find_item_in_state(sources, target_video_id)
+    author_info = find_author_info(sources, item, fallback_profile_url)
+    return {
+        "item": item,
+        **author_info,
+    }
+
+def resolve_target_video_context(page, target_video_url: str) -> tuple[str, str, str]:
+    final_video_url = clean_url(target_video_url)
+    final_video_id = extract_tiktok_video_id(final_video_url)
+    profile_url = extract_profile_url_from_video_url(final_video_url)
+
+    try:
+        page.goto(target_video_url, wait_until="domcontentloaded", timeout=35000)
+        try:
+            page.wait_for_selector("script#__UNIVERSAL_DATA_FOR_REHYDRATION__, script#SIGI_STATE, [data-e2e='like-count']", timeout=8000)
+        except Exception:
+            pass
+        redirected_url = clean_url(page.url)
+        redirected_video_id = extract_tiktok_video_id(redirected_url)
+        if redirected_video_id:
+            final_video_url = redirected_url
+            final_video_id = redirected_video_id
+
+        current_profile = extract_profile_url_from_video_url(clean_url(page.url))
+        if current_profile:
+            profile_url = current_profile
+
+        metadata = extract_target_metadata(page, final_video_id, profile_url)
+        if metadata.get("profile_url"):
+            profile_url = metadata["profile_url"]
+
+        if not profile_url:
+            for element in page.locator("a[href*='tiktok.com/@'], a[href^='/@']").all():
+                href = clean_url(element.get_attribute("href") or "")
+                if "/video/" not in href and "/tag/" not in href and "/music/" not in href:
+                    match = re.search(r"tiktok\.com/(@[^/?#]+)", href)
+                    if match:
+                        profile_url = f"https://www.tiktok.com/{match.group(1)}"
+                        break
+    except Exception:
+        pass
+
+    return final_video_url, final_video_id, profile_url
+
+def build_author_items_api_url(sec_uid: str, cursor: str) -> str:
+    params = {
+        "WebIdLastTime": str(int(time.time())),
+        "aid": "1988",
+        "app_language": "zh-Hans",
+        "app_name": "tiktok_web",
+        "browser_language": "zh-CN",
+        "browser_name": "Mozilla",
+        "browser_online": "true",
+        "browser_platform": "Win32",
+        "channel": "tiktok_web",
+        "cookie_enabled": "true",
+        "count": str(API_PAGE_SIZE),
+        "cursor": str(cursor or "0"),
+        "device_platform": "web_pc",
+        "focus_state": "true",
+        "from_page": "user",
+        "history_len": "2",
+        "is_fullscreen": "false",
+        "is_page_visible": "true",
+        "language": "zh-Hans",
+        "priority_region": "",
+        "referer": "",
+        "region": "US",
+        "screen_height": "1080",
+        "screen_width": "1920",
+        "secUid": sec_uid,
+        "tz_name": "Asia/Shanghai",
+        "verifyFp": "",
+    }
+    return "https://www.tiktok.com/api/post/item_list/?" + urllib.parse.urlencode(params)
+
+def fetch_json_via_page(page, url: str, timeout_ms: int = 12000) -> dict:
+    result = page.evaluate(
+        """async ({url, timeoutMs}) => {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), timeoutMs);
+            try {
+                const response = await fetch(url, {
+                    credentials: 'include',
+                    signal: controller.signal,
+                    headers: {accept: 'application/json, text/plain, */*'}
+                });
+                const text = await response.text();
+                return {status: response.status, ok: response.ok, text};
+            } catch (error) {
+                return {status: 0, ok: false, text: String(error)};
+            } finally {
+                clearTimeout(timer);
+            }
+        }""",
+        {"url": url, "timeoutMs": timeout_ms},
+    )
+    if not isinstance(result, dict) or not result.get("ok"):
+        raise RuntimeError(f"API 请求失败：HTTP {result.get('status') if isinstance(result, dict) else 'unknown'}")
+    return json.loads(result.get("text") or "{}")
+
+def item_id(item: dict) -> str:
+    return format_plain_text(item.get("id") or item.get("itemId") or item.get("aweme_id"))
+
+def item_author_handle(item: dict, default_profile_url: str) -> str:
+    author = item.get("author")
+    if isinstance(author, dict):
+        handle = format_plain_text(author.get("uniqueId") or author.get("unique_id"))
+        if handle:
+            return handle
+    if isinstance(author, str):
+        return author
+    return handle_from_profile_url(default_profile_url)
+
+def item_video_url(item: dict, default_profile_url: str) -> str:
+    video_id = item_id(item)
+    handle = item_author_handle(item, default_profile_url)
+    if video_id and handle:
+        return f"https://www.tiktok.com/@{handle}/video/{video_id}"
+    return ""
+
+def item_metrics(item: dict) -> dict[str, str]:
+    stats = item.get("stats") if isinstance(item.get("stats"), dict) else {}
+    stats_v2 = item.get("statsV2") if isinstance(item.get("statsV2"), dict) else {}
+    stats_v2_alt = item.get("stats_v2") if isinstance(item.get("stats_v2"), dict) else {}
+    statistics = item.get("statistics") if isinstance(item.get("statistics"), dict) else {}
+
+    def stat(*keys) -> str:
+        for source in (stats, stats_v2, stats_v2_alt, statistics, item):
+            for key in keys:
+                if key in source:
+                    value = format_count(source.get(key))
+                    if value != "":
+                        return value
+        return ""
+
+    return {
+        "视频标题": format_plain_text(item.get("desc") or item.get("description")),
+        "发布时间": format_publish_time(item.get("createTime") or item.get("create_time")),
+        "播放量": stat("playCount", "play_count", "viewCount", "view_count", "play_count_str"),
+        "点赞数": stat("diggCount", "digg_count", "likeCount", "like_count", "likes"),
+        "收藏数": stat("collectCount", "collect_count", "favoriteCount", "favouriteCount", "favorite_count", "favourite_count", "saveCount", "save_count"),
+        "分享数": stat("shareCount", "share_count", "shares"),
+        "评论数": stat("commentCount", "comment_count", "comments"),
+    }
+
+def collect_author_items_via_api(page, sec_uid: str, target_video_id: str, log_callback) -> tuple[list[dict], int]:
+    items: list[dict] = []
+    seen_ids: set[str] = set()
+    cursor = "0"
+    target_index = -1
+
+    for page_index in range(MAX_API_PAGES):
+        data = fetch_json_via_page(page, build_author_items_api_url(sec_uid, cursor))
+        item_list = data.get("itemList") or data.get("items") or []
+        if not isinstance(item_list, list) or not item_list:
+            break
+
+        before_count = len(items)
+        for item in item_list:
+            if not isinstance(item, dict):
+                continue
+            current_id = item_id(item)
+            if not current_id or current_id in seen_ids:
+                continue
+            items.append(item)
+            seen_ids.add(current_id)
+
+        for index, item in enumerate(items):
+            if item_id(item) == target_video_id:
+                target_index = index
+                break
+
+        log_callback(f"  API 已收集 {len(items)} 条投稿记录。")
+        if target_index >= 0 and len(items) >= target_index + CONTEXT_SIZE + 1:
+            break
+        if len(items) == before_count or not data.get("hasMore"):
+            break
+
+        next_cursor = format_plain_text(data.get("cursor") or data.get("maxCursor") or data.get("max_cursor"))
+        if not next_cursor or next_cursor == cursor:
+            break
+        cursor = next_cursor
+
+    return items, target_index
+
+def rows_from_api_items(items: list[dict], target_index: int, profile_url: str, target_video_url: str) -> list[dict[str, str]]:
+    selected_indices = list(range(max(0, target_index - CONTEXT_SIZE), target_index))
+    selected_indices += list(range(target_index + 1, min(len(items), target_index + CONTEXT_SIZE + 1)))
+
+    rows: list[dict[str, str]] = []
+    for current_index in selected_indices:
+        item = items[current_index]
+        video_url = item_video_url(item, profile_url)
+        if not video_url:
+            continue
+        rows.append({
+            "博主链接": profile_url,
+            "目标视频链接": target_video_url,
+            "视频链接": video_url,
+            "时间轴关系": relation_for_index(target_index, current_index),
+            **item_metrics(item),
+        })
+    return rows
+
+def extract_card_play_count(card_element) -> str:
+    try:
+        container = resolve_tiktok_card_container(card_element)
+        for selector in ("[data-e2e='video-views']", "strong[data-e2e='video-views']"):
+            node = container.query_selector(selector)
+            if node:
+                text = node.inner_text().strip()
+                if text:
+                    return expand_compact_number(text)
+    except Exception:
+        pass
+    return ""
+
+def collect_visible_profile_video_links(page) -> list[str]:
+    try:
+        hrefs = page.evaluate(
+            """() => Array.from(document.querySelectorAll("a[href*='/video/'], a[href*='video/']"))
+                .map(node => node.href || node.getAttribute('href') || '')
+                .filter(Boolean)"""
+        )
+    except Exception:
+        hrefs = []
+
+    links: list[str] = []
+    seen = set()
+    for href in hrefs if isinstance(hrefs, list) else []:
+        cleaned = clean_url(str(href))
+        if "/video/" in cleaned and cleaned not in seen:
+            links.append(cleaned)
+            seen.add(cleaned)
+    return links
+
+def collect_profile_video_links(page, profile_url: str, target_video_id: str, log_callback, stop_event=None) -> tuple[list[str], int]:
+    try:
+        page.goto(profile_url, wait_until="domcontentloaded", timeout=60000)
+    except Exception as exc:
+        if "interrupted by another navigation" not in str(exc):
+            raise
+        log_callback("  主页导航被 TikTok 自动跳转打断，正在重置页面后重试。")
+        try:
+            page.goto("about:blank", wait_until="domcontentloaded", timeout=10000)
+        except Exception:
+            pass
+        page.goto(profile_url, wait_until="domcontentloaded", timeout=60000)
+
+    time.sleep(2.0)
+    try:
+        if "captcha" in page.url or page.locator("div[id^='captcha']").count() > 0:
+            log_callback("  发现 TikTok 验证页，等待 15 秒给你手动处理。")
+            time.sleep(15)
+    except Exception:
+        pass
+
+    try:
+        page.wait_for_selector("a[href*='/video/'], a[href*='video/']", timeout=7000)
+    except Exception:
+        pass
+
+    try:
+        page.mouse.move(page.evaluate("window.innerWidth") / 2, page.evaluate("window.innerHeight") / 2)
+    except Exception:
+        pass
+
+    all_links: list[str] = []
+    target_index = -1
+    no_growth_count = 0
+
+    for scroll_index in range(MAX_PROFILE_SCROLLS):
+        if should_stop(stop_event):
+            break
+        previous_links = all_links
+        current_links = collect_visible_profile_video_links(page)
+        if current_links:
+            all_links = current_links
+
+        previous_count = len(previous_links)
+
+        current_target_index = -1
+        for index, link in enumerate(all_links):
+            if target_video_id and target_video_id in link:
+                current_target_index = index
+                break
+        target_index = current_target_index
+
+        if target_index >= 0 and len(all_links) > target_index + CONTEXT_SIZE:
+            log_callback(f"  主页网格命中目标视频，已加载 {len(all_links)} 个视频链接。")
+            break
+
+        page.mouse.wheel(delta_x=0, delta_y=PROFILE_SCROLL_DELTA)
+        try:
+            page.evaluate("window.scrollBy(0, Math.floor(window.innerHeight * 1.5))")
+        except Exception:
+            pass
+        time.sleep(PROFILE_SCROLL_PAUSE if target_index < 0 else 0.45)
+
+        if len(all_links) == previous_count or all_links == previous_links:
+            no_growth_count += 1
+            if no_growth_count >= 3 and all_links and (target_index >= 0 or scroll_index >= MIN_PROFILE_SCROLLS_BEFORE_STABLE_STOP):
+                break
+        else:
+            no_growth_count = 0
+
+        if scroll_index and scroll_index % 10 == 0:
+            status = "已命中目标，继续补齐后续视频" if target_index >= 0 else "继续寻找目标"
+            log_callback(f"  主页已加载 {len(all_links)} 个视频链接，{status}...")
+
+    return all_links, target_index
+
+def extract_selected_play_counts(page, selected_links: list[str]) -> dict[str, str]:
+    selected_set = set(selected_links)
+    play_counts: dict[str, str] = {}
+    if not selected_set:
+        return play_counts
+
+    for element in page.locator("a[href*='/video/'], a[href*='video/']").all():
+        try:
+            href = clean_url(element.get_attribute("href") or "")
+        except Exception:
+            href = ""
+        if href not in selected_set or href in play_counts:
+            continue
+        play_count = extract_card_play_count(element)
+        if play_count:
+            play_counts[href] = play_count
+    return play_counts
+
+def extract_metric(page, data_e2e_candidates, removable_words=(), default=""):
+    candidates = data_e2e_candidates if isinstance(data_e2e_candidates, (list, tuple)) else [data_e2e_candidates]
+    for data_e2e in candidates:
+        try:
+            loc = page.locator(f"[data-e2e='{data_e2e}']").first
+            if loc.count() <= 0:
+                continue
+            text = clean_metric_text(loc.inner_text(timeout=2500), removable_words)
+            if text:
+                return text
+        except Exception:
+            continue
+    return default
+
+def extract_publish_time(page) -> str:
+    try:
+        html = page.content()
+        match = re.search(r'"createTime":"?(\d{10})"?', html)
+        if match:
+            return format_publish_time(match.group(1))
+    except Exception:
+        pass
+    for selector in ("span[data-e2e='browser-nickname'] + span + span", "span[data-e2e='video-create-time']", "time"):
+        try:
+            loc = page.locator(selector).first
+            if loc.count() > 0:
+                text = loc.inner_text(timeout=1500).strip()
+                if text:
+                    return text
+        except Exception:
+            continue
+    return ""
+
+def extract_video_metrics(page, video_url: str) -> dict:
+    page.goto(video_url, wait_until="domcontentloaded", timeout=30000)
+    try:
+        page.wait_for_selector("[data-e2e='like-count'], [data-e2e='comment-count']", timeout=5000)
+    except Exception:
+        pass
+
+    video_id = extract_tiktok_video_id(video_url)
+    item = find_item_in_state(page_state_sources(page), video_id)
+    metrics = item_metrics(item) if item else {
+        "视频标题": "",
+        "发布时间": "",
+        "播放量": "",
+        "点赞数": "",
+        "收藏数": "",
+        "分享数": "",
+        "评论数": "",
+    }
+
+    ui_metrics = {
+        "视频标题": extract_tiktok_video_title(page),
+        "发布时间": extract_publish_time(page),
+        "播放量": "",
+        "点赞数": extract_metric(page, "like-count"),
+        "收藏数": extract_metric(page, ["favorite-count", "undefined-count"]),
+        "分享数": extract_metric(page, "share-count"),
+        "评论数": extract_metric(page, "comment-count"),
+    }
+    for key, value in ui_metrics.items():
+        if not metrics.get(key) and value:
+            metrics[key] = value
+    return metrics
+
+def fallback_rows_from_profile(profile_page, detail_page, profile_candidates: list[str], target_video_id: str, target_video_url: str, log_callback, stop_event=None) -> list[dict[str, str]]:
+    links, target_index = [], -1
+    matched_profile_url = profile_candidates[0] if profile_candidates else ""
+
+    for candidate_profile_url in profile_candidates:
+        if should_stop(stop_event):
+            return []
+        if not candidate_profile_url:
+            continue
+        log_callback(f"  兜底：尝试主页定位：{candidate_profile_url}")
+        links, target_index = collect_profile_video_links(profile_page, candidate_profile_url, target_video_id, log_callback, stop_event)
+        log_callback(f"  该主页已捕获 {len(links)} 个视频链接。")
+        if target_index >= 0:
+            matched_profile_url = candidate_profile_url
+            break
+
+    if target_index < 0:
+        if links:
+            log_callback("  主页未命中目标视频，不再用底部视频冒充上下文。")
+        return []
+
+    selected_indices = list(range(max(0, target_index - CONTEXT_SIZE), target_index))
+    selected_indices += list(range(target_index + 1, min(len(links), target_index + CONTEXT_SIZE + 1)))
+    selected_links = [links[current_index] for current_index in selected_indices]
+    play_counts = extract_selected_play_counts(profile_page, selected_links)
+
+    rows: list[dict[str, str]] = []
+    for current_index in selected_indices:
+        if should_stop(stop_event):
+            break
+        video_url = links[current_index]
+        log_callback(f"  提取 {relation_for_index(target_index, current_index)}：{video_url}")
+        metrics = extract_video_metrics(detail_page, video_url)
+        metrics["播放量"] = play_counts.get(video_url, metrics.get("播放量", ""))
+        rows.append({
+            "博主链接": matched_profile_url,
+            "目标视频链接": target_video_url,
+            "视频链接": video_url,
+            "时间轴关系": relation_for_index(target_index, current_index),
+            **metrics,
+        })
+    return rows
+
+def write_rows(writer: XlsxRowWriter, rows: list[dict[str, str]]):
+    writer.writerows(sanitize_csv_rows(rows))
+
+def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callback, stop_event=None):
+    output_path = None
+    completed_path = None
+    try:
+        pairs = parse_input_pairs(txt_path)
+        if not pairs:
+            log_callback("TXT 中没有有效的“视频链接 博主链接”行。")
+            return
+
+        output_path = build_output_path("tiktok", f"tiktok_paired_context_metrics_{time.strftime('%Y%m%d')}.xlsx")
+        writer = XlsxRowWriter(output_path, CSV_FIELDS)
+
+        with sync_playwright() as p:
+            log_callback("正在连接本地 Chrome...")
+            try:
+                _, context = connect_existing_chromium(p, cdp_port_or_url)
+            except Exception as exc:
+                log_callback(f"连接失败：请确认 Chrome 已自动打开并已登录 TikTok。错误：{exc}")
+                return
+
+            target_page = context.new_page()
+            profile_page = context.new_page()
+            detail_page = context.new_page()
+
+            for index, (target_video_url, profile_url) in enumerate(pairs, 1):
+                if should_stop(stop_event):
+                    log_callback("任务已停止。")
+                    break
+                log_callback(f"[{index}/{len(pairs)}] 定位 TikTok 目标视频：{target_video_url}")
+                try:
+                    resolved_video_url, target_video_id, resolved_profile_url = resolve_target_video_context(target_page, target_video_url)
+                    if not target_video_id:
+                        log_callback("  跳过：无法解析视频 ID。")
+                        continue
+
+                    metadata = extract_target_metadata(target_page, target_video_id, resolved_profile_url or profile_url)
+                    target_profile_url = extract_profile_url_from_video_url(target_video_url)
+                    resolved_target_profile_url = extract_profile_url_from_video_url(resolved_video_url)
+                    matched_profile_url = target_profile_url or metadata.get("profile_url") or resolved_profile_url or profile_url
+                    profile_candidates = unique_urls([
+                        target_profile_url,
+                        resolved_target_profile_url,
+                        matched_profile_url,
+                        resolved_profile_url,
+                        profile_url,
+                        metadata.get("profile_url", ""),
+                    ])
+
+                    rows: list[dict[str, str]] = []
+                    sec_uid = metadata.get("sec_uid", "")
+                    if sec_uid:
+                        try:
+                            log_callback("  使用 API 快速定位投稿列表。")
+                            items, target_index = collect_author_items_via_api(target_page, sec_uid, target_video_id, log_callback)
+                            if target_index >= 0:
+                                rows = rows_from_api_items(items, target_index, matched_profile_url, resolved_video_url)
+                                log_callback(f"  API 命中目标视频，准备写入 {len(rows)} 条。")
+                            else:
+                                log_callback("  API 未命中目标视频，切换到主页兜底。")
+                        except Exception as exc:
+                            log_callback(f"  API 路线失败，切换到主页兜底：{exc}")
+                    else:
+                        log_callback("  未从目标视频页解析到 secUid，切换到主页兜底。")
+
+                    if not rows:
+                        rows = fallback_rows_from_profile(profile_page, detail_page, profile_candidates, target_video_id, resolved_video_url, log_callback, stop_event)
+
+                    if not rows:
+                        log_callback("  跳过：API 和主页兜底都没有定位到目标视频。")
+                        continue
+
+                    write_rows(writer, rows)
+                    log_callback(f"  完成：写入 {len(rows)} 条。")
+                    if index % 3 == 0:
+                        if random_cooldown(log_callback, stop_event, 3.0, 8.0):
+                            break
+                except Exception as exc:
+                    log_callback(f"  处理失败：{exc}")
+
+            for opened_page in (target_page, profile_page, detail_page):
+                if not opened_page.is_closed():
+                    opened_page.close()
+
+        writer.save()
+        log_callback(f"完成，已保存：{output_path}")
+        completed_path = output_path
+    finally:
+        finish_callback(completed_path)

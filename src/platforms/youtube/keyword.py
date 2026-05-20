@@ -1,0 +1,208 @@
+from __future__ import annotations
+
+import re
+import time
+from datetime import datetime, timedelta, timezone
+
+from googleapiclient.discovery import build
+
+from src.core import XlsxRowWriter, build_output_path, sanitize_csv_rows, should_stop
+
+CSV_FIELDS = [
+    "搜索词",
+    "序号",
+    "视频标题",
+    "视频时长",
+    "播放量",
+    "点赞数",
+    "发布时间",
+    "视频链接",
+    "作者主页链接",
+]
+
+DEFAULT_START_DATE = "2025-05-06"
+DEFAULT_END_DATE = "2026-05-06"
+
+def parse_date_range(start_date: str, end_date: str) -> tuple[datetime, datetime]:
+    start_dt = datetime.strptime(start_date.strip(), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    end_dt = datetime.strptime(end_date.strip(), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    if start_dt > end_dt:
+        raise ValueError("开始日期不能晚于结束日期")
+    return start_dt, end_dt
+
+def youtube_rfc3339(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+def format_youtube_duration(iso_duration: str) -> str:
+    match = re.fullmatch(
+        r"P(?:(?P<days>\d+)D)?(?:T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+)S)?)?",
+        iso_duration or "",
+    )
+    if not match:
+        return ""
+
+    days = int(match.group("days") or 0)
+    hours = int(match.group("hours") or 0) + days * 24
+    minutes = int(match.group("minutes") or 0)
+    seconds = int(match.group("seconds") or 0)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+def chunked(values: list[str], size: int) -> list[list[str]]:
+    return [values[index:index + size] for index in range(0, len(values), size)]
+
+def safe_filename_part(value: str) -> str:
+    cleaned = re.sub(r'[\\/*?:"<>|]', "", value or "").strip()
+    cleaned = re.sub(r"\s+", "_", cleaned)
+    return cleaned[:80] or "keyword"
+
+def search_video_ids(youtube, keyword: str, max_results: int, start_dt: datetime, end_dt: datetime, log_callback, stop_event=None) -> list[str]:
+    video_ids: list[str] = []
+    next_page_token = None
+    published_before = end_dt + timedelta(days=1)
+
+    while len(video_ids) < max_results:
+        if should_stop(stop_event):
+            log_callback("任务已停止。")
+            break
+        response = youtube.search().list(
+            part="id",
+            q=keyword,
+            type="video",
+            order="relevance",
+            maxResults=min(50, max_results - len(video_ids)),
+            pageToken=next_page_token,
+            publishedAfter=youtube_rfc3339(start_dt),
+            publishedBefore=youtube_rfc3339(published_before),
+        ).execute()
+
+        for item in response.get("items", []):
+            if should_stop(stop_event):
+                break
+            video_id = item.get("id", {}).get("videoId", "")
+            if video_id and video_id not in video_ids:
+                video_ids.append(video_id)
+
+        next_page_token = response.get("nextPageToken")
+        log_callback(f"  {keyword}: 已找到 {len(video_ids)} 个日期范围内的视频")
+        if not next_page_token:
+            break
+
+    return video_ids
+
+
+def iter_search_video_id_batches(youtube, keyword: str, max_results: int, start_dt: datetime, end_dt: datetime, log_callback, stop_event=None):
+    seen_video_ids: set[str] = set()
+    next_page_token = None
+    published_before = end_dt + timedelta(days=1)
+
+    while len(seen_video_ids) < max_results:
+        if should_stop(stop_event):
+            log_callback("任务已停止。")
+            break
+        response = youtube.search().list(
+            part="id",
+            q=keyword,
+            type="video",
+            order="relevance",
+            maxResults=min(50, max_results - len(seen_video_ids)),
+            pageToken=next_page_token,
+            publishedAfter=youtube_rfc3339(start_dt),
+            publishedBefore=youtube_rfc3339(published_before),
+        ).execute()
+
+        batch_ids: list[str] = []
+        for item in response.get("items", []):
+            if should_stop(stop_event):
+                break
+            video_id = item.get("id", {}).get("videoId", "")
+            if video_id and video_id not in seen_video_ids:
+                batch_ids.append(video_id)
+                seen_video_ids.add(video_id)
+
+        if batch_ids:
+            log_callback(f"  {keyword}: 已找到 {len(seen_video_ids)} 个日期范围内的视频")
+            yield batch_ids
+
+        next_page_token = response.get("nextPageToken")
+        if not next_page_token:
+            break
+
+def fetch_video_rows(youtube, keyword: str, video_ids: list[str], stop_event=None) -> list[dict]:
+    rows: list[dict] = []
+    for ids in chunked(video_ids, 50):
+        if should_stop(stop_event):
+            break
+        response = youtube.videos().list(
+            part="snippet,contentDetails,statistics",
+            id=",".join(ids),
+            maxResults=50,
+        ).execute()
+
+        for item in response.get("items", []):
+            if should_stop(stop_event):
+                break
+            snippet = item.get("snippet", {})
+            stats = item.get("statistics", {})
+            content = item.get("contentDetails", {})
+            video_id = item.get("id", "")
+            channel_id = snippet.get("channelId", "")
+            rows.append(
+                {
+                    "搜索词": keyword,
+                    "序号": "",
+                    "视频标题": snippet.get("title", ""),
+                    "视频时长": format_youtube_duration(content.get("duration", "")),
+                    "播放量": stats.get("viewCount", ""),
+                    "点赞数": stats.get("likeCount", ""),
+                    "发布时间": snippet.get("publishedAt", ""),
+                    "视频链接": f"https://www.youtube.com/watch?v={video_id}",
+                    "作者主页链接": f"https://www.youtube.com/channel/{channel_id}" if channel_id else "",
+                }
+            )
+    return rows
+
+def run_youtube_spider(api_key, keywords_list, max_results, start_date, end_date, log_callback, finish_callback, stop_event=None):
+    output_path = None
+    output_paths: list[str] = []
+    try:
+        start_dt, end_dt = parse_date_range(start_date, end_date)
+        youtube = build("youtube", "v3", developerKey=api_key)
+        run_stamp = time.strftime("%Y%m%d")
+
+        for index, keyword in enumerate(keywords_list, 1):
+            if should_stop(stop_event):
+                log_callback("任务已停止。")
+                break
+            output_path = build_output_path(
+                "youtube",
+                f"youtube_keyword_videos_{safe_filename_part(keyword)}_{run_stamp}.xlsx",
+            )
+            output_paths.append(output_path)
+
+            writer = XlsxRowWriter(output_path, CSV_FIELDS)
+            serial_number = 1
+            log_callback(f"[{index}/{len(keywords_list)}] 搜索关键词：{keyword}")
+            log_callback(f"  输出文件：{output_path}")
+            log_callback(f"  日期范围：{start_date} 至 {end_date}")
+            written_count = 0
+            for video_ids in iter_search_video_id_batches(youtube, keyword, max_results, start_dt, end_dt, log_callback, stop_event):
+                if should_stop(stop_event):
+                    break
+                rows = fetch_video_rows(youtube, keyword, video_ids, stop_event)
+                for row in rows:
+                    row["序号"] = str(serial_number)
+                    serial_number += 1
+                writer.writerows(sanitize_csv_rows(rows))
+                written_count += len(rows)
+                log_callback(f"  已写入 {written_count} 条视频")
+            writer.save()
+            log_callback(f"  写入 {written_count} 条视频")
+
+        log_callback("完成，已按关键词分别保存：")
+        for path in output_paths:
+            log_callback(f"  {path}")
+    except Exception as exc:
+        log_callback(f"运行失败：{exc}")
+        output_path = None
+    finally:
+        finish_callback(output_paths[-1] if output_paths else output_path)
