@@ -65,6 +65,7 @@ def chrome_launch_hint(port_or_url: str | int) -> str:
     return (
         f'"{find_chrome_executable()}" '
         f"--remote-debugging-port={debug_port_from_cdp_url(port_or_url)} "
+        "--remote-allow-origins=* "
         f'--user-data-dir="{get_chrome_user_data_dir()}"'
     )
 
@@ -86,6 +87,7 @@ def launch_chrome_for_cdp(port_or_url: str | int) -> subprocess.Popen:
         [
             chrome_path,
             f"--remote-debugging-port={port}",
+            "--remote-allow-origins=*",
             f"--user-data-dir={user_data_dir}",
             "--no-first-run",
             "--no-default-browser-check",

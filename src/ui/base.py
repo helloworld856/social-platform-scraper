@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import threading
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from src.core.app_logging import get_logger
 
 from PyQt5.QtCore import QObject, Qt, pyqtSignal
 from PyQt5.QtWidgets import (
@@ -51,6 +54,7 @@ class SimpleToolWindow(QWidget):
         self.widgets: dict[str, Any] = {}
         self.stop_event = threading.Event()
         self.worker_thread: threading.Thread | None = None
+        self.logger = get_logger(self.__class__.__name__)
         self.signals = WorkerSignals()
         self.signals.log.connect(self.append_log)
         self.signals.finished.connect(self._finish_success)
@@ -197,11 +201,13 @@ class SimpleToolWindow(QWidget):
         self.log_text.clear()
         self.stop_event.clear()
         self._set_running(True)
+        self.logger.info("Task starting: %s", self.windowTitle())
         self.worker_thread = threading.Thread(target=self._run_worker, args=(values,), daemon=True)
         self.worker_thread.start()
 
     def stop(self) -> None:
         self.stop_event.set()
+        self.logger.info("Stop requested: %s", self.windowTitle())
         self.append_log("正在停止，请稍候...")
 
     def validate_values(self, values: dict[str, Any]) -> None:
@@ -223,11 +229,14 @@ class SimpleToolWindow(QWidget):
             returned = self.run_task(values, log_callback, finish_callback, self.stop_event)
             if returned is not None:
                 result["path"] = returned
+            self.logger.info("Task finished: %s output=%s", self.windowTitle(), result["path"] or "")
             self.signals.finished.emit(result["path"])
         except Exception as exc:
+            self.logger.error("Task failed: %s\n%s", self.windowTitle(), traceback.format_exc())
             self.signals.failed.emit(str(exc))
 
     def append_log(self, message: str) -> None:
+        self.logger.info("%s", message)
         self.log_text.append(str(message))
         self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
 

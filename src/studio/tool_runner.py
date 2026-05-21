@@ -4,12 +4,16 @@ import argparse
 import inspect
 import json
 import sys
+import traceback
 from pathlib import Path
 
 from PyQt5.QtWidgets import QApplication, QMessageBox, QWidget
 
+from src.core.app_logging import get_logger, setup_console_logging
 from src.studio.base import load_object
 from src.studio.registry import TOOLS
+
+logger = get_logger(__name__)
 
 
 def find_tool(tool_id: str):
@@ -32,7 +36,9 @@ def check_tool(tool_id: str) -> dict[str, str | bool]:
 
 
 def run_tool(tool_id: str) -> int:
+    setup_console_logging()
     tool = find_tool(tool_id)
+    logger.info("Starting tool: %s (%s)", tool.name, tool.tool_id)
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName(tool.name)
     try:
@@ -47,8 +53,11 @@ def run_tool(tool_id: str) -> int:
             raise TypeError(f"Entrypoint must return a QWidget: {tool.entrypoint}")
         window.setWindowTitle(tool.name)
         window.show()
-        return app.exec_()
+        exit_code = app.exec_()
+        logger.info("Tool closed: %s (%s) exit_code=%s", tool.name, tool.tool_id, exit_code)
+        return exit_code
     except Exception as exc:
+        logger.error("Tool startup failed: %s (%s)\n%s", tool.name, tool.tool_id, traceback.format_exc())
         try:
             QMessageBox.critical(None, "启动失败", f"{tool.name}\n\n{exc}")
         except Exception:

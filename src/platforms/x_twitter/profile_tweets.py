@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import random
 import re
 import time
 
@@ -23,12 +24,15 @@ from src.core import (
 
 CSV_FIELDS = ["序号", "帖子ID", "发布时间", "帖子内容", "帖子链接"]
 PAGE_LOAD_TIMEOUT = 30000
-INITIAL_LOAD_DELAY = 1.2
-SCROLL_DELAY = 0.65
-SLOW_SCROLL_DELAY = 1.2
+INITIAL_LOAD_DELAY = 2.0
+SCROLL_DELAY = 1.2
+SLOW_SCROLL_DELAY = 2.2
 SCROLL_PX = 2800
 NO_NEW_SCROLL_LIMIT = 10
 DEFAULT_MAX_SCROLLS = 300
+SAVE_BATCH_SIZE = 10
+COOLDOWN_MIN_SECONDS = 6.0
+COOLDOWN_MAX_SECONDS = 15.0
 
 BLOCKED_PROFILE_NAMES = {
     "home",
@@ -94,6 +98,38 @@ def format_tweet_time(raw_time: str) -> str:
         return value
 
 
+def normalize_tweet(tweet: dict[str, str]) -> dict[str, str]:
+    post_id = str(tweet.get("postId") or tweet.get("post_id") or "")
+    return {
+        "post_id": str(sanitize_csv_cell(post_id)),
+        "published_at": str(sanitize_csv_cell(format_tweet_time(tweet.get("publishedAt", tweet.get("published_at", ""))))),
+        "content": str(sanitize_csv_cell(tweet.get("content", ""))),
+        "url": str(sanitize_csv_cell(tweet.get("url", ""))),
+    }
+
+
+def row_from_tweet(index: int, tweet: dict[str, str]) -> dict[str, str]:
+    return {
+        "序号": str(index),
+        "帖子ID": tweet.get("post_id") or tweet.get("postId", ""),
+        "发布时间": tweet.get("published_at") or tweet.get("publishedAt", ""),
+        "帖子内容": tweet.get("content", ""),
+        "帖子链接": tweet.get("url", ""),
+    }
+
+
+def cooldown_after_batch(total_written: int, log_callback, stop_event=None):
+    if total_written <= 0 or total_written % SAVE_BATCH_SIZE != 0:
+        return
+    seconds = random.uniform(COOLDOWN_MIN_SECONDS, COOLDOWN_MAX_SECONDS)
+    log_line(log_callback, f"  已保存 {total_written} 条帖子，随机等待 {seconds:.1f} 秒。")
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if should_stop(stop_event):
+            break
+        time.sleep(min(0.5, deadline - time.time()))
+
+
 def extract_visible_profile_tweets(page, username: str) -> list[dict[str, str]]:
     username_lc = username.lower().lstrip("@")
     return page.evaluate(
@@ -151,7 +187,15 @@ def extract_visible_profile_tweets(page, username: str) -> list[dict[str, str]]:
     )
 
 
-def collect_profile_tweets(page, profile_url: str, max_scrolls: int, log_callback, stop_event=None) -> list[dict[str, str]]:
+def collect_profile_tweets(
+    page,
+    profile_url: str,
+    max_scrolls: int,
+    log_callback,
+    stop_event=None,
+    writer: XlsxRowWriter | None = None,
+    row_offset: int = 0,
+) -> list[dict[str, str]] | tuple[list[dict[str, str]], int, int]:
     username = extract_profile_username(profile_url)
     if not username:
         raise ValueError(f"无效的 X 博主主页链接：{profile_url}")
@@ -161,6 +205,8 @@ def collect_profile_tweets(page, profile_url: str, max_scrolls: int, log_callbac
     time.sleep(INITIAL_LOAD_DELAY)
 
     tweets: list[dict[str, str]] = []
+    pending_rows: list[dict[str, str]] = []
+    written_count = 0
     seen_ids = set()
     no_new_count = 0
     max_scrolls = max(1, int(max_scrolls or DEFAULT_MAX_SCROLLS))
@@ -177,15 +223,20 @@ def collect_profile_tweets(page, profile_url: str, max_scrolls: int, log_callbac
             if not post_id or post_id in seen_ids:
                 continue
             seen_ids.add(post_id)
-            tweets.append(
-                {
-                    "post_id": str(sanitize_csv_cell(post_id)),
-                    "published_at": str(sanitize_csv_cell(format_tweet_time(tweet.get("publishedAt", "")))),
-                    "content": str(sanitize_csv_cell(tweet.get("content", ""))),
-                    "url": str(sanitize_csv_cell(tweet.get("url", ""))),
-                }
-            )
+            normalized_tweet = normalize_tweet(tweet)
+            tweets.append(normalized_tweet)
             added += 1
+            if writer:
+                row_offset += 1
+                pending_rows.append(row_from_tweet(row_offset, normalized_tweet))
+                if len(pending_rows) >= SAVE_BATCH_SIZE:
+                    writer.writerows(pending_rows)
+                    writer.save()
+                    written_count += len(pending_rows)
+                    pending_rows.clear()
+                    cooldown_after_batch(written_count, log_callback, stop_event)
+                    if should_stop(stop_event):
+                        break
 
         if added:
             log_line(log_callback, f"  滚动 {scroll_index + 1}/{max_scrolls}：新增 {added} 条，累计 {len(tweets)} 条。")
@@ -196,24 +247,27 @@ def collect_profile_tweets(page, profile_url: str, max_scrolls: int, log_callbac
                 log_line(log_callback, f"  连续 {NO_NEW_SCROLL_LIMIT} 次没有新增帖子，停止。")
                 break
 
+        if should_stop(stop_event):
+            break
+
         page.evaluate(f"window.scrollBy(0, {SCROLL_PX})")
         time.sleep(SLOW_SCROLL_DELAY if no_new_count else SCROLL_DELAY)
 
+    if writer and pending_rows:
+        writer.writerows(pending_rows)
+        writer.save()
+        written_count += len(pending_rows)
+        pending_rows.clear()
+
+    if writer:
+        return tweets, row_offset, written_count
     return tweets
 
 
 def build_rows(tweets: list[dict[str, str]]) -> list[dict[str, str]]:
     rows = []
     for index, tweet in enumerate(tweets, 1):
-        rows.append(
-            {
-                "序号": str(index),
-                "帖子ID": tweet.get("post_id") or tweet.get("postId", ""),
-                "发布时间": tweet.get("published_at") or tweet.get("publishedAt", ""),
-                "帖子内容": tweet.get("content", ""),
-                "帖子链接": tweet.get("url", ""),
-            }
-        )
+        rows.append(row_from_tweet(index, tweet))
     return rows
 
 
@@ -260,14 +314,16 @@ def run_x_profile_tweets_spider(
                 username = extract_profile_username(profile_url)
                 log_line(log_callback, f"[{profile_index}/{len(profile_urls)}] 读取主页：{profile_url}")
                 try:
-                    tweets = collect_profile_tweets(page, profile_url, max_scrolls, log_callback, stop_event)
-                    rows = build_rows(tweets)
-                    for row in rows:
-                        row_offset += 1
-                        row["序号"] = str(row_offset)
-                    writer.writerows(rows)
-                    writer.save()
-                    log_line(log_callback, f"  完成 @{username}：写入 {len(rows)} 条帖子。")
+                    _, row_offset, written_count = collect_profile_tweets(
+                        page,
+                        profile_url,
+                        max_scrolls,
+                        log_callback,
+                        stop_event,
+                        writer=writer,
+                        row_offset=row_offset,
+                    )
+                    log_line(log_callback, f"  完成 @{username}：写入 {written_count} 条帖子。")
                 except PlaywrightTimeoutError:
                     log_line(log_callback, "  跳过：页面加载超时，请确认链接可打开且账号已登录。")
                 except Exception as exc:

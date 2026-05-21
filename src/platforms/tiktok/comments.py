@@ -549,7 +549,7 @@ def collect_visible_dom_comments(page, collector: CommentCollector, log_callback
                         timeText = normalize(timeEl.getAttribute('datetime') || timeEl.getAttribute('title') || timeEl.innerText || timeEl.textContent || '');
                     }
                     if (!timeText) {
-                        const timeMatch = (node.innerText || node.textContent || '').match(/(\\d{1,2}-\\d{1,2}|\\d+\s*(?:天|d|h|m|s|小时|分钟|秒|ago|前))/i);
+                        const timeMatch = (node.innerText || node.textContent || '').match(/(\\d{1,2}-\\d{1,2}|\\d+\\s*(?:天|d|h|m|s|小时|分钟|秒|ago|前))/i);
                         timeText = timeMatch ? timeMatch[1] : '';
                     }
                     const cid = node.getAttribute('data-id') ||

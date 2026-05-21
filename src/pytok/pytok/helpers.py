@@ -27,7 +27,7 @@ def extract_tag_contents(html):
             )[1].split("</script>")[0]
             return j_raw
         else:
-            sigi_json = re.search('<script id="SIGI_STATE" type="application\/json">(.*?)<\/script>', html)
+            sigi_json = re.search(r'<script id="SIGI_STATE" type="application/json">(.*?)</script>', html)
             #sigi_json = re.search(
                 #r'>\s*window\[[\'"]SIGI_STATE[\'"]\]\s*=\s*(?P<sigi_state>{.+});', html
             #)
@@ -75,5 +75,4 @@ def edit_url(url, new_params):
         params[k] = [v]
     # url encode params chosen to match the tiktok url encoding method
     return f"{url_parsed.scheme}://{url_parsed.netloc}{url_parsed.path}?{url_parsers.urlencode(params, doseq=True, safe='=', quote_via=url_parsers.quote)}"
-
 

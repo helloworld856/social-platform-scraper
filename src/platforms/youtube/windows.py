@@ -88,6 +88,42 @@ class YouTubeContextWindow(SimpleToolWindow):
         return run_youtube_paired_context_spider(values["api_key"], values["txt_path"], log_callback, finish_callback, stop_event)
 
 
+class YouTubeChannelWorksWindow(SimpleToolWindow):
+    def __init__(self) -> None:
+        super().__init__(
+            "YouTube 作者主页作品采集",
+            [
+                FieldSpec("api_key", "Google API Key", required=True),
+                FieldSpec(
+                    "channel_urls",
+                    "作者主页链接，每行一个",
+                    kind="multiline",
+                    placeholder="https://www.youtube.com/@username",
+                    required=True,
+                ),
+                FieldSpec("max_video_items", "每个作者最多视频/Shorts数", kind="int", default=500, minimum=1, maximum=5000),
+                FieldSpec("max_post_scrolls", "Posts 最大滚动次数", kind="int", default=120, minimum=1, maximum=5000),
+            ],
+        )
+
+    def validate_values(self, values):
+        if not _lines(values["channel_urls"]):
+            raise ValueError("至少需要输入一个 YouTube 作者主页链接。")
+
+    def run_task(self, values, log_callback, finish_callback, stop_event):
+        from src.platforms.youtube.channel_works import run_youtube_channel_works_spider
+
+        return run_youtube_channel_works_spider(
+            values["api_key"],
+            values["channel_urls"],
+            int(values["max_video_items"]),
+            int(values["max_post_scrolls"]),
+            log_callback,
+            finish_callback,
+            stop_event,
+        )
+
+
 class YouTubeCommentsWindow(SimpleToolWindow):
     def __init__(self) -> None:
         super().__init__(

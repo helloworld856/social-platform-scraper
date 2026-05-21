@@ -26,21 +26,26 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from src.core.app_logging import get_logger, setup_console_logging
 from src.studio.registry import TOOLS
+
+logger = get_logger(__name__)
 
 
 ALL_CATEGORY = "全部"
-CATEGORY_ORDER = [ALL_CATEGORY, "YouTube", "TikTok", "X/Twitter", "数据处理"]
+CATEGORY_ORDER = [ALL_CATEGORY, "YouTube", "TikTok", "X/Twitter", "Instagram", "Facebook", "数据处理"]
 
 
 class ThreePlatformCrawlerQtApp(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("三平台数据爬取工具")
+        self.setWindowTitle("多平台数据爬取工具")
         self.resize(1040, 640)
         self.setMinimumSize(860, 560)
 
         self.tools = list(TOOLS)
+        extra_categories = sorted({tool.category for tool in self.tools} - set(CATEGORY_ORDER))
+        self.category_order = [*CATEGORY_ORDER, *extra_categories]
         self.filtered_tools = []
         self.processes: dict[str, QProcess] = {}
         self.current_category = ALL_CATEGORY
@@ -57,9 +62,9 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
 
         header = QHBoxLayout()
         title_box = QVBoxLayout()
-        self.title_label = QLabel("三平台数据爬取工具")
+        self.title_label = QLabel("多平台数据爬取工具")
         self.title_label.setObjectName("titleLabel")
-        self.subtitle_label = QLabel("集中启动 YouTube、TikTok、X/Twitter 采集工具和数据处理工具")
+        self.subtitle_label = QLabel("集中启动 YouTube、TikTok、X/Twitter、Instagram 采集工具和数据处理工具")
         self.subtitle_label.setObjectName("subtitleLabel")
         title_box.addWidget(self.title_label)
         title_box.addWidget(self.subtitle_label)
@@ -80,7 +85,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
 
         self.nav = QListWidget()
         self.nav.setObjectName("navList")
-        for category in CATEGORY_ORDER:
+        for category in self.category_order:
             item = QListWidgetItem(self._category_label(category))
             item.setData(Qt.UserRole, category)
             self.nav.addItem(item)
@@ -335,37 +340,46 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         if tool is None:
             return
         if self._is_tool_running(tool.tool_id):
+            logger.info("Tool already running: %s (%s)", tool.name, tool.tool_id)
             QMessageBox.information(self, "工具已打开", f"{tool.name} 已经打开。")
             return
 
+        logger.info("Launching tool process: %s (%s)", tool.name, tool.tool_id)
         process = QProcess(self)
         process.setProgram(sys.executable)
         process.setArguments(["-m", "src.studio.tool_runner", "--tool-id", tool.tool_id])
         process.setWorkingDirectory(str(Path(__file__).resolve().parents[2]))
         process.setProcessChannelMode(QProcess.MergedChannels)
-        process.finished.connect(lambda exit_code, _exit_status, tool_id=tool.tool_id: self._tool_finished(tool_id))
-        process.errorOccurred.connect(lambda _error, tool_id=tool.tool_id: self._tool_error(tool_id))
+        process.finished.connect(lambda exit_code, exit_status, tool_id=tool.tool_id: self._tool_finished(tool_id, exit_code, exit_status))
+        process.errorOccurred.connect(lambda error, tool_id=tool.tool_id: self._tool_error(tool_id, error))
         process.readyReadStandardOutput.connect(lambda tool_id=tool.tool_id: self._read_tool_output(tool_id))
         self.processes[tool.tool_id] = process
         process.start()
 
         if not process.waitForStarted(3000):
             self.processes.pop(tool.tool_id, None)
+            logger.error("Failed to launch tool process: %s (%s)", tool.name, tool.tool_id)
             QMessageBox.critical(self, "启动失败", f"{tool.name} 未能启动。")
             return
 
+        logger.info("Tool process started: %s (%s)", tool.name, tool.tool_id)
         self.refresh_tools()
 
     def _read_tool_output(self, tool_id: str) -> None:
         process = self.processes.get(tool_id)
         if process is not None:
-            process.readAllStandardOutput()
+            text = bytes(process.readAllStandardOutput()).decode(errors="replace")
+            if text:
+                print(text, end="")
+                sys.stdout.flush()
 
-    def _tool_finished(self, tool_id: str) -> None:
+    def _tool_finished(self, tool_id: str, exit_code: int, exit_status) -> None:
+        logger.info("Tool process finished: %s exit_code=%s exit_status=%s", tool_id, exit_code, exit_status)
         self.processes.pop(tool_id, None)
         self.refresh_tools()
 
-    def _tool_error(self, tool_id: str) -> None:
+    def _tool_error(self, tool_id: str, error) -> None:
+        logger.error("Tool process error: %s error=%s", tool_id, error)
         self.processes.pop(tool_id, None)
         self.refresh_tools()
 
@@ -392,8 +406,10 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
 
 
 def main() -> None:
+    setup_console_logging()
+    logger.info("Starting main window")
     app = QApplication.instance() or QApplication(sys.argv)
-    app.setApplicationName("三平台数据爬取工具")
+    app.setApplicationName("多平台数据爬取工具")
     window = ThreePlatformCrawlerQtApp()
     window.show()
     raise SystemExit(app.exec_())
