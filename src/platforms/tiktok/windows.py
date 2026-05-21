@@ -67,6 +67,38 @@ class TikTokProfilesWindow(SimpleToolWindow):
         return run_tiktok_profile_spider(values["txt_path"], DEFAULT_TIKTOK_CDP_URL, log_callback, finish_callback, stop_event)
 
 
+class TikTokProfileVideosWindow(SimpleToolWindow):
+    def __init__(self) -> None:
+        super().__init__(
+            "TikTok 博主主页视频指标采集",
+            [
+                FieldSpec("txt_path", "博主主页 TXT", kind="file", required=True),
+                FieldSpec("start_date", "开始日期 YYYY-MM-DD", default=DEFAULT_START_DATE, required=True),
+                FieldSpec("end_date", "结束日期 YYYY-MM-DD", default=DEFAULT_END_DATE, required=True),
+            ],
+        )
+
+    def validate_values(self, values):
+        from src.platforms.tiktok.profile_videos import parse_date_range
+
+        if not Path(values["txt_path"]).exists():
+            raise ValueError("TXT 文件不存在。")
+        parse_date_range(values["start_date"], values["end_date"])
+
+    def run_task(self, values, log_callback, finish_callback, stop_event):
+        from src.platforms.tiktok.profile_videos import run_tiktok_profile_videos_spider
+
+        return run_tiktok_profile_videos_spider(
+            values["txt_path"],
+            values["start_date"],
+            values["end_date"],
+            DEFAULT_TIKTOK_CDP_URL,
+            log_callback,
+            finish_callback,
+            stop_event,
+        )
+
+
 class TikTokContextWindow(SimpleToolWindow):
     def __init__(self) -> None:
         super().__init__(
