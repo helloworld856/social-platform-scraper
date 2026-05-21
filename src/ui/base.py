@@ -236,7 +236,6 @@ class SimpleToolWindow(QWidget):
             self.signals.failed.emit(str(exc))
 
     def append_log(self, message: str) -> None:
-        self.logger.info("%s", message)
         self.log_text.append(str(message))
         self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
 
