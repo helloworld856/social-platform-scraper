@@ -349,7 +349,7 @@ def collect_video_tab_with_playwright(page, channel_url: str, tab: str, max_scro
     log_line(log_callback, f"  Playwright 读取 {label}：{url}")
     page.goto(url, wait_until="domcontentloaded", timeout=page_timeout)
     if interruptible_sleep(INITIAL_LOAD_DELAY, stop_event):
-        return works
+        return []
     wait_selector = 'a[href*="/watch?v="]' if tab == "videos" else 'a[href*="/shorts/"]'
     try:
         page.wait_for_selector(wait_selector, timeout=12000)
@@ -533,7 +533,7 @@ def collect_posts_with_playwright(page, channel_url: str, max_post_scrolls: int,
     url = posts_url(channel_url)
     page.goto(url, wait_until="domcontentloaded", timeout=page_timeout)
     if interruptible_sleep(INITIAL_LOAD_DELAY, stop_event):
-        return posts
+        return []
 
     posts: list[dict[str, str]] = []
     seen_links = set()
