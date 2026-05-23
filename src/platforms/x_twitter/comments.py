@@ -18,6 +18,7 @@ from src.core import (
     random_cooldown,
     sanitize_csv_cell,
     should_stop,
+    wait_if_paused,
 )
 
 TOP_COMMENT_LIMIT = 100
@@ -215,7 +216,7 @@ def find_main_tweet_article(page, target_status_id: str):
     for article in articles:
         if article_own_status_id(article) == target_status_id:
             return article
-    return articles[0] if articles else None
+    return None
 
 def recommendation_boundary_visible(page) -> bool:
     markers = [marker.lower() for marker in RECOMMENDATION_MARKERS]
@@ -396,7 +397,12 @@ def detect_non_text_content_type(article) -> str:
         return "投票"
     return "非文本"
 
-def extract_comments(page, tweet_url: str, max_count: int = DEFAULT_SCAN_LIMIT, log_callback=None, stop_event=None) -> list[dict[str, str]]:
+def extract_comments(page, tweet_url: str, max_count: int = DEFAULT_SCAN_LIMIT, log_callback=None, stop_event=None, scroll_pause=None, no_new_scroll_limit=None, pause_event=None) -> list[dict[str, str]]:
+    if scroll_pause is None:
+        scroll_pause = SCROLL_PAUSE
+    if no_new_scroll_limit is None:
+        no_new_scroll_limit = NO_NEW_SCROLL_LIMIT
+
     comments: list[dict[str, str]] = []
     seen_ids = set()
     no_new_count = 0
@@ -415,6 +421,8 @@ def extract_comments(page, tweet_url: str, max_count: int = DEFAULT_SCAN_LIMIT, 
 
     while len(comments) < max_count:
         if should_stop(stop_event):
+            break
+        if wait_if_paused(pause_event, stop_event):
             break
         articles = page.query_selector_all('article[data-testid="tweet"]')
         new_found = 0
@@ -519,8 +527,8 @@ def extract_comments(page, tweet_url: str, max_count: int = DEFAULT_SCAN_LIMIT, 
 
         if new_found == 0:
             no_new_count += 1
-            if no_new_count >= NO_NEW_SCROLL_LIMIT:
-                log_line(log_callback, f"  连续 {NO_NEW_SCROLL_LIMIT} 次滚动没有发现新评论，停止。")
+            if no_new_count >= no_new_scroll_limit:
+                log_line(log_callback, f"  连续 {no_new_scroll_limit} 次滚动没有发现新评论，停止。")
                 break
         else:
             no_new_count = 0
@@ -531,12 +539,14 @@ def extract_comments(page, tweet_url: str, max_count: int = DEFAULT_SCAN_LIMIT, 
 
         if len(comments) < max_count:
             page.evaluate("window.scrollBy(0, window.innerHeight * 2)")
-            time.sleep(SCROLL_PAUSE)
+            time.sleep(scroll_pause)
 
     log_line(log_callback, f"  评论抓取完成：{len(comments)} 条。")
     return comments
 
-def build_comment_rows(tweet_index: int, tweet_url: str, comments: list[dict[str, str]]) -> list[dict[str, str]]:
+def build_comment_rows(tweet_index: int, tweet_url: str, comments: list[dict[str, str]], top_limit=None) -> list[dict[str, str]]:
+    if top_limit is None:
+        top_limit = TOP_COMMENT_LIMIT
     top_comments = sorted(comments, key=lambda item: metric_to_int(item.get("likes", "0")), reverse=True)
     return [
         {
@@ -546,7 +556,7 @@ def build_comment_rows(tweet_index: int, tweet_url: str, comments: list[dict[str
             "评论内容": comment.get("content", ""),
             "评论发布时间": comment.get("time", ""),
         }
-        for comment in top_comments[:TOP_COMMENT_LIMIT]
+        for comment in top_comments[:top_limit]
     ]
 
 def run_x_top_comments_spider(
@@ -556,7 +566,16 @@ def run_x_top_comments_spider(
     log_callback,
     finish_callback,
     stop_event=None,
+    config=None,
+    pause_event=None,
 ):
+    if config is None:
+        config = {}
+    tweet_comment_top_limit = int(config.get("tweet_comment_top_limit", TOP_COMMENT_LIMIT))
+    page_load_timeout_val = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
+    scroll_pause_val = float(config.get("scroll_pause", SCROLL_PAUSE))
+    no_new_scroll_limit_val = int(config.get("no_new_scroll_limit", NO_NEW_SCROLL_LIMIT))
+
     completed_path = None
     page = None
     try:
@@ -569,7 +588,7 @@ def run_x_top_comments_spider(
             log_callback("未读取到有效的 X/Twitter 推文链接。")
             return
 
-        max_comments = max(TOP_COMMENT_LIMIT, int(max_comments or DEFAULT_SCAN_LIMIT))
+        max_comments = max(tweet_comment_top_limit, int(max_comments or DEFAULT_SCAN_LIMIT))
         output_path = build_output_path("x", f"x_tweet_comments_{time.strftime('%Y%m%d')}.xlsx")
         writer = XlsxRowWriter(output_path, CSV_FIELDS)
 
@@ -588,14 +607,16 @@ def run_x_top_comments_spider(
                 if should_stop(stop_event):
                     log_callback("任务已停止。")
                     break
+                if wait_if_paused(pause_event, stop_event):
+                    break
                 log_callback(f"[{index}/{len(tweet_urls)}] 读取推文：{tweet_url}")
                 try:
-                    page.goto(tweet_url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
-                    page.wait_for_selector('article[data-testid="tweet"]', timeout=PAGE_LOAD_TIMEOUT)
+                    page.goto(tweet_url, wait_until="domcontentloaded", timeout=page_load_timeout_val)
+                    page.wait_for_selector('article[data-testid="tweet"]', timeout=page_load_timeout_val)
                     time.sleep(3)
 
-                    comments = extract_comments(page, tweet_url, max_comments, log_callback, stop_event)
-                    rows = build_comment_rows(index, tweet_url, comments)
+                    comments = extract_comments(page, tweet_url, max_comments, log_callback, stop_event, scroll_pause=scroll_pause_val, no_new_scroll_limit=no_new_scroll_limit_val, pause_event=pause_event)
+                    rows = build_comment_rows(index, tweet_url, comments, top_limit=tweet_comment_top_limit)
                     writer.writerows(rows)
                     writer.save()
                     log_callback(f"  完成：扫描主楼评论 {len(comments)} 条，写入点赞量最高的 {len(rows)} 条。")

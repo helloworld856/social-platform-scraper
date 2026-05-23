@@ -20,6 +20,7 @@ from src.core import (
     connect_existing_chromium,
     sanitize_csv_cell,
     should_stop,
+    wait_if_paused,
 )
 
 
@@ -299,12 +300,21 @@ def is_instagram_unavailable_page(page) -> bool:
     )
 
 
-def collect_profile_work_links(page, profile_url: str, max_works: int, max_scrolls: int, log_callback, stop_event=None) -> list[dict[str, str]]:
+def collect_profile_work_links(page, profile_url: str, max_works: int, max_scrolls: int, log_callback, stop_event=None, pause_event=None, page_timeout=None, scroll_delay=None, scroll_px=None, no_new_limit=None) -> list[dict[str, str]]:
+    if page_timeout is None:
+        page_timeout = PAGE_LOAD_TIMEOUT
+    if scroll_delay is None:
+        scroll_delay = SCROLL_DELAY
+    if scroll_px is None:
+        scroll_px = SCROLL_PX
+    if no_new_limit is None:
+        no_new_limit = NO_NEW_SCROLL_LIMIT
+
     username = extract_username(profile_url)
     if not username:
         raise ValueError(f"无效的 Instagram 作者主页链接：{profile_url}")
 
-    page.goto(clean_profile_url(profile_url), wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
+    page.goto(clean_profile_url(profile_url), wait_until="domcontentloaded", timeout=page_timeout)
     time.sleep(INITIAL_LOAD_DELAY)
     try:
         page.wait_for_selector('main, article, a[href*="/p/"], a[href*="/reel/"], a[href*="/tv/"]', timeout=12000)
@@ -321,7 +331,8 @@ def collect_profile_work_links(page, profile_url: str, max_works: int, max_scrol
     for scroll_index in range(max_scrolls):
         if should_stop(stop_event) or len(works) >= max_works:
             break
-
+        if wait_if_paused(pause_event, stop_event):
+            break
         added = 0
         for item in extract_visible_work_links(page):
             link = normalize_work_url(item.get("link", ""))
@@ -346,12 +357,12 @@ def collect_profile_work_links(page, profile_url: str, max_works: int, max_scrol
                     f"  第一次扫描未发现作品链接：url={info.get('url')} title={info.get('title')} "
                     f"links={info.get('linkCount')} postLinks={info.get('postLinkCount')}",
                 )
-            if no_new_count >= NO_NEW_SCROLL_LIMIT:
-                log_line(log_callback, f"  连续 {NO_NEW_SCROLL_LIMIT} 次没有新增作品，停止滚动。")
+            if no_new_count >= no_new_limit:
+                log_line(log_callback, f"  连续 {no_new_limit} 次没有新增作品，停止滚动。")
                 break
 
-        page.evaluate(f"window.scrollBy(0, {SCROLL_PX})")
-        time.sleep(SCROLL_DELAY)
+        page.evaluate(f"window.scrollBy(0, {scroll_px})")
+        time.sleep(scroll_delay)
 
     return works
 
@@ -579,12 +590,14 @@ def extract_detail_from_page(page, fallback_media_type: str) -> dict[str, str]:
     )
 
 
-def enrich_work_detail(page, work: dict[str, str], log_callback, stop_event=None) -> dict[str, str]:
+def enrich_work_detail(page, work: dict[str, str], log_callback, stop_event=None, page_timeout=None) -> dict[str, str]:
+    if page_timeout is None:
+        page_timeout = PAGE_LOAD_TIMEOUT
     last_rate_limit = False
     for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
         if should_stop(stop_event):
             raise InstagramStoppedError("任务已停止")
-        response = page.goto(work["link"], wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
+        response = page.goto(work["link"], wait_until="domcontentloaded", timeout=page_timeout)
         time.sleep(INITIAL_LOAD_DELAY)
         if should_stop(stop_event):
             raise InstagramStoppedError("任务已停止")
@@ -655,7 +668,20 @@ def run_instagram_profile_works_spider(
     log_callback=None,
     finish_callback=None,
     stop_event=None,
+    config=None,
+    pause_event=None,
 ):
+    if config is None:
+        config = {}
+    page_timeout_val = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
+    scroll_delay_val = float(config.get("scroll_delay", SCROLL_DELAY))
+    scroll_px_val = int(config.get("scroll_px", SCROLL_PX))
+    no_new_limit_val = int(config.get("no_new_scroll_limit", NO_NEW_SCROLL_LIMIT))
+    save_batch_val = int(config.get("save_batch_size", SAVE_BATCH_SIZE))
+    cooldown_min_val = float(config.get("cooldown_min", COOLDOWN_MIN_SECONDS))
+    cooldown_max_val = float(config.get("cooldown_max", COOLDOWN_MAX_SECONDS))
+    max_scrolls = int(config.get("max_scrolls", max_scrolls))
+
     completed_path = None
     page = None
     try:
@@ -687,13 +713,15 @@ def run_instagram_profile_works_spider(
                 if should_stop(stop_event):
                     log_line(log_callback, "任务已停止。")
                     break
+                if wait_if_paused(pause_event, stop_event):
+                    break
 
                 username = extract_username(profile_url)
                 log_line(log_callback, f"[{profile_index}/{len(profile_urls)}] 读取作者主页：{profile_url}")
                 pending_rows = []
                 written_count = 0
                 try:
-                    links = collect_profile_work_links(page, profile_url, max_works, max_scrolls, log_callback, stop_event)
+                    links = collect_profile_work_links(page, profile_url, max_works, max_scrolls, log_callback, stop_event, pause_event, page_timeout=page_timeout_val, scroll_delay=scroll_delay_val, scroll_px=scroll_px_val, no_new_limit=no_new_limit_val)
                     log_line(log_callback, f"  @{username} 共收集到 {len(links)} 条作品链接，开始读取详情。")
                     if links:
                         interruptible_random_sleep(
@@ -707,12 +735,14 @@ def run_instagram_profile_works_spider(
                     for item_index, work in enumerate(links, 1):
                         if should_stop(stop_event):
                             break
+                        if wait_if_paused(pause_event, stop_event):
+                            break
                         try:
-                            detail = enrich_work_detail(page, work, log_callback, stop_event)
+                            detail = enrich_work_detail(page, work, log_callback, stop_event, page_timeout=page_timeout_val)
                             pending_rows.append(row_from_work(serial_number, detail))
                             serial_number += 1
                             log_line(log_callback, f"    [{item_index}/{len(links)}] 完成：{work['link']}")
-                            if len(pending_rows) >= SAVE_BATCH_SIZE:
+                            if len(pending_rows) >= save_batch_val:
                                 writer.writerows(pending_rows)
                                 writer.save()
                                 written_count += len(pending_rows)
@@ -720,9 +750,9 @@ def run_instagram_profile_works_spider(
                                 log_line(log_callback, f"    已保存 {written_count} 条，准备随机等待。")
                                 cooldown_if_needed(
                                     item_index,
-                                    SAVE_BATCH_SIZE,
-                                    COOLDOWN_MIN_SECONDS,
-                                    COOLDOWN_MAX_SECONDS,
+                                    save_batch_val,
+                                    cooldown_min_val,
+                                    cooldown_max_val,
                                     log_callback,
                                     stop_event,
                                 )

@@ -19,6 +19,7 @@ from src.core import (
     expand_compact_number,
     random_cooldown,
     should_stop,
+    wait_if_paused,
 )
 from src.platforms.x_twitter.comments import extract_comments
 
@@ -101,9 +102,11 @@ def article_has_status_id(article, status_id: str) -> bool:
         return False
 
 
-def find_target_article(page, status_id: str):
+def find_target_article(page, status_id: str, page_timeout=None):
+    if page_timeout is None:
+        page_timeout = PAGE_LOAD_TIMEOUT
     try:
-        page.wait_for_selector('article[data-testid="tweet"], article', timeout=PAGE_LOAD_TIMEOUT)
+        page.wait_for_selector('article[data-testid="tweet"], article', timeout=page_timeout)
     except Exception:
         return None
 
@@ -163,16 +166,18 @@ def extract_article_payload(article) -> dict[str, str]:
     )
 
 
-def collect_tweet_metrics(page, tweet_url: str) -> dict[str, str]:
+def collect_tweet_metrics(page, tweet_url: str, page_timeout=None) -> dict[str, str]:
+    if page_timeout is None:
+        page_timeout = PAGE_LOAD_TIMEOUT
     normalized_url = clean_tweet_url(tweet_url)
     status_id = extract_status_id(normalized_url)
     if not status_id:
         raise ValueError("无法解析推文 ID")
 
-    page.goto(normalized_url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
+    page.goto(normalized_url, wait_until="domcontentloaded", timeout=page_timeout)
     time.sleep(2.5)
 
-    article = find_target_article(page, status_id)
+    article = find_target_article(page, status_id, page_timeout=page_timeout)
     if article is None:
         raise RuntimeError("未找到目标推文 DOM")
 
@@ -195,7 +200,14 @@ def run_x_tweet_metrics_spider(
     log_callback=None,
     finish_callback=None,
     stop_event=None,
+    config=None,
+    pause_event=None,
 ):
+    if config is None:
+        config = {}
+    page_load_timeout_val = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
+    tweet_comment_top_limit = int(config.get("tweet_comment_top_limit", 100))
+
     completed_path = None
     page = None
     try:
@@ -209,7 +221,7 @@ def run_x_tweet_metrics_spider(
             return
 
         get_comments_bool = get_comments_str == "是"
-        max_comments_val = max(10, int(max_comments))
+        scan_limit = max(int(max_comments), tweet_comment_top_limit)
 
         output_path = build_output_path("x", f"x_tweet_metrics_{time.strftime('%Y%m%d')}.xlsx")
         if get_comments_bool:
@@ -232,6 +244,8 @@ def run_x_tweet_metrics_spider(
                 if should_stop(stop_event):
                     log_line(log_callback, "任务已停止。")
                     break
+                if wait_if_paused(pause_event, stop_event):
+                    break
 
                 normalized_url = clean_tweet_url(tweet_url)
                 row = {
@@ -245,12 +259,13 @@ def run_x_tweet_metrics_spider(
                 }
                 log_line(log_callback, f"[{index}/{len(tweet_urls)}] 读取推文：{normalized_url}")
                 try:
-                    row.update(collect_tweet_metrics(page, normalized_url))
+                    row.update(collect_tweet_metrics(page, normalized_url, page_timeout=page_load_timeout_val))
                     
                     if get_comments_bool:
                         try:
-                            comments = extract_comments(page, normalized_url, max_comments_val, log_callback, stop_event)
-                            for comment in comments:
+                            comments = extract_comments(page, normalized_url, scan_limit, log_callback, stop_event, pause_event=pause_event)
+                            comments.sort(key=lambda item: int(item.get("likes", "0") or 0), reverse=True)
+                            for comment in comments[:tweet_comment_top_limit]:
                                 comment_row = {
                                     "序号": row["序号"],
                                     "推文链接": normalized_url,

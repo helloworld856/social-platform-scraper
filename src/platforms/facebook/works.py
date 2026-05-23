@@ -20,6 +20,7 @@ from src.core import (
     connect_existing_chromium,
     sanitize_csv_cell,
     should_stop,
+    wait_if_paused,
 )
 
 
@@ -341,8 +342,17 @@ def facebook_page_debug_info(page) -> dict[str, str | int]:
     )
 
 
-def collect_section_work_links(page, section_url: str, max_works: int, max_scrolls: int, log_callback, stop_event=None) -> list[dict[str, str]]:
-    page.goto(section_url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
+def collect_section_work_links(page, section_url: str, max_works: int, max_scrolls: int, log_callback, stop_event=None, pause_event=None, page_timeout=None, scroll_delay=None, scroll_px=None, no_new_limit=None) -> list[dict[str, str]]:
+    if page_timeout is None:
+        page_timeout = PAGE_LOAD_TIMEOUT
+    if scroll_delay is None:
+        scroll_delay = SCROLL_DELAY
+    if scroll_px is None:
+        scroll_px = SCROLL_PX
+    if no_new_limit is None:
+        no_new_limit = NO_NEW_SCROLL_LIMIT
+
+    page.goto(section_url, wait_until="domcontentloaded", timeout=page_timeout)
     time.sleep(INITIAL_LOAD_DELAY)
 
     works: list[dict[str, str]] = []
@@ -352,6 +362,8 @@ def collect_section_work_links(page, section_url: str, max_works: int, max_scrol
 
     for scroll_index in range(max(1, int(max_scrolls or DEFAULT_MAX_SCROLLS))):
         if should_stop(stop_event) or len(works) >= max_works:
+            break
+        if wait_if_paused(pause_event, stop_event):
             break
 
         added = 0
@@ -378,16 +390,16 @@ def collect_section_work_links(page, section_url: str, max_works: int, max_scrol
                     f"    首次扫描未发现作品链接：url={info.get('url')} title={info.get('title')} "
                     f"links={info.get('linkCount')} articles={info.get('articleCount')}",
                 )
-            if no_new_count >= NO_NEW_SCROLL_LIMIT:
+            if no_new_count >= no_new_limit:
                 break
 
-        page.evaluate(f"window.scrollBy(0, {SCROLL_PX})")
-        time.sleep(SCROLL_DELAY)
+        page.evaluate(f"window.scrollBy(0, {scroll_px})")
+        time.sleep(scroll_delay)
 
     return works
 
 
-def collect_profile_work_links(page, profile_url: str, max_works: int, max_scrolls: int, log_callback, stop_event=None) -> list[dict[str, str]]:
+def collect_profile_work_links(page, profile_url: str, max_works: int, max_scrolls: int, log_callback, stop_event=None, pause_event=None, page_timeout=None, scroll_delay=None, scroll_px=None, no_new_limit=None) -> list[dict[str, str]]:
     urls = profile_section_urls(profile_url)
     if not urls:
         raise ValueError(f"无效的 Facebook 作者主页链接：{profile_url}")
@@ -401,7 +413,7 @@ def collect_profile_work_links(page, profile_url: str, max_works: int, max_scrol
         if should_stop(stop_event) or len(merged) >= max_works:
             break
         try:
-            section_items = collect_section_work_links(page, section_url, max_works - len(merged), max_scrolls, log_callback, stop_event)
+            section_items = collect_section_work_links(page, section_url, max_works - len(merged), max_scrolls, log_callback, stop_event, pause_event, page_timeout=page_timeout, scroll_delay=scroll_delay, scroll_px=scroll_px, no_new_limit=no_new_limit)
         except PlaywrightTimeoutError:
             log_line(log_callback, f"  跳过页面：加载超时 {section_url}")
             continue
@@ -556,8 +568,10 @@ def extract_detail_from_page(page, fallback_media_type: str) -> dict[str, str]:
     )
 
 
-def enrich_work_detail(page, work: dict[str, str]) -> dict[str, str]:
-    page.goto(work["link"], wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
+def enrich_work_detail(page, work: dict[str, str], page_timeout=None) -> dict[str, str]:
+    if page_timeout is None:
+        page_timeout = PAGE_LOAD_TIMEOUT
+    page.goto(work["link"], wait_until="domcontentloaded", timeout=page_timeout)
     time.sleep(INITIAL_LOAD_DELAY)
     detail = extract_detail_from_page(page, work.get("media_type", ""))
     media_type = detail.get("mediaType") or work.get("media_type", "")
@@ -585,10 +599,14 @@ def row_from_work(index: int, work: dict[str, str]) -> dict[str, str]:
     }
 
 
-def cooldown_after_batch(batch_count: int, log_callback, stop_event=None):
-    if batch_count <= 0 or batch_count % SAVE_BATCH_SIZE != 0:
+def cooldown_after_batch(batch_count: int, log_callback, stop_event=None, cooldown_min=None, cooldown_max=None):
+    if cooldown_min is None:
+        cooldown_min = COOLDOWN_MIN_SECONDS
+    if cooldown_max is None:
+        cooldown_max = COOLDOWN_MAX_SECONDS
+    if batch_count <= 0:
         return
-    seconds = random.uniform(COOLDOWN_MIN_SECONDS, COOLDOWN_MAX_SECONDS)
+    seconds = random.uniform(cooldown_min, cooldown_max)
     log_line(log_callback, f"    已保存 {batch_count} 条，随机等待 {seconds:.1f} 秒。")
     deadline = time.time() + seconds
     while time.time() < deadline:
@@ -605,7 +623,20 @@ def run_facebook_profile_works_spider(
     log_callback=None,
     finish_callback=None,
     stop_event=None,
+    config=None,
+    pause_event=None,
 ):
+    if config is None:
+        config = {}
+    page_timeout_val = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
+    scroll_delay_val = float(config.get("scroll_delay", SCROLL_DELAY))
+    scroll_px_val = int(config.get("scroll_px", SCROLL_PX))
+    no_new_limit_val = int(config.get("no_new_scroll_limit", NO_NEW_SCROLL_LIMIT))
+    save_batch_val = int(config.get("save_batch_size", SAVE_BATCH_SIZE))
+    cooldown_min_val = float(config.get("cooldown_min", COOLDOWN_MIN_SECONDS))
+    cooldown_max_val = float(config.get("cooldown_max", COOLDOWN_MAX_SECONDS))
+    max_scrolls = int(config.get("max_scrolls", max_scrolls))
+
     completed_path = None
     page = None
     try:
@@ -637,28 +668,32 @@ def run_facebook_profile_works_spider(
                 if should_stop(stop_event):
                     log_line(log_callback, "任务已停止。")
                     break
+                if wait_if_paused(pause_event, stop_event):
+                    break
 
                 label = profile_label(profile_url)
                 log_line(log_callback, f"[{profile_index}/{len(profile_urls)}] 读取作者主页：{profile_url}")
                 pending_rows = []
                 written_count = 0
                 try:
-                    links = collect_profile_work_links(page, profile_url, max_works, max_scrolls, log_callback, stop_event)
+                    links = collect_profile_work_links(page, profile_url, max_works, max_scrolls, log_callback, stop_event, pause_event, page_timeout=page_timeout_val, scroll_delay=scroll_delay_val, scroll_px=scroll_px_val, no_new_limit=no_new_limit_val)
                     log_line(log_callback, f"  {label} 共收集到 {len(links)} 条作品链接，开始读取详情。")
                     for item_index, work in enumerate(links, 1):
                         if should_stop(stop_event):
                             break
+                        if wait_if_paused(pause_event, stop_event):
+                            break
                         try:
-                            detail = enrich_work_detail(page, work)
+                            detail = enrich_work_detail(page, work, page_timeout=page_timeout_val)
                             pending_rows.append(row_from_work(serial_number, detail))
                             serial_number += 1
                             log_line(log_callback, f"    [{item_index}/{len(links)}] 完成：{work['link']}")
-                            if len(pending_rows) >= SAVE_BATCH_SIZE:
+                            if len(pending_rows) >= save_batch_val:
                                 writer.writerows(pending_rows)
                                 writer.save()
                                 written_count += len(pending_rows)
                                 pending_rows.clear()
-                                cooldown_after_batch(written_count, log_callback, stop_event)
+                                cooldown_after_batch(written_count, log_callback, stop_event, cooldown_min=cooldown_min_val, cooldown_max=cooldown_max_val)
                         except PlaywrightTimeoutError:
                             log_line(log_callback, f"    跳过：作品详情页加载超时：{work['link']}")
                         except Exception as exc:

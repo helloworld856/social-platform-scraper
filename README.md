@@ -1,6 +1,6 @@
-# 三平台数据爬取工具
+# 五平台数据爬取工具
 
-一个 PyQt 桌面工具台，用于集中启动 YouTube、TikTok、X/Twitter 三个平台的数据采集工具，并提供 AIGC 标题判断、关键词 XLSX 合并等数据处理功能。
+一个 PyQt 桌面工具台，用于集中启动 YouTube、TikTok、X/Twitter、Instagram、Facebook 五个平台的数据采集工具，并提供 AIGC 标题判断、关键词 XLSX 合并等数据处理功能。
 
 ## 环境要求
 
@@ -53,8 +53,11 @@ DEEPSEEK_MODEL_NAME=deepseek-chat
 - `src/platforms/tiktok/`：TikTok 采集工具。
 - `src/platforms/x_twitter/`：X/Twitter 采集工具。
 - `src/processing/`：AIGC 标题判断、关键词 XLSX 合并。
-- `src/x_tweet_scraper.py`：独立的 X 博主主页帖文采集脚本，可作为备用脚本使用。
-- `user_data/`：TikTok 和 X/Twitter 的浏览器登录态目录。
+- `src/platforms/instagram/`：Instagram 采集工具。
+- `src/platforms/facebook/`：Facebook 采集工具。
+- `src/ui/config_dialog.py`：各工具的参数配置对话框。
+- `test/`：UI 逻辑测试和暂停功能测试。
+- `user_data/`：各平台浏览器登录态目录。
 - `output/`：默认输出目录。
 
 ## 通用输入规则
@@ -484,7 +487,9 @@ tiktok_top_comments_YYYYMMDD.xlsx
 
 ## 运行建议
 
-- 首次使用 TikTok 或 X/Twitter 前，先运行任意对应平台工具，让程序打开浏览器，然后完成登录。
+- 首次使用 TikTok、X/Twitter、Instagram 或 Facebook 前，先运行任意对应平台工具，让程序打开浏览器，然后完成登录。
+- 每个工具窗口提供「参数配置」按钮，可在启动任务前调整爬取行为参数（超时、等待间隔、停止阈值等）。修改后的参数会保留到下次打开。
+- 任务运行中可点击「暂停」暂停采集并保留当前进度，点击「继续」从暂停点恢复；点击「停止」彻底终止任务。
 - 不要频繁并发运行多个 X/Twitter 或 TikTok 工具，容易触发平台限制。
 - 长列表任务建议分批输入，便于排查失败链接。
 - 如果采集到 0 条，先手动打开对应链接确认页面是否公开可见、账号是否登录、评论区是否存在。

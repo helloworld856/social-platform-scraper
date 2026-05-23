@@ -16,7 +16,7 @@ except ModuleNotFoundError:
     PlaywrightTimeoutError = TimeoutError
     sync_playwright = None
 
-from src.core import DEFAULT_X_CDP_URL, MultiSheetXlsxWriter, XlsxRowWriter, build_output_path, connect_existing_chromium, sanitize_csv_cell, should_stop
+from src.core import DEFAULT_X_CDP_URL, MultiSheetXlsxWriter, XlsxRowWriter, build_output_path, connect_existing_chromium, sanitize_csv_cell, should_stop, wait_if_paused
 from src.platforms.youtube.comments import fetch_top_level_comments
 from src.platforms.youtube.keyword import parse_date_range
 
@@ -145,14 +145,16 @@ def fetch_channel_item(youtube, channel_url: str) -> dict:
     return items[0] if items else {}
 
 
-def collect_upload_video_ids(youtube, uploads_playlist_id: str, max_video_items: int, limit_time_bool: bool, start_dt, end_dt, log_callback, stop_event=None) -> list[str]:
+def collect_upload_video_ids(youtube, uploads_playlist_id: str, max_video_items: int, limit_time_bool: bool, start_dt, end_dt, log_callback, stop_event=None, pause_event=None) -> list[str]:
     video_ids: list[str] = []
     seen = set()
     page_token = None
-    max_video_items = max(1, int(max_video_items or DEFAULT_MAX_VIDEO_ITEMS))
+    max_video_items = max(1, int(max_video_items if max_video_items is not None else DEFAULT_MAX_VIDEO_ITEMS))
 
     while len(video_ids) < max_video_items:
         if should_stop(stop_event):
+            break
+        if wait_if_paused(pause_event, stop_event):
             break
         response = youtube.playlistItems().list(
             part="contentDetails",
@@ -193,10 +195,12 @@ def collect_upload_video_ids(youtube, uploads_playlist_id: str, max_video_items:
     return video_ids
 
 
-def video_rows_from_api(youtube, video_ids: list[str], stop_event=None) -> list[dict[str, str]]:
+def video_rows_from_api(youtube, video_ids: list[str], stop_event=None, pause_event=None) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     for batch in chunked(video_ids, 50):
         if should_stop(stop_event):
+            break
+        if wait_if_paused(pause_event, stop_event):
             break
         response = youtube.videos().list(part="snippet,statistics", id=",".join(batch), maxResults=50).execute()
         for item in response.get("items", []):
@@ -220,7 +224,7 @@ def video_rows_from_api(youtube, video_ids: list[str], stop_event=None) -> list[
     return rows
 
 
-def collect_video_works_with_api(youtube, channel_url: str, max_video_items: int, limit_time_bool: bool, start_dt, end_dt, log_callback, stop_event=None) -> list[dict[str, str]]:
+def collect_video_works_with_api(youtube, channel_url: str, max_video_items: int, limit_time_bool: bool, start_dt, end_dt, log_callback, stop_event=None, pause_event=None) -> list[dict[str, str]]:
     channel_item = fetch_channel_item(youtube, channel_url)
     if not channel_item:
         log_line(log_callback, "  API 未找到频道信息。")
@@ -238,8 +242,8 @@ def collect_video_works_with_api(youtube, channel_url: str, max_video_items: int
     title = channel_item.get("snippet", {}).get("title", "")
     if title:
         log_line(log_callback, f"  API 识别频道：{title}")
-    video_ids = collect_upload_video_ids(youtube, uploads_playlist_id, max_video_items, limit_time_bool, start_dt, end_dt, log_callback, stop_event)
-    rows = video_rows_from_api(youtube, video_ids, stop_event)
+    video_ids = collect_upload_video_ids(youtube, uploads_playlist_id, max_video_items, limit_time_bool, start_dt, end_dt, log_callback, stop_event, pause_event)
+    rows = video_rows_from_api(youtube, video_ids, stop_event, pause_event)
     log_line(log_callback, f"  API 视频类作品完成：{len(rows)} 条。")
     return rows
 
@@ -328,11 +332,21 @@ def extract_visible_video_cards(page, tab: str) -> list[dict[str, str]]:
     )
 
 
-def collect_video_tab_with_playwright(page, channel_url: str, tab: str, max_scrolls: int, log_callback, stop_event=None) -> list[dict[str, str]]:
+def collect_video_tab_with_playwright(page, channel_url: str, tab: str, max_scrolls: int, log_callback, stop_event=None, pause_event=None,
+                                      page_timeout=None, scroll_delay=None, no_new_limit=None, scroll_px=None) -> list[dict[str, str]]:
+    if page_timeout is None:
+        page_timeout = PAGE_LOAD_TIMEOUT
+    if scroll_delay is None:
+        scroll_delay = POST_SCROLL_DELAY
+    if no_new_limit is None:
+        no_new_limit = NO_NEW_POST_LIMIT
+    if scroll_px is None:
+        scroll_px = POST_SCROLL_PX
+
     url = tab_url(channel_url, tab)
     label = "Videos" if tab == "videos" else "Shorts"
     log_line(log_callback, f"  Playwright 读取 {label}：{url}")
-    page.goto(url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
+    page.goto(url, wait_until="domcontentloaded", timeout=page_timeout)
     time.sleep(INITIAL_LOAD_DELAY)
     wait_selector = 'a[href*="/watch?v="]' if tab == "videos" else 'a[href*="/shorts/"]'
     try:
@@ -343,10 +357,12 @@ def collect_video_tab_with_playwright(page, channel_url: str, tab: str, max_scro
     works: list[dict[str, str]] = []
     seen_links = set()
     no_new_count = 0
-    max_scrolls = max(1, int(max_scrolls or DEFAULT_MAX_POST_SCROLLS))
+    max_scrolls = max(1, int(max_scrolls if max_scrolls is not None else DEFAULT_MAX_POST_SCROLLS))
 
     for scroll_index in range(max_scrolls):
         if should_stop(stop_event):
+            break
+        if wait_if_paused(pause_event, stop_event):
             break
 
         added = 0
@@ -372,12 +388,12 @@ def collect_video_tab_with_playwright(page, channel_url: str, tab: str, max_scro
             no_new_count = 0
         else:
             no_new_count += 1
-            if no_new_count >= NO_NEW_POST_LIMIT:
-                log_line(log_callback, f"    连续 {NO_NEW_POST_LIMIT} 次没有新增，停止 {label}。")
+            if no_new_count >= no_new_limit:
+                log_line(log_callback, f"    连续 {no_new_limit} 次没有新增，停止 {label}。")
                 break
 
-        page.evaluate(f"window.scrollBy(0, {POST_SCROLL_PX})")
-        time.sleep(POST_SCROLL_DELAY)
+        page.evaluate(f"window.scrollBy(0, {scroll_px})")
+        time.sleep(scroll_delay)
 
     return works
 
@@ -500,19 +516,31 @@ def extract_visible_posts(page) -> list[dict[str, str]]:
     )
 
 
-def collect_posts_with_playwright(page, channel_url: str, max_post_scrolls: int, log_callback, stop_event=None) -> list[dict[str, str]]:
+def collect_posts_with_playwright(page, channel_url: str, max_post_scrolls: int, log_callback, stop_event=None, pause_event=None,
+                                   page_timeout=None, scroll_delay=None, no_new_limit=None, scroll_px=None) -> list[dict[str, str]]:
+    if page_timeout is None:
+        page_timeout = PAGE_LOAD_TIMEOUT
+    if scroll_delay is None:
+        scroll_delay = POST_SCROLL_DELAY
+    if no_new_limit is None:
+        no_new_limit = NO_NEW_POST_LIMIT
+    if scroll_px is None:
+        scroll_px = POST_SCROLL_PX
+
     url = posts_url(channel_url)
-    page.goto(url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
+    page.goto(url, wait_until="domcontentloaded", timeout=page_timeout)
     time.sleep(INITIAL_LOAD_DELAY)
 
     posts: list[dict[str, str]] = []
     seen_links = set()
     no_new_count = 0
-    max_post_scrolls = max(1, int(max_post_scrolls or DEFAULT_MAX_POST_SCROLLS))
+    max_post_scrolls = max(1, int(max_post_scrolls if max_post_scrolls is not None else DEFAULT_MAX_POST_SCROLLS))
     log_line(log_callback, f"  Playwright 读取 Posts：{url}")
 
     for scroll_index in range(max_post_scrolls):
         if should_stop(stop_event):
+            break
+        if wait_if_paused(pause_event, stop_event):
             break
 
         added = 0
@@ -538,12 +566,12 @@ def collect_posts_with_playwright(page, channel_url: str, max_post_scrolls: int,
             no_new_count = 0
         else:
             no_new_count += 1
-            if no_new_count >= NO_NEW_POST_LIMIT:
-                log_line(log_callback, f"    连续 {NO_NEW_POST_LIMIT} 次没有新增，停止 Posts。")
+            if no_new_count >= no_new_limit:
+                log_line(log_callback, f"    连续 {no_new_limit} 次没有新增，停止 Posts。")
                 break
 
-        page.evaluate(f"window.scrollBy(0, {POST_SCROLL_PX})")
-        time.sleep(POST_SCROLL_DELAY)
+        page.evaluate(f"window.scrollBy(0, {scroll_px})")
+        time.sleep(scroll_delay)
 
     return posts
 
@@ -572,7 +600,17 @@ def run_youtube_channel_works_spider(
     log_callback=None,
     finish_callback=None,
     stop_event=None,
+    config: dict | None = None,
+    pause_event=None,
 ):
+    if config is None:
+        config = {}
+    page_timeout = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
+    scroll_delay_val = float(config.get("scroll_delay", POST_SCROLL_DELAY))
+    no_new_limit = int(config.get("no_new_post_limit", NO_NEW_POST_LIMIT))
+    scroll_px_val = int(config.get("scroll_px", POST_SCROLL_PX))
+    max_post_scrolls = int(config.get("max_post_scrolls", max_post_scrolls))
+
     completed_path = None
     browser = None
     page = None
@@ -621,6 +659,8 @@ def run_youtube_channel_works_spider(
             if should_stop(stop_event):
                 log_line(log_callback, "任务已停止。")
                 break
+            if wait_if_paused(pause_event, stop_event):
+                break
 
             log_line(log_callback, f"[{channel_index}/{len(channel_urls)}] 读取作者主页：{channel_url}")
             works: list[dict[str, str]] = []
@@ -630,7 +670,7 @@ def run_youtube_channel_works_spider(
                 log_line(log_callback, "  YouTube API 不可用，尝试用浏览器读取 Videos/Shorts。")
             else:
                 try:
-                    works = collect_video_works_with_api(youtube, channel_url, max_video_items, limit_time_bool, start_dt, end_dt, log_callback, stop_event)
+                    works = collect_video_works_with_api(youtube, channel_url, max_video_items, limit_time_bool, start_dt, end_dt, log_callback, stop_event, pause_event)
                     if not works:
                         should_fallback_video_tabs = True
                         log_line(log_callback, "  API 未返回 Videos/Shorts，尝试用浏览器读取。")
@@ -646,9 +686,9 @@ def run_youtube_channel_works_spider(
                 try:
                     active_page = ensure_page()
                     if active_page is not None:
-                        works.extend(collect_video_tab_with_playwright(active_page, channel_url, "videos", max_post_scrolls, log_callback, stop_event))
+                        works.extend(collect_video_tab_with_playwright(active_page, channel_url, "videos", max_post_scrolls, log_callback, stop_event, pause_event, page_timeout, scroll_delay_val, no_new_limit, scroll_px_val))
                         if not should_stop(stop_event):
-                            works.extend(collect_video_tab_with_playwright(active_page, channel_url, "shorts", max_post_scrolls, log_callback, stop_event))
+                            works.extend(collect_video_tab_with_playwright(active_page, channel_url, "shorts", max_post_scrolls, log_callback, stop_event, pause_event, page_timeout, scroll_delay_val, no_new_limit, scroll_px_val))
                 except PlaywrightTimeoutError:
                     log_line(log_callback, "  跳过浏览器 Videos/Shorts：页面加载超时。")
                 except Exception as exc:
@@ -658,7 +698,7 @@ def run_youtube_channel_works_spider(
                 try:
                     active_page = ensure_page()
                     if active_page is not None:
-                        works.extend(collect_posts_with_playwright(active_page, channel_url, max_post_scrolls, log_callback, stop_event))
+                        works.extend(collect_posts_with_playwright(active_page, channel_url, max_post_scrolls, log_callback, stop_event, pause_event, page_timeout, scroll_delay_val, no_new_limit, scroll_px_val))
                 except PlaywrightTimeoutError:
                     log_line(log_callback, "  跳过 Posts：页面加载超时。")
                 except Exception as exc:
@@ -678,7 +718,7 @@ def run_youtube_channel_works_spider(
                             video_id = work_link.split("shorts/")[1].split("?")[0]
                             
                         if video_id:
-                            comments = fetch_top_level_comments(youtube, video_id, max_comments, log_callback, stop_event)
+                            comments = fetch_top_level_comments(youtube, video_id, max_comments, log_callback, stop_event, pause_event)
                             comments.sort(key=lambda item: item["like_count"], reverse=True)
                             for comment in comments[:max_comments]:
                                 comment_row = {

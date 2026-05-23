@@ -19,6 +19,7 @@ from src.core import (
     sanitize_csv_row,
     sanitize_csv_rows,
     should_stop,
+    wait_if_paused,
 )
 from src.platforms.x_twitter.comments import extract_comments
 
@@ -188,18 +189,21 @@ def append_rows(writer, rows: list[dict], sheet_name: str = "推文信息"):
 
 def build_search_query(base_keyword: str, adv_params: dict, since: str, until: str) -> str:
     query_parts = [base_keyword]
-    if adv_params["lang"] != "any":
+    if adv_params.get("lang", "any") != "any":
         query_parts.append(f"lang:{adv_params['lang']}")
-    if adv_params["min_faves"]:
-        query_parts.append(f"min_faves:{adv_params['min_faves']}")
-    if adv_params["min_replies"]:
-        query_parts.append(f"min_replies:{adv_params['min_replies']}")
     if since and until:
         query_parts.append(f"since:{since}")
         query_parts.append(f"until:{until}")
     return " ".join(query_parts)
 
-def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback, stop_event=None):
+def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback, stop_event=None, config=None, pause_event=None):
+    if config is None:
+        config = {}
+    search_page_timeout = int(config.get("search_page_timeout", 40000))
+    scroll_cooldown_min = float(config.get("scroll_cooldown_min", 3.0))
+    scroll_cooldown_max = float(config.get("scroll_cooldown_max", 5.0))
+    no_change_threshold = int(config.get("no_change_strikes", 5))
+
     try:
         with sync_playwright() as p:
             log_callback("正在连接本地 Chrome...")
@@ -217,11 +221,13 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
             limit_time_bool = adv_params.get("limit_time") == "是"
             get_comments_bool = adv_params.get("get_comments") == "是"
             max_comments = int(adv_params.get("max_comments", 500))
-            max_search_scrolls = int(adv_params.get("max_scrolls", MAX_SEARCH_SCROLLS))
+            max_search_scrolls = int(config.get("max_scrolls", MAX_SEARCH_SCROLLS))
 
             for base_keyword in keywords_list:
                 if should_stop(stop_event):
                     log_callback("任务已停止。")
+                    break
+                if wait_if_paused(pause_event, stop_event):
                     break
                 safe_filename = re.sub(r'[\\/*?:"<>|]', "", base_keyword)
                 output_path = build_output_path("x", f"X_Media_Tweets_{safe_filename}_{time.strftime('%Y%m%d')}.xlsx")
@@ -240,7 +246,7 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
                     try:
                         start_dt = datetime.strptime(adv_params["start_date"], "%Y-%m-%d")
                         end_dt = datetime.strptime(adv_params["end_date"], "%Y-%m-%d") + timedelta(days=1)
-                        slice_days = int(adv_params["slice_days"])
+                        slice_days = int(config.get("slice_days", 7))
                     except ValueError:
                         log_callback("日期或切片格式错误：日期必须是 YYYY-MM-DD，切片天数必须是整数。")
                         continue
@@ -262,6 +268,8 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
                     if should_stop(stop_event):
                         log_callback("已请求停止，结束当前关键词。")
                         break
+                    if wait_if_paused(pause_event, stop_event):
+                        break
                         
                     if limit_time_bool:
                         current_start_dt = max(start_dt, current_end_dt - timedelta(days=slice_days))
@@ -279,7 +287,7 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
                     log_callback(f"搜索语法：{final_query}")
 
                     try:
-                        search_page.goto(search_url, wait_until="domcontentloaded", timeout=40000)
+                        search_page.goto(search_url, wait_until="domcontentloaded", timeout=search_page_timeout)
                     except Exception:
                         log_callback("页面加载超时，继续尝试提取当前已加载内容。")
 
@@ -292,6 +300,8 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
 
                     for _ in range(max_search_scrolls):
                         if should_stop(stop_event):
+                            break
+                        if wait_if_paused(pause_event, stop_event):
                             break
                         try:
                             retry_btn = search_page.locator(
@@ -306,6 +316,8 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
 
                         for article in search_page.locator('article[data-testid="tweet"]').all():
                             if should_stop(stop_event):
+                                break
+                            if wait_if_paused(pause_event, stop_event):
                                 break
                             try:
                                 if not should_keep_article(article):
@@ -337,7 +349,7 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
                                         detail_page.goto(tweet_url, wait_until="domcontentloaded", timeout=30000)
                                         detail_page.wait_for_selector('article[data-testid="tweet"]', timeout=30000)
                                         time.sleep(2)
-                                        comments = extract_comments(detail_page, tweet_url, max_comments, log_callback, stop_event)
+                                        comments = extract_comments(detail_page, tweet_url, max_comments, log_callback, stop_event, pause_event=pause_event)
                                         for comment in comments:
                                             comment_row = {
                                                 "序号": row["序号"],
@@ -366,14 +378,14 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
 
                         if slice_count == previous_count:
                             no_change_strikes += 1
-                            if no_change_strikes >= 2:
+                            if no_change_strikes >= no_change_threshold:
                                 break
                         else:
                             no_change_strikes = 0
                         previous_count = slice_count
 
                         search_page.mouse.wheel(delta_x=0, delta_y=random.randint(900, 1400))
-                        if interruptible_sleep(random.uniform(3.0, 5.0), stop_event):
+                        if interruptible_sleep(random.uniform(scroll_cooldown_min, scroll_cooldown_max), stop_event):
                             break
 
                     log_callback(f"当前切片捕获 {slice_count} 条含媒体原创推文。")
@@ -387,7 +399,8 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
                 if not opened_page.is_closed():
                     opened_page.close()
             log_callback("\nX 关键词媒体推文搜索任务结束。")
-            finish_callback()
+            finish_callback(output_path)
+
     except Exception as e:
         log_callback(f"发生致命错误：{e}")
         finish_callback()

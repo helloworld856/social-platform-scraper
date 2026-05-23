@@ -22,6 +22,7 @@ from src.core import (
     interruptible_sleep,
     sanitize_csv_row,
     should_stop,
+    wait_if_paused,
 )
 from src.core import expand_compact_number, extract_tiktok_video_title
 from src.platforms.tiktok.comments import collect_video_comments
@@ -228,7 +229,7 @@ def normalize_profile_url(url: str) -> str:
 def parse_profile_urls(txt_path: str) -> list[str]:
     urls: list[str] = []
     seen = set()
-    with open(txt_path, "r", encoding="utf-8") as file:
+    with open(txt_path, "r", encoding="utf-8-sig") as file:
         for line in file:
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
@@ -374,16 +375,20 @@ def row_from_detail(index: int, detail: dict[str, str]) -> dict[str, str]:
     }
 
 
-def wait_after_detail(log_callback, stop_event=None) -> bool:
+def wait_after_detail(log_callback, stop_event=None, pause_event=None) -> bool:
+    if wait_if_paused(pause_event, stop_event):
+        return True
     seconds = random.uniform(DETAIL_DELAY_MIN_SECONDS, DETAIL_DELAY_MAX_SECONDS)
     return interruptible_sleep(seconds, stop_event)
 
 
-def save_batch_and_wait(writer: XlsxRowWriter, written_count: int, log_callback, stop_event=None) -> bool:
-    if written_count <= 0 or written_count % SAVE_BATCH_SIZE != 0:
+def save_batch_and_wait(writer: XlsxRowWriter, written_count: int, log_callback, stop_event=None, pause_event=None, save_batch_size: int = SAVE_BATCH_SIZE, batch_wait_min: float = BATCH_WAIT_MIN_SECONDS, batch_wait_max: float = BATCH_WAIT_MAX_SECONDS) -> bool:
+    if written_count <= 0 or written_count % save_batch_size != 0:
         return False
     writer.save()
-    seconds = random.uniform(BATCH_WAIT_MIN_SECONDS, BATCH_WAIT_MAX_SECONDS)
+    if wait_if_paused(pause_event, stop_event):
+        return True
+    seconds = random.uniform(batch_wait_min, batch_wait_max)
     log_line(log_callback, f"    已写入并保存 {written_count} 条，随机等待 {seconds:.1f} 秒。")
     return interruptible_sleep(seconds, stop_event)
 
@@ -402,12 +407,18 @@ def process_video_batch(
     written_count: int,
     log_callback,
     stop_event=None,
+    pause_event=None,
+    save_batch_size: int = SAVE_BATCH_SIZE,
+    batch_wait_min: float = BATCH_WAIT_MIN_SECONDS,
+    batch_wait_max: float = BATCH_WAIT_MAX_SECONDS,
 ) -> tuple[int, int, bool]:
     stop_profile = False
     log_line(log_callback, f"  开始爬取本批 {len(video_links)} 条视频。")
 
     for batch_index, video_url in enumerate(video_links, 1):
         if should_stop(stop_event):
+            break
+        if wait_if_paused(pause_event, stop_event):
             break
         try:
             log_line(log_callback, f"    [{batch_index}/{len(video_links)}] 读取视频：{video_url}")
@@ -422,19 +433,19 @@ def process_video_batch(
                     if publish_dt and publish_dt.date() < start_dt.date():
                         log_line(log_callback, f"      停止当前主页：视频发布时间早于开始日期（{published_at}）。")
                         stop_profile = True
-                        wait_after_detail(log_callback, stop_event)
+                        wait_after_detail(log_callback, stop_event, pause_event=pause_event)
                         break
 
                     if not in_date_range(published_at, start_dt, end_dt):
                         log_line(log_callback, f"      跳过：发布时间不在范围内（{published_at or '未解析'}）。")
-                        if wait_after_detail(log_callback, stop_event):
+                        if wait_after_detail(log_callback, stop_event, pause_event=pause_event):
                             break
                         continue
 
             row_base = row_from_detail(serial_number, detail) if get_video_info_bool else {"序号": str(serial_number), "视频链接": video_url}
             
             if get_comments_bool:
-                comments = collect_video_comments(detail_page, video_url, max_comments, log_callback, stop_event)
+                comments = collect_video_comments(detail_page, video_url, max_comments, log_callback, stop_event, pause_event=pause_event)
                 writer.writerow("视频信息", sanitize_csv_row(row_base))
                 for comment in comments:
                     comment_row = {
@@ -463,12 +474,12 @@ def process_video_batch(
                     log_line(log_callback, f"      写入视频链接：{video_url}")
 
             serial_number += 1
-            if save_batch_and_wait(writer, written_count, log_callback, stop_event):
+            if save_batch_and_wait(writer, written_count, log_callback, stop_event, pause_event=pause_event, save_batch_size=save_batch_size, batch_wait_min=batch_wait_min, batch_wait_max=batch_wait_max):
                 break
         except Exception as exc:
             log_line(log_callback, f"      跳过：{exc}")
 
-        if wait_after_detail(log_callback, stop_event):
+        if wait_after_detail(log_callback, stop_event, pause_event=pause_event):
             break
 
     return serial_number, written_count, stop_profile
@@ -487,7 +498,20 @@ def run_tiktok_profile_videos_spider(
     log_callback,
     finish_callback,
     stop_event=None,
+    pause_event=None,
+    config=None,
 ):
+    if config is None:
+        config = {}
+    page_load_timeout = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
+    scroll_interval = float(config.get("scroll_interval", SCROLL_INTERVAL_SECONDS))
+    no_new_scroll_limit = int(config.get("no_new_scroll_limit", NO_NEW_SCROLL_LIMIT))
+    max_scrolls = int(config.get("max_scrolls", max_scrolls))
+    link_batch_size = int(config.get("link_batch_size", LINK_BATCH_SIZE))
+    save_batch_size = int(config.get("save_batch_size", SAVE_BATCH_SIZE))
+    batch_wait_min = float(config.get("batch_wait_min", BATCH_WAIT_MIN_SECONDS))
+    batch_wait_max = float(config.get("batch_wait_max", BATCH_WAIT_MAX_SECONDS))
+
     output_path = None
     completed_path = None
     try:
@@ -524,7 +548,7 @@ def run_tiktok_profile_videos_spider(
         serial_number = 1
         
         actual_max_scrolls = max_scrolls if max_scrolls > 0 else 999999
-        no_new_limit = 5 if not limit_time_bool else NO_NEW_SCROLL_LIMIT
+        no_new_limit = 5 if not limit_time_bool else no_new_scroll_limit
 
         with sync_playwright() as playwright:
             log_line(log_callback, "正在连接本地 Chrome，请确认已登录 TikTok。")
@@ -540,6 +564,8 @@ def run_tiktok_profile_videos_spider(
             for profile_index, raw_profile_url in enumerate(profile_urls, 1):
                 if should_stop(stop_event):
                     break
+                if wait_if_paused(pause_event, stop_event):
+                    break
                 profile_url = normalize_profile_url(raw_profile_url)
                 if not profile_url:
                     log_line(log_callback, f"[{profile_index}/{len(profile_urls)}] 跳过无效主页：{raw_profile_url}")
@@ -547,7 +573,7 @@ def run_tiktok_profile_videos_spider(
 
                 log_line(log_callback, f"[{profile_index}/{len(profile_urls)}] 读取主页：{profile_url}")
                 try:
-                    profile_page.goto(profile_url, wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
+                    profile_page.goto(profile_url, wait_until="domcontentloaded", timeout=page_load_timeout)
                     time.sleep(2.5)
                 except PlaywrightTimeoutError:
                     log_line(log_callback, "  主页加载超时，跳过。")
@@ -561,6 +587,8 @@ def run_tiktok_profile_videos_spider(
                 for scroll_index in range(actual_max_scrolls):
                     if should_stop(stop_event):
                         break
+                    if wait_if_paused(pause_event, stop_event):
+                        break
 
                     new_links = collect_visible_video_links(profile_page, seen_links)
                     if new_links:
@@ -570,9 +598,9 @@ def run_tiktok_profile_videos_spider(
                     else:
                         no_new_count += 1
 
-                    while len(pending_links) >= LINK_BATCH_SIZE and not stop_profile and not should_stop(stop_event):
-                        batch = pending_links[:LINK_BATCH_SIZE]
-                        del pending_links[:LINK_BATCH_SIZE]
+                    while len(pending_links) >= link_batch_size and not stop_profile and not should_stop(stop_event):
+                        batch = pending_links[:link_batch_size]
+                        del pending_links[:link_batch_size]
                         serial_number, written_count, stop_profile = process_video_batch(
                             detail_page,
                             batch,
@@ -587,6 +615,10 @@ def run_tiktok_profile_videos_spider(
                             written_count,
                             log_callback,
                             stop_event,
+                            pause_event=pause_event,
+                            save_batch_size=save_batch_size,
+                            batch_wait_min=batch_wait_min,
+                            batch_wait_max=batch_wait_max,
                         )
                     if stop_profile:
                         break
@@ -607,13 +639,14 @@ def run_tiktok_profile_videos_spider(
                                 written_count,
                                 log_callback,
                                 stop_event,
+                                pause_event=pause_event,
                             )
                             pending_links = []
                         log_line(log_callback, "  连续多次没有新视频链接，结束当前主页。")
                         break
 
                     trigger_profile_lazy_load(profile_page)
-                    if interruptible_sleep(SCROLL_INTERVAL_SECONDS, stop_event):
+                    if interruptible_sleep(scroll_interval, stop_event):
                         break
 
                 if pending_links and not stop_profile and not should_stop(stop_event):
@@ -631,6 +664,7 @@ def run_tiktok_profile_videos_spider(
                         written_count,
                         log_callback,
                         stop_event,
+                        pause_event=pause_event,
                     )
 
             for opened_page in (profile_page, detail_page):

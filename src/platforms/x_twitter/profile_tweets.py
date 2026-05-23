@@ -20,9 +20,18 @@ from src.core import (
     connect_existing_chromium,
     sanitize_csv_cell,
     should_stop,
+    wait_if_paused,
 )
 from src.platforms.x_twitter.comments import extract_comments
-from src.platforms.tiktok.keyword import parse_date_range
+
+
+def _parse_date_range(start_str: str, end_str: str):
+    from datetime import datetime
+    start_dt = datetime.strptime(start_str, "%Y-%m-%d")
+    end_dt = datetime.strptime(end_str, "%Y-%m-%d")
+    if start_dt > end_dt:
+        raise ValueError(f"开始日期 {start_str} 晚于结束日期 {end_str}")
+    return start_dt, end_dt
 
 
 CSV_FIELDS = ["序号", "帖子ID", "发布时间", "帖子内容", "帖子链接"]
@@ -121,10 +130,16 @@ def row_from_tweet(index: int, tweet: dict[str, str]) -> dict[str, str]:
     }
 
 
-def cooldown_after_batch(total_written: int, log_callback, stop_event=None):
-    if total_written <= 0 or total_written % SAVE_BATCH_SIZE != 0:
+def cooldown_after_batch(total_written: int, log_callback, stop_event=None, save_batch_size=None, cooldown_min=None, cooldown_max=None):
+    if save_batch_size is None:
+        save_batch_size = SAVE_BATCH_SIZE
+    if cooldown_min is None:
+        cooldown_min = COOLDOWN_MIN_SECONDS
+    if cooldown_max is None:
+        cooldown_max = COOLDOWN_MAX_SECONDS
+    if total_written <= 0 or total_written % save_batch_size != 0:
         return
-    seconds = random.uniform(COOLDOWN_MIN_SECONDS, COOLDOWN_MAX_SECONDS)
+    seconds = random.uniform(cooldown_min, cooldown_max)
     log_line(log_callback, f"  已保存 {total_written} 条帖子，随机等待 {seconds:.1f} 秒。")
     deadline = time.time() + seconds
     while time.time() < deadline:
@@ -204,13 +219,33 @@ def collect_profile_tweets(
     stop_event=None,
     writer=None,
     row_offset: int = 0,
+    page_timeout=None,
+    scroll_delay=None,
+    no_new_scroll_limit=None,
+    save_batch_size=None,
+    cooldown_min=None,
+    cooldown_max=None,
+    pause_event=None,
 ) -> list[dict[str, str]] | tuple[list[dict[str, str]], int, int]:
+    if page_timeout is None:
+        page_timeout = PAGE_LOAD_TIMEOUT
+    if scroll_delay is None:
+        scroll_delay = SCROLL_DELAY
+    if no_new_scroll_limit is None:
+        no_new_scroll_limit = NO_NEW_SCROLL_LIMIT
+    if save_batch_size is None:
+        save_batch_size = SAVE_BATCH_SIZE
+    if cooldown_min is None:
+        cooldown_min = COOLDOWN_MIN_SECONDS
+    if cooldown_max is None:
+        cooldown_max = COOLDOWN_MAX_SECONDS
+
     username = extract_profile_username(profile_url)
     if not username:
         raise ValueError(f"无效的 X 博主主页链接：{profile_url}")
 
-    page.goto(clean_profile_url(profile_url), wait_until="domcontentloaded", timeout=PAGE_LOAD_TIMEOUT)
-    page.wait_for_selector('article[data-testid="tweet"], article', timeout=PAGE_LOAD_TIMEOUT)
+    page.goto(clean_profile_url(profile_url), wait_until="domcontentloaded", timeout=page_timeout)
+    page.wait_for_selector('article[data-testid="tweet"], article', timeout=page_timeout)
     time.sleep(INITIAL_LOAD_DELAY)
 
     tweets: list[dict[str, str]] = []
@@ -223,6 +258,8 @@ def collect_profile_tweets(
 
     for scroll_index in range(max_scrolls):
         if should_stop(stop_event):
+            break
+        if wait_if_paused(pause_event, stop_event):
             break
 
         visible_tweets = extract_visible_profile_tweets(page, username)
@@ -257,7 +294,7 @@ def collect_profile_tweets(
                         detail_page.goto(normalized_tweet["url"], wait_until="domcontentloaded", timeout=30000)
                         detail_page.wait_for_selector('article[data-testid="tweet"]', timeout=30000)
                         time.sleep(2)
-                        comments = extract_comments(detail_page, normalized_tweet["url"], max_comments, log_callback, stop_event)
+                        comments = extract_comments(detail_page, normalized_tweet["url"], max_comments, log_callback, stop_event, pause_event=pause_event)
                         for comment in comments:
                             comment_row = {
                                 "序号": str(row_offset),
@@ -270,7 +307,7 @@ def collect_profile_tweets(
                     except Exception as exc:
                         log_line(log_callback, f"    提取评论失败：{exc}")
                 
-                if len(pending_rows) >= SAVE_BATCH_SIZE:
+                if len(pending_rows) >= save_batch_size:
                     if hasattr(writer, "writerow") and hasattr(writer, "worksheets"):
                         for r in pending_rows:
                             writer.writerow("推文信息", r)
@@ -279,7 +316,7 @@ def collect_profile_tweets(
                     writer.save()
                     written_count += len(pending_rows)
                     pending_rows.clear()
-                    cooldown_after_batch(written_count, log_callback, stop_event)
+                    cooldown_after_batch(written_count, log_callback, stop_event, save_batch_size=save_batch_size, cooldown_min=cooldown_min, cooldown_max=cooldown_max)
                     if should_stop(stop_event):
                         break
 
@@ -288,15 +325,15 @@ def collect_profile_tweets(
             no_new_count = 0
         else:
             no_new_count += 1
-            if no_new_count >= NO_NEW_SCROLL_LIMIT:
-                log_line(log_callback, f"  连续 {NO_NEW_SCROLL_LIMIT} 次没有新增帖子，停止。")
+            if no_new_count >= no_new_scroll_limit:
+                log_line(log_callback, f"  连续 {no_new_scroll_limit} 次没有新增帖子，停止。")
                 break
 
         if should_stop(stop_event):
             break
 
         page.evaluate(f"window.scrollBy(0, {SCROLL_PX})")
-        time.sleep(SLOW_SCROLL_DELAY if no_new_count else SCROLL_DELAY)
+        time.sleep(SLOW_SCROLL_DELAY if no_new_count else scroll_delay)
 
     if writer and pending_rows:
         if hasattr(writer, "writerow") and hasattr(writer, "worksheets"):
@@ -332,7 +369,19 @@ def run_x_profile_tweets_spider(
     log_callback=None,
     finish_callback=None,
     stop_event=None,
+    config=None,
+    pause_event=None,
 ):
+    if config is None:
+        config = {}
+    page_load_timeout_val = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
+    scroll_delay_val = float(config.get("scroll_delay", SCROLL_DELAY))
+    no_new_scroll_limit_val = int(config.get("no_new_scroll_limit", NO_NEW_SCROLL_LIMIT))
+    save_batch_size_val = int(config.get("save_batch_size", SAVE_BATCH_SIZE))
+    cooldown_min_val = float(config.get("cooldown_min", COOLDOWN_MIN_SECONDS))
+    cooldown_max_val = float(config.get("cooldown_max", COOLDOWN_MAX_SECONDS))
+    max_scrolls = int(config.get("max_scrolls", max_scrolls))
+
     completed_path = None
     page = None
     try:
@@ -349,7 +398,7 @@ def run_x_profile_tweets_spider(
         get_comments_bool = get_comments_str == "是"
         start_dt, end_dt = None, None
         if limit_time_bool:
-            start_dt, end_dt = parse_date_range(start_date, end_date)
+            start_dt, end_dt = _parse_date_range(start_date, end_date)
 
         max_comments_val = max(10, int(max_comments))
         output_path = build_output_path("x", f"x_profile_tweets_{time.strftime('%Y%m%d')}.xlsx")
@@ -378,6 +427,8 @@ def run_x_profile_tweets_spider(
                 if should_stop(stop_event):
                     log_line(log_callback, "任务已停止。")
                     break
+                if wait_if_paused(pause_event, stop_event):
+                    break
 
                 username = extract_profile_username(profile_url)
                 log_line(log_callback, f"[{profile_index}/{len(profile_urls)}] 读取主页：{profile_url}")
@@ -396,6 +447,13 @@ def run_x_profile_tweets_spider(
                         stop_event,
                         writer=writer,
                         row_offset=row_offset,
+                        page_timeout=page_load_timeout_val,
+                        scroll_delay=scroll_delay_val,
+                        no_new_scroll_limit=no_new_scroll_limit_val,
+                        save_batch_size=save_batch_size_val,
+                        cooldown_min=cooldown_min_val,
+                        cooldown_max=cooldown_max_val,
+                        pause_event=pause_event,
                     )
                     log_line(log_callback, f"  完成 @{username}：写入 {written_count} 条帖子。")
                 except PlaywrightTimeoutError:
