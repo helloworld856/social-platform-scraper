@@ -240,29 +240,6 @@ def build_pair_rows(youtube, target_video_url: str, profile_url: str, channel_ca
     return rows
 
 
-def build_rows(api_key: str, pairs: list[tuple[str, str]], log_callback, stop_event=None, pause_event=None) -> list[dict]:
-    youtube = build("youtube", "v3", developerKey=api_key)
-    rows: list[dict] = []
-    channel_cache: dict[str, dict] = {}
-
-    for index, (target_video_url, profile_url) in enumerate(pairs, 1):
-        if should_stop(stop_event):
-            log_callback("任务已停止。")
-            break
-        log_callback(f"[{index}/{len(pairs)}] 定位 YouTube 目标视频: {target_video_url}")
-
-        try:
-            pair_rows = build_pair_rows(youtube, target_video_url, profile_url, channel_cache, log_callback, stop_event, pause_event)
-            rows.extend(pair_rows)
-            log_callback(f"  完成：提取到 {len(pair_rows)} 条前后视频。")
-        except HttpError as e:
-            log_callback(f"  YouTube API 错误：{e}")
-        except Exception as e:
-            log_callback(f"  处理失败：{e}")
-
-    return rows
-
-
 def run_youtube_paired_context_spider(api_key: str, txt_path: str, log_callback, finish_callback, stop_event=None, config=None, pause_event=None):
     if config is None:
         config = {}
