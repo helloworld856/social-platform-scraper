@@ -18,8 +18,8 @@ class XKeywordWindow(SimpleToolWindow):
         return [
             ConfigParam("slice_days", "切片跨度（天）", kind="int", default=7, minimum=1, maximum=365),
             ConfigParam("search_page_timeout", "搜索页加载超时(毫秒)", kind="int", default=40000, minimum=10000, maximum=120000, step=1000),
-            ConfigParam("scroll_cooldown_min", "滚动等待最小(秒)", kind="float", default=3.0, minimum=0.5, maximum=30.0, step=0.5, decimals=1),
-            ConfigParam("scroll_cooldown_max", "滚动等待最大(秒)", kind="float", default=5.0, minimum=0.5, maximum=30.0, step=0.5, decimals=1),
+            ConfigParam("scroll_cooldown_min", "滚动等待最小(秒)", kind="float", default=5.0, minimum=0.5, maximum=30.0, step=0.5, decimals=1),
+            ConfigParam("scroll_cooldown_max", "滚动等待最大(秒)", kind="float", default=7.0, minimum=0.5, maximum=30.0, step=0.5, decimals=1),
             ConfigParam("no_change_strikes", "无新内容停止阈值", kind="int", default=5, minimum=2, maximum=30),
             ConfigParam("max_scrolls", "每个时间切片最大滚动次数", kind="int", default=200, minimum=1, maximum=999999),
         ]
@@ -123,7 +123,7 @@ class XContextWindow(SimpleToolWindow):
         return [
             ConfigParam("context_size", "目标推文前后各取几条", kind="int", default=5, minimum=1, maximum=20),
             ConfigParam("max_profile_scrolls", "主页最大滚动次数", kind="int", default=45, minimum=5, maximum=300),
-            ConfigParam("profile_scroll_pause", "主页滚动间隔(秒)", kind="float", default=1.8, minimum=0.1, maximum=5.0, step=0.1, decimals=1),
+            ConfigParam("profile_scroll_pause", "主页滚动间隔(秒)", kind="float", default=3.8, minimum=0.1, maximum=5.0, step=0.1, decimals=1),
             ConfigParam("page_load_timeout", "页面加载超时(毫秒)", kind="int", default=45000, minimum=10000, maximum=120000, step=1000),
         ]
 
@@ -169,7 +169,7 @@ class XProfileTweetsWindow(SimpleToolWindow):
     def tool_config_params(self):
         return [
             ConfigParam("page_load_timeout", "页面加载超时(毫秒)", kind="int", default=30000, minimum=10000, maximum=120000, step=1000),
-            ConfigParam("scroll_delay", "滚动间隔(秒)", kind="float", default=1.2, minimum=0.1, maximum=5.0, step=0.1, decimals=1),
+            ConfigParam("scroll_delay", "滚动间隔(秒)", kind="float", default=3.2, minimum=0.1, maximum=5.0, step=0.1, decimals=1),
             ConfigParam("no_new_scroll_limit", "无新内容停止阈值", kind="int", default=10, minimum=2, maximum=50),
             ConfigParam("max_scrolls", "每个主页最大滚动次数", kind="int", default=200, minimum=1, maximum=5000),
             ConfigParam("save_batch_size", "每N条保存一次", kind="int", default=10, minimum=1, maximum=100),
@@ -229,7 +229,7 @@ class XCommentsWindow(SimpleToolWindow):
         return [
             ConfigParam("tweet_comment_top_limit", "每条推文评论最多输出条数", kind="int", default=100, minimum=1, maximum=500),
             ConfigParam("page_load_timeout", "页面加载超时(毫秒)", kind="int", default=30000, minimum=10000, maximum=120000, step=1000),
-            ConfigParam("scroll_pause", "滚动间隔(秒)", kind="float", default=2.0, minimum=0.1, maximum=5.0, step=0.1, decimals=1),
+            ConfigParam("scroll_pause", "滚动间隔(秒)", kind="float", default=4.0, minimum=0.1, maximum=5.0, step=0.1, decimals=1),
             ConfigParam("no_new_scroll_limit", "无新内容停止阈值", kind="int", default=5, minimum=2, maximum=30),
         ]
 
