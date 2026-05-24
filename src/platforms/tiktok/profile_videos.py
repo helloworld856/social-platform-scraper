@@ -28,7 +28,7 @@ from src.core import expand_compact_number, extract_tiktok_video_title
 from src.platforms.tiktok.comments import collect_video_comments
 
 
-CSV_FIELDS = ["序号", "视频链接", "发布日期", "视频简介", "点赞数", "评论数", "收藏量"]
+CSV_FIELDS = ["序号", "视频链接", "发布日期", "视频简介", "点赞数", "评论数", "收藏量", "分享数"]
 PAGE_LOAD_TIMEOUT = 45000
 DETAIL_LOAD_TIMEOUT = 30000
 SCROLL_INTERVAL_SECONDS = 2.5
@@ -339,6 +339,13 @@ def extract_video_detail(page, video_url: str) -> dict[str, str]:
         "saveCount",
         "save_count",
     ) if item else ""
+    shares = item_metric(
+        item,
+        "shareCount",
+        "share_count",
+        "share_count_str",
+        "shares",
+    ) if item else ""
 
     if not desc:
         desc = extract_tiktok_video_title(page)
@@ -352,6 +359,12 @@ def extract_video_detail(page, video_url: str) -> dict[str, str]:
             ["favorite-count", "undefined-count"],
             ["Favorites", "Favorite", "Favourites", "Favourite", "收藏", " "],
         )
+    if not shares:
+        shares = extract_metric(
+            page,
+            "share-count",
+            ["Shares", "Share", "分享", " "],
+        )
 
     return {
         "video_url": video_url,
@@ -360,6 +373,7 @@ def extract_video_detail(page, video_url: str) -> dict[str, str]:
         "likes": format_count(likes),
         "comments": format_count(comments),
         "collects": format_count(collects),
+        "shares": format_count(shares),
     }
 
 
@@ -372,6 +386,7 @@ def row_from_detail(index: int, detail: dict[str, str]) -> dict[str, str]:
         "点赞数": detail.get("likes", ""),
         "评论数": detail.get("comments", ""),
         "收藏量": detail.get("collects", ""),
+        "分享数": detail.get("shares", ""),
     }
 
 
@@ -460,7 +475,7 @@ def process_video_batch(
                 written_count += 1
                 log_line(
                     log_callback,
-                    f"      写入：点赞 {detail.get('likes') or '空'}，评论数 {detail.get('comments') or '空'}，抓取到主楼评论 {len(comments)} 条。",
+                    f"      写入：点赞 {detail.get('likes') or '空'}，评论 {detail.get('comments') or '空'}，收藏 {detail.get('collects') or '空'}，分享 {detail.get('shares') or '空'}，抓取到主楼评论 {len(comments)} 条。",
                 )
             else:
                 writer.writerow(sanitize_csv_row(row_base))
@@ -468,7 +483,7 @@ def process_video_batch(
                 if get_video_info_bool:
                     log_line(
                         log_callback,
-                        f"      写入：点赞 {detail.get('likes') or '空'}，评论 {detail.get('comments') or '空'}，收藏 {detail.get('collects') or '空'}。",
+                        f"      写入：点赞 {detail.get('likes') or '空'}，评论 {detail.get('comments') or '空'}，收藏 {detail.get('collects') or '空'}，分享 {detail.get('shares') or '空'}。",
                     )
                 else:
                     log_line(log_callback, f"      写入视频链接：{video_url}")
@@ -535,7 +550,7 @@ def run_tiktok_profile_videos_spider(
 
         video_fields = ["序号", "视频链接"]
         if get_video_info_bool:
-            video_fields.extend(["发布日期", "视频简介", "点赞数", "评论数", "收藏量"])
+            video_fields.extend(["发布日期", "视频简介", "点赞数", "评论数", "收藏量", "分享数"])
 
         output_path = build_output_path("tiktok", f"tiktok_profile_videos_{time.strftime('%Y%m%d')}.xlsx")
         if get_comments_bool:
