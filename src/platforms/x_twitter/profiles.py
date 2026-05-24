@@ -9,6 +9,7 @@ from src.core import (
     build_output_path,
     connect_existing_chromium,
     expand_compact_number,
+    interruptible_sleep,
     random_cooldown,
     sanitize_xlsx_cell,
     should_stop,
@@ -193,12 +194,12 @@ def extract_view_count(article) -> tuple[str, float]:
             continue
     return "", 0
 
-def extract_followers_count(page, profile_url: str, page_timeout=None) -> str:
+def extract_followers_count(page, profile_url: str, page_timeout=None, stop_event=None) -> str:
     if page_timeout is None:
         page_timeout = PAGE_LOAD_TIMEOUT
     try:
         page.goto(profile_url, wait_until="domcontentloaded", timeout=page_timeout)
-        time.sleep(3)
+        interruptible_sleep(3, stop_event)
     except Exception:
         return ""
 
@@ -221,7 +222,7 @@ def extract_followers_count(page, profile_url: str, page_timeout=None) -> str:
             continue
     return ""
 
-def extract_tweet_author_record(tweet_page, profile_page, tweet_url: str, log_callback, page_timeout=None, tweet_ready_timeout=None) -> dict | None:
+def extract_tweet_author_record(tweet_page, profile_page, tweet_url: str, log_callback, page_timeout=None, tweet_ready_timeout=None, stop_event=None) -> dict | None:
     target_status_id = extract_status_id(tweet_url)
     if not target_status_id:
         log_callback(f"跳过：无法解析推文 ID：{tweet_url}")
@@ -242,7 +243,7 @@ def extract_tweet_author_record(tweet_page, profile_page, tweet_url: str, log_ca
         return None
 
     view_text, view_value = extract_view_count(article)
-    followers = extract_followers_count(profile_page, author["profile_url"], page_timeout=page_timeout)
+    followers = extract_followers_count(profile_page, author["profile_url"], page_timeout=page_timeout, stop_event=stop_event)
 
     return {
         "推文链接": normalize_x_url(tweet_url),
@@ -254,12 +255,12 @@ def extract_tweet_author_record(tweet_page, profile_page, tweet_url: str, log_ca
         "_view_value": view_value,
     }
 
-def extract_profile_record(profile_page, profile_url: str, log_callback, page_timeout=None) -> dict | None:
+def extract_profile_record(profile_page, profile_url: str, log_callback, page_timeout=None, stop_event=None) -> dict | None:
     """Extract profile info directly from profile URL."""
     profile_url = normalize_x_url(profile_url)
     try:
         profile_page.goto(profile_url, wait_until="domcontentloaded", timeout=page_timeout if page_timeout is not None else PAGE_LOAD_TIMEOUT)
-        time.sleep(3)
+        interruptible_sleep(3, stop_event)
     except Exception as e:
         log_callback(f"跳过：无法加载主页：{profile_url}，错误：{e}")
         return None
@@ -282,7 +283,7 @@ def extract_profile_record(profile_page, profile_url: str, log_callback, page_ti
         pass
 
     # Extract followers count
-    followers = extract_followers_count(profile_page, profile_url, page_timeout=page_timeout)
+    followers = extract_followers_count(profile_page, profile_url, page_timeout=page_timeout, stop_event=stop_event)
 
     return {
         "作者主页链接": profile_url,
@@ -349,10 +350,10 @@ def run_scraper(txt_path: str, input_mode: str, cdp_port_or_url: str, log_callba
                 
                 if is_profile_mode:
                     log_callback(f"[{index}/{len(links)}] 处理博主链接：{link}")
-                    record = extract_profile_record(profile_page, link, log_callback, page_timeout=page_load_timeout)
+                    record = extract_profile_record(profile_page, link, log_callback, page_timeout=page_load_timeout, stop_event=stop_event)
                 else:
                     log_callback(f"[{index}/{len(links)}] 处理推文：{link}")
-                    record = extract_tweet_author_record(tweet_page, profile_page, link, log_callback, page_timeout=page_load_timeout, tweet_ready_timeout=tweet_ready_timeout)
+                    record = extract_tweet_author_record(tweet_page, profile_page, link, log_callback, page_timeout=page_load_timeout, tweet_ready_timeout=tweet_ready_timeout, stop_event=stop_event)
                 
                 if not record:
                     continue

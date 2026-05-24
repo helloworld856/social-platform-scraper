@@ -17,6 +17,7 @@ from src.core import (
     build_output_path,
     connect_existing_chromium,
     expand_compact_number,
+    interruptible_sleep,
     random_cooldown,
     should_stop,
     wait_if_paused,
@@ -148,6 +149,18 @@ def extract_article_payload(article) -> dict[str, str]:
                 return types.length ? `[${types.join('+')}]` : '[非文本]';
             };
 
+            const tweetTextEl = article.querySelector('[data-testid="tweetText"]');
+            if (tweetTextEl) {
+                const showMore = (
+                    tweetTextEl.querySelector('[data-testid="tweet-text-show-more-link"]')
+                    || [...tweetTextEl.querySelectorAll('span, div')].find(e => {
+                        const t = (e.innerText || '').trim().toLowerCase();
+                        return (t === 'show more' || t === 'もっと見る' || t === '더 보기')
+                            && !e.closest('a[href*="/status/"]');
+                    })
+                );
+                if (showMore) { showMore.click(); }
+            }
             const content = firstText('[data-testid="tweetText"]') || nonTextContent();
             return {
                 content,
@@ -166,7 +179,7 @@ def extract_article_payload(article) -> dict[str, str]:
     )
 
 
-def collect_tweet_metrics(page, tweet_url: str, page_timeout=None) -> dict[str, str]:
+def collect_tweet_metrics(page, tweet_url: str, page_timeout=None, stop_event=None) -> dict[str, str]:
     if page_timeout is None:
         page_timeout = PAGE_LOAD_TIMEOUT
     normalized_url = clean_tweet_url(tweet_url)
@@ -175,7 +188,7 @@ def collect_tweet_metrics(page, tweet_url: str, page_timeout=None) -> dict[str, 
         raise ValueError("无法解析推文 ID")
 
     page.goto(normalized_url, wait_until="domcontentloaded", timeout=page_timeout)
-    time.sleep(2.5)
+    interruptible_sleep(2.5, stop_event)
 
     article = find_target_article(page, status_id, page_timeout=page_timeout)
     if article is None:
@@ -259,7 +272,7 @@ def run_x_tweet_metrics_spider(
                 }
                 log_line(log_callback, f"[{index}/{len(tweet_urls)}] 读取推文：{normalized_url}")
                 try:
-                    row.update(collect_tweet_metrics(page, normalized_url, page_timeout=page_load_timeout_val))
+                    row.update(collect_tweet_metrics(page, normalized_url, page_timeout=page_load_timeout_val, stop_event=stop_event))
                     
                     if get_comments_bool:
                         try:
