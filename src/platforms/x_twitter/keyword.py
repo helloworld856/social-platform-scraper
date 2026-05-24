@@ -147,6 +147,8 @@ def get_tweet_text(article) -> str:
                 btn = article.locator(selector).first
                 if btn.count() > 0 and btn.is_visible():
                     btn.click(force=True, timeout=2000)
+                    time.sleep(0.3)
+                    break
             except Exception:
                 pass
     except Exception:
