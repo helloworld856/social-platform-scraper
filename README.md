@@ -1,6 +1,6 @@
-# 五平台数据爬取工具
+# 四平台数据爬取工具
 
-一个 PyQt 桌面工具台，用于集中启动 YouTube、TikTok、X/Twitter、Instagram、Facebook 五个平台的数据采集工具，并提供 AIGC 标题判断、关键词 XLSX 合并等数据处理功能。
+一个 PyQt 桌面工具台，用于集中启动 YouTube、TikTok、X/Twitter、Instagram 四个平台的数据采集工具，并提供 AIGC 标题判断、关键词 XLSX 合并等数据处理功能。
 
 ## 环境要求
 
@@ -26,7 +26,7 @@ python main.py
 python main.py
 ```
 
-各平台（TikTok、X/Twitter、Instagram、Facebook）工具会自动使用项目根目录下的 `user_data/` 启动 Chrome 调试浏览器。首次使用时，需要在自动打开的浏览器里登录对应平台。登录态会保存在 `user_data/`，后续通常不用重复登录。
+各平台（TikTok、X/Twitter、Instagram）工具会自动使用项目根目录下的 `user_data/` 启动 Chrome 调试浏览器。首次使用时，需要在自动打开的浏览器里登录对应平台。登录态会保存在 `user_data/`，后续通常不用重复登录。
 
 ## AIGC 配置
 
@@ -53,13 +53,12 @@ DEEPSEEK_MODEL_NAME=deepseek-chat
 - `src/platforms/tiktok/`：TikTok 采集工具。
 - `src/platforms/x_twitter/`：X/Twitter 采集工具。
 - `src/platforms/instagram/`：Instagram 采集工具。
-- `src/platforms/facebook/`：Facebook 采集工具。
 - `src/judge_aigc/`：AIGC 判断引擎（LangGraph + DeepSeek）。
 - `src/processing/`：AIGC 判断入口、关键词 XLSX 合并。
 - `src/ui/config_dialog.py`：各工具的参数配置对话框。
 - `test/`：UI 逻辑测试和暂停功能测试。
 - `user_data/`：各平台浏览器登录态目录。
-- `output/`：默认输出目录。
+- `output/`：默认输出目录，按平台分目录存放。`output/temp/` 存放文本输入中转文件的临时目录。
 
 ## 通用输入规则
 
@@ -342,45 +341,6 @@ https://www.instagram.com/username/
 - 轮播作品按页面可识别媒体类型追加占位。
 - 每爬完一个作者主页就保存一次。
 
-## Facebook 工具
-
-Facebook 工具使用 Playwright 接管本地 Chrome。运行前建议先在自动打开的 Chrome 中登录 Facebook；未登录、账号受限、主页私密、地区弹窗或页面被风控时，采集结果会受影响。
-
-### Facebook 作者主页作品采集
-
-用途：输入作者主页链接，滚动采集主页、Posts、Reels 下的公开作品，并逐条打开详情页读取发布时间、文本内容和页面可识别指标。
-
-输入：
-- 作者主页链接：每行一个
-
-可通过「参数配置」调整：每个作者最多作品数（默认 5000）、页面加载超时、滚动间隔、每次滚动像素、无新内容停止阈值、每个页面最大滚动次数（默认 200）、每 N 条保存一次、批量随机等待范围。
-
-脚本内置：每写入 10 条作品保存一次，并随机等待 9 到 22 秒，避免访问过快。
-
-示例：
-
-```txt
-https://www.facebook.com/username
-https://www.facebook.com/profile.php?id=123456789
-```
-
-输出字段：
-- 序号
-- 作品ID
-- 作品链接
-- 发布时间
-- 作品内容
-- 浏览量
-- 评论数
-- 点赞数
-- 分享数
-
-规则：
-- Reels 或视频作品只取标题/首行文本，并追加 `[视频]`。
-- 图片作品会尽量保留完整文本，并追加 `[图片]`。
-- 文本作品保留完整文本；页面可识别到图片或视频时追加对应占位。
-- 指标只写入页面或页面数据中稳定识别到的值，识别不到则留空。
-
 ## X/Twitter 工具
 
 X/Twitter 工具需要先登录自动打开的浏览器。若没有登录或账号被风控，页面 DOM 可能加载不完整，采集结果会受影响。
@@ -580,6 +540,8 @@ output/
 output/youtube/
 output/tiktok/
 output/x/
+output/instagram/
+output/temp/
 ```
 
 常见文件名示例：
@@ -593,7 +555,7 @@ tiktok_top_comments_YYYYMMDD.xlsx
 
 ## 运行建议
 
-- 首次使用 TikTok、X/Twitter、Instagram 或 Facebook 前，先运行任意对应平台工具，让程序打开浏览器，然后完成登录。
+- 首次使用 TikTok、X/Twitter 或 Instagram 前，先运行任意对应平台工具，让程序打开浏览器，然后完成登录。
 - 每个工具窗口提供「参数配置」按钮，可在启动任务前调整爬取行为参数（超时、等待间隔、停止阈值等）。修改后的参数会保留到下次打开。
 - 任务运行中可点击「暂停」暂停采集并保留当前进度，点击「继续」从暂停点恢复；点击「停止」彻底终止任务。
 - 不要频繁并发运行多个 X/Twitter 或 TikTok 工具，容易触发平台限制。

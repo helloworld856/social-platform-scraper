@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A PyQt5 desktop tool station for centralized web scraping across YouTube, TikTok, X/Twitter, Instagram, and Facebook, plus AIGC title classification and XLSX merging. Requires Python 3.10+.
+A PyQt5 desktop tool station for centralized web scraping across YouTube, TikTok, X/Twitter, and Instagram, plus AIGC title classification and XLSX merging. Requires Python 3.10+.
 
 ## Commands
 
@@ -45,15 +45,13 @@ python test/test_tiktok_profile.py
 
 **Instagram:** `instagram_profile_works`
 
-**Facebook:** `facebook_profile_works`
-
 **数据处理:** `judge_aigc`, `xlsx_merge`
 
 ## Environment
 
 Copy `.env` and set your credentials. The AIGC judge reads `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL_NAME` (the config also falls back to unprefixed `API_KEY`, `BASE_URL`, `MODEL_NAME`). YouTube tools need a Google API key entered in the UI (`api_key` field).
 
-Ruff config is in `pyproject.toml` (line-length 150, ignores E402/F841, excludes `src/pytok`). There is no build-system metadata — the project is run directly, not pip-installed.
+Ruff config is in `pyproject.toml` (line-length 150, ignores E402/F841). There is no build-system metadata — the project is run directly, not pip-installed.
 
 ## Architecture
 
@@ -61,7 +59,7 @@ Ruff config is in `pyproject.toml` (line-length 150, ignores E402/F841, excludes
 
 The main window (`src/studio/qt_app.py`) launches individual tool windows as **separate QProcess** instances via `tool_runner.py`. Each tool gets its own Python process to avoid blocking the launcher. Tools communicate results via `log_callback` + `finish_callback` signals.
 
-YouTube tools require a **Google API key** (field `api_key`). TikTok, X/Twitter, Instagram, and Facebook tools connect to a **local Chrome via CDP** (port 9222 by default). The project auto-launches Chrome with `--remote-debugging-port=9222` and persists login state in `<workspace_root>/user_data/`.
+YouTube tools require a **Google API key** (field `api_key`). TikTok, X/Twitter, and Instagram tools connect to a **local Chrome via CDP** (port 9222 by default). The project auto-launches Chrome with `--remote-debugging-port=9222` and persists login state in `<workspace_root>/user_data/`.
 
 ### Platform scraping strategies
 
@@ -69,8 +67,6 @@ YouTube tools require a **Google API key** (field `api_key`). TikTok, X/Twitter,
 - **TikTok**: Uses Playwright CDP (`connect_existing_chromium`). Two-tier approach: first tries TikTok's internal API (`/api/post/item_list/`) via `page.evaluate` fetch with `secUid`; if the API doesn't find the target video, falls back to scrolling the user's profile grid (`fallback_rows_from_profile`).
 - **X/Twitter**: Uses Playwright CDP. Three-tier approach: first tries author search (`from:<handle> since:... until:...`), then profile timeline scrolling (`/with_replies`, `/media` variants), finally opens the target tweet page to reverse-lookup the author profile and re-scan.
 - **Instagram**: Uses Playwright CDP. Scrolls the profile grid to collect work links, then opens each work in a detail page to extract publish time, text content, and engagement metrics.
-- **Facebook**: Uses Playwright CDP. Collects works from profile page sections (Posts, Reels), scrolls each section, and opens detail pages for individual work metrics.
-
 ### Shared core (`src/core/`)
 
 | Module | Purpose |
@@ -97,15 +93,11 @@ YouTube tools require a **Google API key** (field `api_key`). TikTok, X/Twitter,
 
 ### Tool registry pattern
 
-All tools are declared in `src/studio/registry.py` as `ToolSpec` dataclasses with a unique `tool_id`, `category` (YouTube/TikTok/X-Twitter/Instagram/Facebook/数据处理), `entrypoint` (dotted path to a QWidget class or factory), `implementation_path`, and `tags`. The launcher uses these for search, filtering, and QProcess instantiation.
+All tools are declared in `src/studio/registry.py` as `ToolSpec` dataclasses with a unique `tool_id`, `category` (YouTube/TikTok/X-Twitter/Instagram/数据处理), `entrypoint` (dotted path to a QWidget class or factory), `implementation_path`, and `tags`. The launcher uses these for search, filtering, and QProcess instantiation.
 
 ### AIGC judge (`src/judge_aigc/`)
 
 Two-stage classification: local keyword/Unicode-range detection runs first (fast, free); unresolved titles are sent to DeepSeek via LangChain LangGraph for final determination. Configured via `.env`. Batch processing with incremental XLSX saves and existing-row deduplication.
-
-### pytok submodule (`src/pytok/`)
-
-Vendored third-party TikTok scraping library (by Ben Steel / networkdynamics, v0.0.2, MIT) with its own dual-approach (TikTok-Api with zendriver browser fallback) and its own `setup.py`. This is a dependency of the broader project, not directly imported by the platform tools in `src/platforms/tiktok/` (which use Playwright directly).
 
 ## Key patterns
 
