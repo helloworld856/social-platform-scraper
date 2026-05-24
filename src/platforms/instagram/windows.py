@@ -40,12 +40,14 @@ class InstagramProfileWorksWindow(SimpleToolWindow):
             ConfigParam("save_batch_size", "每N条保存一次", kind="int", default=10, minimum=1, maximum=100),
             ConfigParam("cooldown_min", "批量等待最小(秒)", kind="float", default=10.0, minimum=0.0, maximum=60.0, step=1.0, decimals=1),
             ConfigParam("cooldown_max", "批量等待最大(秒)", kind="float", default=25.0, minimum=0.0, maximum=120.0, step=1.0, decimals=1),
+            ConfigParam("detail_delay_min", "详情页间隔最小(秒)", kind="float", default=3.0, minimum=0.0, maximum=30.0, step=0.5, decimals=1),
+            ConfigParam("detail_delay_max", "详情页间隔最大(秒)", kind="float", default=7.0, minimum=0.0, maximum=60.0, step=0.5, decimals=1),
         ]
 
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
         from src.platforms.instagram.works import run_instagram_profile_works_spider
 
-        config = {k: v for k, v in values.items() if k in ("max_works", "page_load_timeout", "scroll_delay", "scroll_px", "no_new_scroll_limit", "max_scrolls", "save_batch_size", "cooldown_min", "cooldown_max")}
+        config = {k: v for k, v in values.items() if k in ("max_works", "page_load_timeout", "scroll_delay", "scroll_px", "no_new_scroll_limit", "max_scrolls", "save_batch_size", "cooldown_min", "cooldown_max", "detail_delay_min", "detail_delay_max")}
         return run_instagram_profile_works_spider(
             values["profile_urls"],
             DEFAULT_X_CDP_URL,
