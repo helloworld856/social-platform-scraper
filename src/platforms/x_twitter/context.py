@@ -380,7 +380,7 @@ def extract_metrics_from_article(article) -> dict:
         ),
     }
 
-def collect_profile_timeline(page, profile_url: str, target_status_id: str, log_callback, page_timeout=None, max_scrolls=None, scroll_pause=None, pause_event=None, stop_event=None) -> tuple[list[str], int]:
+def collect_profile_timeline(page, profile_url: str, target_status_id: str, log_callback, page_timeout=None, max_scrolls=None, scroll_pause=None, context_size=CONTEXT_SIZE, pause_event=None, stop_event=None) -> tuple[list[str], int]:
     if page_timeout is None:
         page_timeout = PAGE_LOAD_TIMEOUT
     if max_scrolls is None:
@@ -432,7 +432,7 @@ def collect_profile_timeline(page, profile_url: str, target_status_id: str, log_
                     target_index = idx
                     break
 
-        if target_index >= 0 and len(timeline_urls) >= target_index + CONTEXT_SIZE + 1:
+        if target_index >= 0 and len(timeline_urls) >= target_index + context_size + 1:
             break
 
         if len(timeline_urls) == previous_count:
@@ -585,11 +585,14 @@ def collect_author_search_timeline(
 def extract_detail_metrics(page, tweet_url: str, fallback: dict, log_callback, page_timeout=None, stop_event=None) -> dict:
     if page_timeout is None:
         page_timeout = PAGE_LOAD_TIMEOUT
+    if should_stop(stop_event):
+        return dict(fallback or {})
     target_status_id = extract_status_id(tweet_url)
     metrics = dict(fallback or {})
     try:
         page.goto(tweet_url, wait_until="domcontentloaded", timeout=page_timeout)
-        interruptible_sleep(2.2, stop_event)
+        if interruptible_sleep(2.2, stop_event):
+            return metrics
         article = find_target_article(page, target_status_id)
         if article is None:
             return metrics
@@ -690,6 +693,7 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
                                 page_timeout=page_load_timeout_val,
                                 max_scrolls=max_profile_scrolls_val,
                                 scroll_pause=profile_scroll_pause_val,
+                                context_size=context_size_val,
                                 pause_event=pause_event,
                                 stop_event=stop_event,
                             )
@@ -716,6 +720,7 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
                                     page_timeout=page_load_timeout_val,
                                     max_scrolls=max_profile_scrolls_val,
                                     scroll_pause=profile_scroll_pause_val,
+                                    context_size=context_size_val,
                                     pause_event=pause_event,
                                     stop_event=stop_event,
                                 )

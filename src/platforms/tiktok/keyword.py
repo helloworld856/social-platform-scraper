@@ -17,6 +17,7 @@ from src.core import (
     connect_existing_chromium,
     expand_compact_number,
     extract_tiktok_video_title,
+    interruptible_sleep,
     random_cooldown,
     resolve_tiktok_card_container,
     sanitize_csv_row,
@@ -496,7 +497,7 @@ def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str,
                         log_callback(f"  已滚动 {scroll_index}/{scroll_limit} 轮，已扫描 {scanned_count} 个候选，写入 {written_count} 条")
 
                     trigger_search_lazy_load(search_page)
-                    time.sleep(search_scroll_pause)
+                    interruptible_sleep(search_scroll_pause, stop_event)
                 log_callback(f"  写入 {written_count} 条日期范围内的视频")
                 writer.save()
 

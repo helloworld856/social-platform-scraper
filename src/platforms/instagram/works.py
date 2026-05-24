@@ -78,13 +78,9 @@ def interruptible_random_sleep(min_seconds: float, max_seconds: float, log_callb
     max_seconds = max(min_seconds, float(max_seconds or min_seconds))
     seconds = random.uniform(min_seconds, max_seconds)
     if seconds <= 0:
-        return
+        return False
     log_line(log_callback, f"    {reason}，随机等待 {seconds:.1f} 秒。")
-    deadline = time.time() + seconds
-    while time.time() < deadline:
-        if should_stop(stop_event):
-            break
-        time.sleep(min(0.5, deadline - time.time()))
+    return interruptible_sleep(seconds, stop_event)
 
 
 def clean_profile_url(url: str) -> str:
@@ -671,21 +667,6 @@ def row_from_work(index: int, work: dict[str, str]) -> dict[str, str]:
     }
 
 
-def cooldown_if_needed(index: int, every: int, min_seconds: float, max_seconds: float, log_callback, stop_event=None):
-    every = int(every or 0)
-    if every <= 0 or index <= 0 or index % every != 0:
-        return
-    min_seconds = max(0.0, float(min_seconds or 0))
-    max_seconds = max(min_seconds, float(max_seconds or min_seconds))
-    seconds = random.uniform(min_seconds, max_seconds)
-    log_line(log_callback, f"  已采集 {index} 条作品，随机等待 {seconds:.1f} 秒。")
-    deadline = time.time() + seconds
-    while time.time() < deadline:
-        if should_stop(stop_event):
-            break
-        time.sleep(min(0.5, deadline - time.time()))
-
-
 def run_instagram_profile_works_spider(
     profile_urls_text: str,
     cdp_port_or_url: str = DEFAULT_X_CDP_URL,
@@ -746,8 +727,8 @@ def run_instagram_profile_works_spider(
 
                 username = extract_username(profile_url)
                 log_line(log_callback, f"[{profile_index}/{len(profile_urls)}] 读取作者主页：{profile_url}")
-                pending_rows = []
                 written_count = 0
+                batch_written = 0
                 try:
                     links = collect_profile_work_links(page, profile_url, max_works, max_scrolls, log_callback, stop_event, pause_event, page_timeout=page_timeout_val, scroll_delay=scroll_delay_val, scroll_px=scroll_px_val, no_new_limit=no_new_limit_val)
                     log_line(log_callback, f"  @{username} 共收集到 {len(links)} 条作品链接，开始读取详情。")
@@ -759,6 +740,8 @@ def run_instagram_profile_works_spider(
                             stop_event,
                             reason="主页链接收集完成，开始详情页前",
                         )
+                        if should_stop(stop_event):
+                            break
                     rate_limited = False
                     for item_index, work in enumerate(links, 1):
                         if should_stop(stop_event):
@@ -767,37 +750,23 @@ def run_instagram_profile_works_spider(
                             break
                         try:
                             detail = enrich_work_detail(page, work, log_callback, stop_event, page_timeout=page_timeout_val)
-                            pending_rows.append(row_from_work(serial_number, detail))
+                            writer.writerow(row_from_work(serial_number, detail))
                             serial_number += 1
+                            written_count += 1
+                            batch_written += 1
                             log_line(log_callback, f"    [{item_index}/{len(links)}] 完成：{work['link']}")
-                            if len(pending_rows) >= save_batch_val:
-                                writer.writerows(pending_rows)
-                                writer.save()
-                                written_count += len(pending_rows)
-                                pending_rows.clear()
-                                log_line(log_callback, f"    已保存 {written_count} 条，准备随机等待。")
-                                cooldown_if_needed(
-                                    item_index,
-                                    save_batch_val,
-                                    cooldown_min_val,
-                                    cooldown_max_val,
-                                    log_callback,
-                                    stop_event,
-                                )
-                            else:
-                                interruptible_random_sleep(
-                                    detail_delay_min_val,
-                                    detail_delay_max_val,
-                                    log_callback,
-                                    stop_event,
-                                    reason="详情页读取完成",
-                                )
+                            if item_index < len(links):
+                                seconds = random.uniform(detail_delay_min_val, detail_delay_max_val)
+                                log_line(log_callback, f"    详情页读取完成，随机等待 {seconds:.1f} 秒。")
+                                if interruptible_sleep(seconds, stop_event):
+                                    break
+                            if batch_written >= save_batch_val:
+                                seconds = random.uniform(cooldown_min_val, cooldown_max_val)
+                                log_line(log_callback, f"    已写入 {written_count} 条，随机等待 {seconds:.1f} 秒。")
+                                if interruptible_sleep(seconds, stop_event):
+                                    break
+                                batch_written = 0
                         except InstagramRateLimitError as exc:
-                            if pending_rows:
-                                writer.writerows(pending_rows)
-                                writer.save()
-                                written_count += len(pending_rows)
-                                pending_rows.clear()
                             log_line(log_callback, f"    停止当前作者详情读取：{exc}。已保存 {written_count} 条。")
                             rate_limited = True
                             break
@@ -811,11 +780,6 @@ def run_instagram_profile_works_spider(
                         except Exception as exc:
                             log_line(log_callback, f"    跳过：{work['link']}：{exc}")
 
-                    if pending_rows:
-                        writer.writerows(pending_rows)
-                        writer.save()
-                        written_count += len(pending_rows)
-                        pending_rows.clear()
                     if rate_limited and not should_stop(stop_event):
                         interruptible_random_sleep(
                             RATE_LIMIT_RETRY_DELAY_MIN_SECONDS,

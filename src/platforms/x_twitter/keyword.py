@@ -368,6 +368,7 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
                         except Exception:
                             pass
 
+                        stop_outer = False
                         for article in search_page.locator('article[data-testid="tweet"]').all():
                             if should_stop(stop_event):
                                 break
@@ -428,6 +429,7 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
                                     buffer_rows.clear()
                                     if total_count and total_count % 20 == 0:
                                         if random_cooldown(log_callback, stop_event, 3.0, 8.0):
+                                            stop_outer = True
                                             break
                             except Exception as e:
                                 log_callback(f"  单条推文提取失败，已跳过：{e}")
@@ -444,8 +446,9 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
                             no_change_strikes = 0
                         previous_count = slice_count
 
-                        search_page.mouse.wheel(delta_x=0, delta_y=random.randint(900, 1400))
-                        if interruptible_sleep(random.uniform(scroll_cooldown_min, scroll_cooldown_max), stop_event):
+                        if not stop_outer:
+                            search_page.mouse.wheel(delta_x=0, delta_y=random.randint(900, 1400))
+                        if stop_outer or interruptible_sleep(random.uniform(scroll_cooldown_min, scroll_cooldown_max), stop_event):
                             break
 
                     log_callback(f"当前切片捕获 {slice_count} 条含媒体原创推文。")

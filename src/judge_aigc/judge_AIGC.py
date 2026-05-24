@@ -4,13 +4,12 @@
 import json
 import re
 import os
-import time
 import openpyxl
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import TypedDict, List, Any, Dict, Set, Callable
 
 from .config import config
-from src.core import wait_if_paused
+from src.core import interruptible_sleep, wait_if_paused
 
 
 class State(TypedDict):
@@ -645,7 +644,7 @@ def run_judge(
             )
 
             if config.SLEEP_SECONDS > 0:
-                time.sleep(config.SLEEP_SECONDS)
+                interruptible_sleep(config.SLEEP_SECONDS, stop_event)
 
         wb.save(output_excel_path)
     except Exception:

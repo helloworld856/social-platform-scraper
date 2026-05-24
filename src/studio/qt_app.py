@@ -33,7 +33,7 @@ logger = get_logger(__name__)
 
 
 ALL_CATEGORY = "全部"
-CATEGORY_ORDER = [ALL_CATEGORY, "YouTube", "TikTok", "X/Twitter", "Instagram", "Facebook", "数据处理"]
+CATEGORY_ORDER = [ALL_CATEGORY, "YouTube", "TikTok", "X/Twitter", "Instagram", "数据处理"]
 
 
 class ThreePlatformCrawlerQtApp(QMainWindow):

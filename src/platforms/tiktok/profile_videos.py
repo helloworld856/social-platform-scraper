@@ -397,17 +397,6 @@ def wait_after_detail(log_callback, stop_event=None, pause_event=None) -> bool:
     return interruptible_sleep(seconds, stop_event)
 
 
-def save_batch_and_wait(writer: XlsxRowWriter, written_count: int, log_callback, stop_event=None, pause_event=None, save_batch_size: int = SAVE_BATCH_SIZE, batch_wait_min: float = BATCH_WAIT_MIN_SECONDS, batch_wait_max: float = BATCH_WAIT_MAX_SECONDS) -> bool:
-    if written_count <= 0 or written_count % save_batch_size != 0:
-        return False
-    writer.save()
-    if wait_if_paused(pause_event, stop_event):
-        return True
-    seconds = random.uniform(batch_wait_min, batch_wait_max)
-    log_line(log_callback, f"    已写入并保存 {written_count} 条，随机等待 {seconds:.1f} 秒。")
-    return interruptible_sleep(seconds, stop_event)
-
-
 def process_video_batch(
     detail_page,
     video_links: list[str],
@@ -428,6 +417,7 @@ def process_video_batch(
     batch_wait_max: float = BATCH_WAIT_MAX_SECONDS,
 ) -> tuple[int, int, bool]:
     stop_profile = False
+    batch_written = 0
     log_line(log_callback, f"  开始爬取本批 {len(video_links)} 条视频。")
 
     for batch_index, video_url in enumerate(video_links, 1):
@@ -437,12 +427,12 @@ def process_video_batch(
             break
         try:
             log_line(log_callback, f"    [{batch_index}/{len(video_links)}] 读取视频：{video_url}")
-            
+
             detail = {"video_url": video_url}
             if get_video_info_bool or get_comments_bool or limit_time_bool:
                 detail = extract_video_detail(detail_page, video_url)
                 published_at = detail.get("published_at", "")
-                
+
                 if limit_time_bool and start_dt and end_dt:
                     publish_dt = parse_publish_date(published_at)
                     if publish_dt and publish_dt.date() < start_dt.date():
@@ -458,7 +448,7 @@ def process_video_batch(
                         continue
 
             row_base = row_from_detail(serial_number, detail) if get_video_info_bool else {"序号": str(serial_number), "视频链接": video_url}
-            
+
             if get_comments_bool:
                 comments = collect_video_comments(detail_page, video_url, max_comments, log_callback, stop_event, pause_event=pause_event)
                 writer.writerow("视频信息", sanitize_csv_row(row_base))
@@ -471,8 +461,9 @@ def process_video_batch(
                         "发布时间": comment.get("create_time", "")
                     }
                     writer.writerow("评论信息", sanitize_csv_row(comment_row))
-                
+
                 written_count += 1
+                batch_written += 1
                 log_line(
                     log_callback,
                     f"      写入：点赞 {detail.get('likes') or '空'}，评论 {detail.get('comments') or '空'}，收藏 {detail.get('collects') or '空'}，分享 {detail.get('shares') or '空'}，抓取到主楼评论 {len(comments)} 条。",
@@ -480,6 +471,7 @@ def process_video_batch(
             else:
                 writer.writerow(sanitize_csv_row(row_base))
                 written_count += 1
+                batch_written += 1
                 if get_video_info_bool:
                     log_line(
                         log_callback,
@@ -489,8 +481,14 @@ def process_video_batch(
                     log_line(log_callback, f"      写入视频链接：{video_url}")
 
             serial_number += 1
-            if save_batch_and_wait(writer, written_count, log_callback, stop_event, pause_event=pause_event, save_batch_size=save_batch_size, batch_wait_min=batch_wait_min, batch_wait_max=batch_wait_max):
-                break
+            if batch_written >= save_batch_size:
+                if wait_if_paused(pause_event, stop_event):
+                    break
+                seconds = random.uniform(batch_wait_min, batch_wait_max)
+                log_line(log_callback, f"    已写入 {written_count} 条，随机等待 {seconds:.1f} 秒。")
+                if interruptible_sleep(seconds, stop_event):
+                    break
+                batch_written = 0
         except Exception as exc:
             log_line(log_callback, f"      跳过：{exc}")
 
@@ -589,7 +587,7 @@ def run_tiktok_profile_videos_spider(
                 log_line(log_callback, f"[{profile_index}/{len(profile_urls)}] 读取主页：{profile_url}")
                 try:
                     profile_page.goto(profile_url, wait_until="domcontentloaded", timeout=page_load_timeout)
-                    time.sleep(2.5)
+                    interruptible_sleep(2.5, stop_event)
                 except PlaywrightTimeoutError:
                     log_line(log_callback, "  主页加载超时，跳过。")
                     continue
@@ -655,6 +653,9 @@ def run_tiktok_profile_videos_spider(
                                 log_callback,
                                 stop_event,
                                 pause_event=pause_event,
+                                save_batch_size=save_batch_size,
+                                batch_wait_min=batch_wait_min,
+                                batch_wait_max=batch_wait_max,
                             )
                             pending_links = []
                         log_line(log_callback, "  连续多次没有新视频链接，结束当前主页。")
@@ -680,6 +681,9 @@ def run_tiktok_profile_videos_spider(
                         log_callback,
                         stop_event,
                         pause_event=pause_event,
+                        save_batch_size=save_batch_size,
+                        batch_wait_min=batch_wait_min,
+                        batch_wait_max=batch_wait_max,
                     )
 
             for opened_page in (profile_page, detail_page):

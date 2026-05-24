@@ -495,7 +495,7 @@ def test_text_or_file_e2e_tempfile_content_matches_input():
 
 
 def test_all_windows_have_pause_event_signature():
-    """Ensure all 20 window classes accept pause_event in run_task."""
+    """Ensure all 19 window classes accept pause_event in run_task."""
     import inspect
     import importlib
 
@@ -504,7 +504,6 @@ def test_all_windows_have_pause_event_signature():
         ("src.platforms.tiktok.windows", ["TikTokKeywordWindow", "TikTokProfilesWindow", "TikTokProfileVideosWindow", "TikTokContextWindow", "TikTokCommentsWindow"]),
         ("src.platforms.x_twitter.windows", ["XKeywordWindow", "XProfilesWindow", "XContextWindow", "XTweetMetricsWindow", "XProfileTweetsWindow", "XCommentsWindow"]),
         ("src.platforms.instagram.windows", ["InstagramProfileWorksWindow"]),
-        ("src.platforms.facebook.windows", ["FacebookProfileWorksWindow"]),
         ("src.processing.windows", ["JudgeAIGCWindow", "XlsxMergeWindow"]),
     ]
 
@@ -517,4 +516,4 @@ def test_all_windows_have_pause_event_signature():
             params = list(sig.parameters.keys())
             assert "pause_event" in params, f"{class_name}.run_task missing pause_event parameter. Found: {params}"
             total += 1
-    assert total == 20, f"Expected 20 classes, found {total}"
+    assert total == 19, f"Expected 19 classes, found {total}"

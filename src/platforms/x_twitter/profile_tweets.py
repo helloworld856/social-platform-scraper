@@ -55,6 +55,8 @@ BLOCKED_PROFILE_NAMES = {
     "i",
     "search",
     "settings",
+    "signup",
+    "login",
 }
 
 
@@ -140,7 +142,7 @@ def row_from_tweet(index: int, tweet: dict[str, str]) -> dict[str, str]:
     }
 
 
-def cooldown_after_batch(total_written: int, log_callback, stop_event=None, save_batch_size=None, cooldown_min=None, cooldown_max=None):
+def cooldown_after_batch(total_written: int, log_callback, stop_event=None, pause_event=None, save_batch_size=None, cooldown_min=None, cooldown_max=None):
     if save_batch_size is None:
         save_batch_size = SAVE_BATCH_SIZE
     if cooldown_min is None:
@@ -154,6 +156,8 @@ def cooldown_after_batch(total_written: int, log_callback, stop_event=None, save
     deadline = time.time() + seconds
     while time.time() < deadline:
         if should_stop(stop_event):
+            break
+        if wait_if_paused(pause_event, stop_event):
             break
         time.sleep(min(0.5, deadline - time.time()))
 
@@ -401,7 +405,7 @@ def collect_profile_tweets(
                     writer.save()
                     written_count += len(pending_rows)
                     pending_rows.clear()
-                    cooldown_after_batch(written_count, log_callback, stop_event, save_batch_size=save_batch_size, cooldown_min=cooldown_min, cooldown_max=cooldown_max)
+                    cooldown_after_batch(written_count, log_callback, stop_event, pause_event=pause_event, save_batch_size=save_batch_size, cooldown_min=cooldown_min, cooldown_max=cooldown_max)
                     if should_stop(stop_event):
                         break
 

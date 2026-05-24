@@ -18,6 +18,7 @@ from src.core import (
     build_output_path,
     connect_existing_chromium,
     expand_compact_number,
+    interruptible_sleep,
     random_cooldown,
     sanitize_csv_row,
     sanitize_csv_rows,
@@ -781,7 +782,7 @@ def fetch_comments_via_page_api(page, video_id: str, collector: CommentCollector
         if not has_more_comments(data.get("has_more")) or not next_cursor or str(next_cursor) == str(cursor):
             break
         cursor = next_cursor
-        time.sleep(0.4)
+        interruptible_sleep(0.4, stop_event)
 
     return total_added
 
@@ -839,7 +840,7 @@ def collect_video_comments(page, video_url: str, max_scan_comments: int, log_cal
                 break
 
             scroll_comments(page)
-            time.sleep(_scroll_pause)
+            interruptible_sleep(_scroll_pause, stop_event)
             collect_visible_dom_comments(page, collector, log_callback)
 
             current_count = len(collector.comments)
