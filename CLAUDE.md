@@ -77,6 +77,7 @@ YouTube tools require a **Google API key** (field `api_key`). TikTok, X/Twitter,
 | `xlsx.py` | `XlsxRowWriter` — incremental XLSX writer with temp-file atomic saves via `os.replace`; `MultiSheetXlsxWriter` for multi-sheet output |
 | `csv_utils.py` | `sanitize_csv_cell` — strips newlines from cell values for CSV/XLSX compatibility |
 | `number_format.py` | `expand_compact_number` — converts "1.2K" → "1200", handles CJK units (万/亿) |
+| `tiktok_metadata.py` | `extract_tiktok_video_title` — extracts the video title from a TikTok detail page; `resolve_tiktok_card_container` — resolves the nearest card container element for a given anchor |
 | `timing.py` | `should_stop`, `interruptible_sleep`, `random_cooldown`, `wait_if_paused` — cooperative stop/pause-event checks that every scraper must call in its inner loops |
 
 `src/studio/base.py` defines `ToolSpec` (dataclass: `tool_id`, `name`, `category`, `summary`, `entrypoint`, `implementation_path`, `tags`) and `load_object(dotted_path)` which imports and returns a class/factory from a dotted string path. Both are used by `registry.py` and `tool_runner.py`.
