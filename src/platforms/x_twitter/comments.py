@@ -443,6 +443,31 @@ def extract_comments(page, tweet_url: str, max_count: int = DEFAULT_SCAN_LIMIT, 
                 if not is_direct_reply_to_main(article, target_status_id, main_author_handle, own_status_id):
                     continue
 
+                # Revert auto-translation and remove CSS truncation before reading text
+                try:
+                    article.evaluate("""async (el) => {
+                        const revertTexts = ['view original', '查看原文', '原文を表示', 'show original', '原文を見る'];
+                        const allNodes = el.querySelectorAll('*');
+                        for (const node of allNodes) {
+                            const text = (node.textContent || '').trim().toLowerCase();
+                            if (!text || node.children.length > 0) continue;
+                            if (revertTexts.includes(text)) {
+                                try { node.click(); } catch (_) {}
+                                break;
+                            }
+                        }
+                        const tweetText = el.querySelector('[data-testid="tweetText"]');
+                        if (tweetText) {
+                            tweetText.style.setProperty('max-height', 'none', 'important');
+                            tweetText.style.setProperty('overflow', 'visible', 'important');
+                            tweetText.style.setProperty('-webkit-line-clamp', 'unset', 'important');
+                        }
+                        // Wait for React to re-render with original text
+                        await new Promise(r => setTimeout(r, 400));
+                    }""")
+                except Exception:
+                    pass
+
                 content_el = article.query_selector('div[data-testid="tweetText"]')
                 content = content_el.inner_text().strip() if content_el else ""
 
@@ -481,20 +506,31 @@ def extract_comments(page, tweet_url: str, max_count: int = DEFAULT_SCAN_LIMIT, 
                             break
 
                 like_count = "0"
-                like_btn = article.query_selector('button[data-testid="like"] span span')
-                if not like_btn:
-                    like_btn = article.query_selector('button[data-testid="unlike"] span span')
-                if like_btn:
-                    like_text = like_btn.inner_text().strip()
-                    if like_text:
-                        like_count = expand_compact_number(like_text)
+                for testid in ("like", "unlike"):
+                    btn = article.query_selector(f'button[data-testid="{testid}"]')
+                    if not btn:
+                        continue
+                    raw_text = btn.inner_text().strip()
+                    if raw_text and re.search(r"\d", raw_text):
+                        like_count = expand_compact_number(raw_text)
+                        break
+                    aria = btn.get_attribute("aria-label") or ""
+                    match = re.search(r"([\d,.]+(?:\.\d+)?\s*[KkMmBb]?)", aria)
+                    if match:
+                        like_count = expand_compact_number(match.group(1))
+                        break
 
                 reply_count = "0"
-                reply_btn = article.query_selector('button[data-testid="reply"] span span')
+                reply_btn = article.query_selector('button[data-testid="reply"]')
                 if reply_btn:
-                    reply_text = reply_btn.inner_text().strip()
-                    if reply_text:
-                        reply_count = expand_compact_number(reply_text)
+                    raw_text = reply_btn.inner_text().strip()
+                    if raw_text and re.search(r"\d", raw_text):
+                        reply_count = expand_compact_number(raw_text)
+                    else:
+                        aria = reply_btn.get_attribute("aria-label") or ""
+                        match = re.search(r"([\d,.]+(?:\.\d+)?\s*[KkMmBb]?)", aria)
+                        if match:
+                            reply_count = expand_compact_number(match.group(1))
 
                 comments.append(
                     {

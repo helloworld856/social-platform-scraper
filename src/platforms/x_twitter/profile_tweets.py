@@ -36,7 +36,7 @@ def _parse_date_range(start_str: str, end_str: str):
     return start_dt, end_dt
 
 
-CSV_FIELDS = ["序号", "帖子ID", "发布时间", "帖子内容", "浏览量", "点赞量", "转发量", "评论数", "帖子链接"]
+CSV_FIELDS = ["序号", "帖子ID", "发布时间", "帖子内容", "浏览量", "点赞量", "转发量", "评论数", "帖子链接", "博主链接"]
 PAGE_LOAD_TIMEOUT = 30000
 INITIAL_LOAD_DELAY = 2.0
 SCROLL_DELAY = 3.2
@@ -136,6 +136,7 @@ def row_from_tweet(index: int, tweet: dict[str, str]) -> dict[str, str]:
         "转发量": tweet.get("retweets", ""),
         "评论数": tweet.get("replies", ""),
         "帖子链接": tweet.get("url", ""),
+        "博主链接": tweet.get("profile_url", ""),
     }
 
 
@@ -160,7 +161,7 @@ def cooldown_after_batch(total_written: int, log_callback, stop_event=None, save
 def extract_visible_profile_tweets(page, username: str) -> list[dict[str, str]]:
     username_lc = username.lower().lstrip("@")
     return page.evaluate(
-        """({ username }) => {
+        """async ({ username }) => {
             const results = [];
             const normalize = value => (value || '').trim().replace(/^@/, '').toLowerCase();
             const ownStatus = article => {
@@ -190,13 +191,32 @@ def extract_visible_profile_tweets(page, username: str) -> list[dict[str, str]]:
             const ariaMetric = (root, testIds) => {
                 for (const id of testIds) {
                     const el = root.querySelector(`[data-testid="${id}"]`);
-                    const aria = el ? el.getAttribute('aria-label') : '';
+                    if (!el) continue;
+                    const rawText = (el.innerText || el.textContent || '').trim();
+                    if (rawText && /\\d/.test(rawText)) return rawText;
+                    const aria = el.getAttribute('aria-label') || '';
+                    const match = aria ? aria.match(/([\\d,]+(\\.\\d+)?\\s*[KkMmBb]?)/) : null;
+                    if (match) return match[1].replace(/,/g, '');
+                }
+                return '';
+            };
+            const firstMetric = (root, selectors) => {
+                for (const selector of selectors) {
+                    const el = root.querySelector(selector);
+                    if (!el) continue;
+                    const rawText = (el.innerText || el.textContent || '').trim();
+                    if (rawText && /\\d/.test(rawText)) return rawText;
+                    const aria = el.getAttribute('aria-label') || '';
                     const match = aria ? aria.match(/([\\d,]+(\\.\\d+)?\\s*[KkMmBb]?)/) : null;
                     if (match) return match[1].replace(/,/g, '');
                 }
                 return '';
             };
 
+            // Phase 1: collect matching articles and apply mutations
+            const revertTexts = ['view original', '查看原文', '原文を表示', 'show original', '原文を見る'];
+            const expandTexts = ['show more', 'show more...', 'もっと見る', '더 보기'];
+            const articles = [];
             for (const article of document.querySelectorAll('article[data-testid="tweet"], article')) {
                 try {
                     if (isPromoted(article)) continue;
@@ -205,27 +225,58 @@ def extract_visible_profile_tweets(page, username: str) -> list[dict[str, str]]:
 
                     const textEl = article.querySelector('[data-testid="tweetText"]');
                     if (textEl) {
-                        const showMore = (
-                            textEl.querySelector('[data-testid="tweet-text-show-more-link"]')
-                            || [...textEl.querySelectorAll('span, div')].find(e => {
-                                const t = (e.innerText || '').trim().toLowerCase();
-                                return (t === 'show more' || t === 'もっと見る' || t === '더 보기')
-                                    && !e.closest('a[href*="/status/"]');
-                            })
-                        );
-                        if (showMore) { showMore.click(); }
+                        const allNodes = article.querySelectorAll('*');
+                        for (const node of allNodes) {
+                            const nodeText = (node.textContent || '').trim().toLowerCase();
+                            if (!nodeText || node.children.length > 0) continue;
+                            if (revertTexts.includes(nodeText)) {
+                                try { node.click(); } catch (_) {}
+                                break;
+                            }
+                        }
+                        textEl.style.setProperty('max-height', 'none', 'important');
+                        textEl.style.setProperty('overflow', 'visible', 'important');
+                        textEl.style.setProperty('-webkit-line-clamp', 'unset', 'important');
+                        textEl.style.setProperty('display', 'block', 'important');
+                        textEl.style.setProperty('white-space', 'normal', 'important');
+                        for (const node of allNodes) {
+                            const nodeText = (node.textContent || '').trim().toLowerCase();
+                            if (!nodeText || node.children.length > 0) continue;
+                            if (!expandTexts.includes(nodeText)) continue;
+                            try { node.click(); } catch (_) {}
+                            break;
+                        }
                     }
-                    const text = textEl ? (textEl.innerText || textEl.textContent || '').trim() : '';
                     const timeEl = article.querySelector('time');
                     const publishedAt = timeEl ? (timeEl.getAttribute('datetime') || '') : '';
                     const href = info.href.startsWith('http') ? info.href : `https://x.com${info.href}`;
+                    articles.push({ article, postId: info.postId, publishedAt, href });
+                } catch (error) {}
+            }
 
+            // Wait for React to re-render with original text
+            if (articles.length > 0) {
+                await new Promise(r => setTimeout(r, 500));
+            }
+
+            // Phase 2: read text and metrics
+            for (const { article, postId, publishedAt, href } of articles) {
+                try {
+                    const textEl = article.querySelector('[data-testid="tweetText"]');
+                    const text = textEl ? (textEl.innerText || textEl.textContent || '').trim() : '';
                     results.push({
-                        postId: info.postId,
+                        postId,
                         publishedAt,
                         content: text || nonTextContent(article),
                         url: href,
-                        views: ariaMetric(article, ['app-text-transition-container']) || '',
+                        views: firstMetric(article, [
+                            'a[href*="/analytics"]',
+                            'div[data-testid="postViewCount"]',
+                            '[aria-label*="Views"]',
+                            '[aria-label*="views"]',
+                            '[aria-label*="浏览"]',
+                            '[aria-label*="表示"]',
+                        ]) || '',
                         likes: ariaMetric(article, ['like', 'unlike']) || '',
                         retweets: ariaMetric(article, ['retweet', 'unretweet']) || '',
                         replies: ariaMetric(article, ['reply']) || '',
@@ -315,6 +366,7 @@ def collect_profile_tweets(
                 except Exception:
                     continue
                     
+            normalized_tweet["profile_url"] = profile_url
             tweets.append(normalized_tweet)
             added += 1
             if writer:

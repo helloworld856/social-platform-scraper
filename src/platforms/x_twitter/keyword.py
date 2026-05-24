@@ -114,19 +114,38 @@ def get_tweet_url(article) -> str:
 def get_tweet_text(article) -> str:
     try:
         article.evaluate("""el => {
+            // Step 1: Revert auto-translation — click "View original" / "查看原文" / "原文を表示"
+            const revertTexts = ['view original', '查看原文', '原文を表示', 'show original', '原文を見る'];
+            const allNodes = el.querySelectorAll('*');
+            for (const node of allNodes) {
+                const text = (node.textContent || '').trim().toLowerCase();
+                if (!text || node.children.length > 0) continue;
+                if (revertTexts.includes(text)) {
+                    try { node.click(); } catch (_) {}
+                    break;
+                }
+            }
+
+            // Step 2: Remove CSS truncation to reveal full text
             const tweetText = el.querySelector('[data-testid="tweetText"]');
             if (!tweetText) return;
-            const showMore = (
-                tweetText.querySelector('[data-testid="tweet-text-show-more-link"]')
-                || [...tweetText.querySelectorAll('span, div')].find(e => {
-                    const t = (e.innerText || '').trim().toLowerCase();
-                    return (t === 'show more' || t === 'もっと見る' || t === '더 보기')
-                        && !e.closest('a[href*="/status/"]');
-                })
-            );
-            if (showMore) { showMore.scrollIntoView({block: 'center'}); showMore.click(); }
+            tweetText.style.setProperty('max-height', 'none', 'important');
+            tweetText.style.setProperty('overflow', 'visible', 'important');
+            tweetText.style.setProperty('-webkit-line-clamp', 'unset', 'important');
+            tweetText.style.setProperty('display', 'block', 'important');
+            tweetText.style.setProperty('white-space', 'normal', 'important');
+
+            // Step 3: Click "Show more" if present (for dynamic-load cases)
+            const expandTexts = ['show more', 'show more...', 'もっと見る', '더 보기'];
+            for (const node of allNodes) {
+                const text = (node.textContent || '').trim().toLowerCase();
+                if (!text || node.children.length > 0) continue;
+                if (!expandTexts.includes(text)) continue;
+                try { node.click(); } catch (_) {}
+                break;
+            }
         }""")
-        time.sleep(0.5)
+        time.sleep(0.3)
     except Exception:
         pass
     return safe_text(article.locator('[data-testid="tweetText"]'), default="无文字内容")
@@ -159,8 +178,14 @@ def extract_metric_value(locator, default: str = "未知") -> str:
         pass
     return default
 
-def extract_metric_from_article(article, selector: str, default: str = "未知") -> str:
-    return extract_metric_value(article.locator(selector), default=default)
+def extract_metric_from_article(article, selectors, default: str = "未知") -> str:
+    if isinstance(selectors, str):
+        selectors = [selectors]
+    for selector in selectors:
+        value = extract_metric_value(article.locator(selector), default="")
+        if value:
+            return value
+    return default
 
 def get_media_label(article) -> str:
     labels: list[str] = []
@@ -362,7 +387,13 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
                                     "完整搜索语法": final_query,
                                     "序号": str(total_count + 1),
                                     "推文内容": get_tweet_text(article) + get_media_label(article),
-                                    "浏览量": extract_metric_from_article(article, 'a[href*="/analytics"]'),
+                                    "浏览量": extract_metric_from_article(article, [
+                                        'a[href*="/analytics"]',
+                                        'div[data-testid="postViewCount"]',
+                                        '[aria-label*="Views"]',
+                                        '[aria-label*="views"]',
+                                        '[aria-label*="浏览"]',
+                                    ]),
                                     "点赞量": extract_metric_from_article(article, '[data-testid="like"], [data-testid="unlike"]'),
                                     "转发量": extract_metric_from_article(article, '[data-testid="retweet"], [data-testid="unretweet"]'),
                                     "评论数": extract_metric_from_article(article, '[data-testid="reply"]'),

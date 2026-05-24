@@ -212,19 +212,38 @@ def get_tweet_datetime(article) -> datetime | None:
 def get_tweet_text(article) -> str:
     try:
         article.evaluate("""el => {
+            // Step 1: Revert auto-translation — click "View original" / "查看原文" / "原文を表示"
+            const revertTexts = ['view original', '查看原文', '原文を表示', 'show original', '原文を見る'];
+            const allNodes = el.querySelectorAll('*');
+            for (const node of allNodes) {
+                const text = (node.textContent || '').trim().toLowerCase();
+                if (!text || node.children.length > 0) continue;
+                if (revertTexts.includes(text)) {
+                    try { node.click(); } catch (_) {}
+                    break;
+                }
+            }
+
+            // Step 2: Remove CSS truncation to reveal full text
             const tweetText = el.querySelector('[data-testid="tweetText"]');
             if (!tweetText) return;
-            const showMore = (
-                tweetText.querySelector('[data-testid="tweet-text-show-more-link"]')
-                || [...tweetText.querySelectorAll('span, div')].find(e => {
-                    const t = (e.innerText || '').trim().toLowerCase();
-                    return (t === 'show more' || t === 'もっと見る' || t === '더 보기')
-                        && !e.closest('a[href*="/status/"]');
-                })
-            );
-            if (showMore) { showMore.scrollIntoView({block: 'center'}); showMore.click(); }
+            tweetText.style.setProperty('max-height', 'none', 'important');
+            tweetText.style.setProperty('overflow', 'visible', 'important');
+            tweetText.style.setProperty('-webkit-line-clamp', 'unset', 'important');
+            tweetText.style.setProperty('display', 'block', 'important');
+            tweetText.style.setProperty('white-space', 'normal', 'important');
+
+            // Step 3: Click "Show more" if present (for dynamic-load cases)
+            const expandTexts = ['show more', 'show more...', 'もっと見る', '더 보기'];
+            for (const node of allNodes) {
+                const text = (node.textContent || '').trim().toLowerCase();
+                if (!text || node.children.length > 0) continue;
+                if (!expandTexts.includes(text)) continue;
+                try { node.click(); } catch (_) {}
+                break;
+            }
         }""")
-        time.sleep(0.5)
+        time.sleep(0.3)
     except Exception:
         pass
     return safe_text(article.locator('[data-testid="tweetText"]'))

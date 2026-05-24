@@ -25,7 +25,7 @@ from src.core import (
 from src.platforms.x_twitter.comments import extract_comments
 
 
-CSV_FIELDS = ["序号", "推文链接", "推文的内容", "浏览量", "评论数", "点赞数", "转发量"]
+CSV_FIELDS = ["序号", "推文链接", "推文的内容", "浏览量", "评论数", "点赞量", "转发量"]
 PAGE_LOAD_TIMEOUT = 30000
 COOLDOWN_EVERY = 3
 COOLDOWN_MIN_SECONDS = 3.0
@@ -124,7 +124,7 @@ def find_target_article(page, status_id: str, page_timeout=None):
 
 def extract_article_payload(article) -> dict[str, str]:
     return article.evaluate(
-        """article => {
+        """async (article) => {
             const firstText = selector => {
                 const node = article.querySelector(selector);
                 return node ? (node.innerText || node.textContent || '').trim() : '';
@@ -151,15 +151,34 @@ def extract_article_payload(article) -> dict[str, str]:
 
             const tweetTextEl = article.querySelector('[data-testid="tweetText"]');
             if (tweetTextEl) {
-                const showMore = (
-                    tweetTextEl.querySelector('[data-testid="tweet-text-show-more-link"]')
-                    || [...tweetTextEl.querySelectorAll('span, div')].find(e => {
-                        const t = (e.innerText || '').trim().toLowerCase();
-                        return (t === 'show more' || t === 'もっと見る' || t === '더 보기')
-                            && !e.closest('a[href*="/status/"]');
-                    })
-                );
-                if (showMore) { showMore.click(); }
+                // Step 1: Revert auto-translation
+                const revertTexts = ['view original', '查看原文', '原文を表示', 'show original', '原文を見る'];
+                const allNodes = article.querySelectorAll('*');
+                for (const node of allNodes) {
+                    const nodeText = (node.textContent || '').trim().toLowerCase();
+                    if (!nodeText || node.children.length > 0) continue;
+                    if (revertTexts.includes(nodeText)) {
+                        try { node.click(); } catch (_) {}
+                        break;
+                    }
+                }
+                // Step 2: Remove CSS truncation
+                tweetTextEl.style.setProperty('max-height', 'none', 'important');
+                tweetTextEl.style.setProperty('overflow', 'visible', 'important');
+                tweetTextEl.style.setProperty('-webkit-line-clamp', 'unset', 'important');
+                tweetTextEl.style.setProperty('display', 'block', 'important');
+                tweetTextEl.style.setProperty('white-space', 'normal', 'important');
+                // Step 3: Click "Show more" if present
+                const expandTexts = ['show more', 'show more...', 'もっと見る', '더 보기'];
+                for (const node of allNodes) {
+                    const nodeText = (node.textContent || '').trim().toLowerCase();
+                    if (!nodeText || node.children.length > 0) continue;
+                    if (!expandTexts.includes(nodeText)) continue;
+                    try { node.click(); } catch (_) {}
+                    break;
+                }
+                // Wait for React to re-render with original text
+                await new Promise(r => setTimeout(r, 400));
             }
             const content = firstText('[data-testid="tweetText"]') || nonTextContent();
             return {
@@ -200,7 +219,7 @@ def collect_tweet_metrics(page, tweet_url: str, page_timeout=None, stop_event=No
         "推文的内容": payload.get("content", ""),
         "浏览量": normalize_metric_text(payload.get("views", "")),
         "评论数": normalize_interaction_metric(payload.get("replies", "")),
-        "点赞数": normalize_interaction_metric(payload.get("likes", "")),
+        "点赞量": normalize_interaction_metric(payload.get("likes", "")),
         "转发量": normalize_interaction_metric(payload.get("reposts", "")),
     }
 
@@ -267,7 +286,7 @@ def run_x_tweet_metrics_spider(
                     "推文的内容": "",
                     "浏览量": "",
                     "评论数": "",
-                    "点赞数": "",
+                    "点赞量": "",
                     "转发量": "",
                 }
                 log_line(log_callback, f"[{index}/{len(tweet_urls)}] 读取推文：{normalized_url}")
