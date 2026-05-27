@@ -81,10 +81,10 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         refresh_btn.clicked.connect(self.refresh_tools)
         header.addWidget(refresh_btn)
 
-        reload_btn = QPushButton("重载工具")
-        reload_btn.setToolTip("重新扫描组件目录，加载新增或修改的工具")
-        reload_btn.clicked.connect(self.reload_tools)
-        header.addWidget(reload_btn)
+        self.reload_btn = QPushButton("重载工具")
+        self.reload_btn.setToolTip("重新扫描组件目录，加载新增或修改的工具")
+        self.reload_btn.clicked.connect(self.reload_tools)
+        header.addWidget(self.reload_btn)
         root_layout.addLayout(header)
 
         splitter = QSplitter(Qt.Horizontal)
@@ -351,6 +351,9 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         if errors:
             err_msg = "\n".join(errors)
             QMessageBox.warning(self, "工具加载部分失败", f"部分工具配置加载失败：\n\n{err_msg}")
+        else:
+            self.reload_btn.setText("✓ 重载成功")
+            QTimer.singleShot(1500, lambda: self.reload_btn.setText("重载工具"))
 
     def refresh_tools(self) -> None:
         query = self.search_entry.text().strip().lower()
@@ -374,6 +377,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
 
         if self.filtered_tools:
             self.table.selectRow(0)
+            self.update_detail()
         else:
             self.clear_detail()
 
