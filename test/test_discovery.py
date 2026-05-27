@@ -11,7 +11,7 @@ from src.studio.base import ToolSpec
 
 def test_discover_all_tools():
     """测试发现所有工具"""
-    tools = discover_tools()
+    tools, _ = discover_tools()
     print(f"发现 {len(tools)} 个工具")
 
     assert len(tools) == 20, f"期望 20 个工具，实际 {len(tools)}"
@@ -28,7 +28,7 @@ def test_discover_all_tools():
 
 def test_discover_by_category():
     """测试按类别发现工具"""
-    tools = discover_tools()
+    tools, _ = discover_tools()
 
     categories = {}
     for tool in tools:
@@ -54,7 +54,7 @@ def test_discover_by_category():
 
 def test_discover_specific_tool():
     """测试发现特定工具"""
-    tools = discover_tools()
+    tools, _ = discover_tools()
 
     # 查找 YouTube 关键词搜索工具
     youtube_keyword = next((t for t in tools if t.tool_id == "youtube_keyword_mining"), None)
@@ -82,7 +82,7 @@ def test_load_manifest_valid():
         temp_path = Path(f.name)
 
     try:
-        tool = _load_manifest(temp_path)
+        tool, _ = _load_manifest(temp_path)
         assert tool is not None, "加载 manifest 失败"
         assert tool.tool_id == "test_tool"
         assert tool.name == "测试工具"
@@ -105,7 +105,7 @@ def test_load_manifest_missing_fields():
         temp_path = Path(f.name)
 
     try:
-        tool = _load_manifest(temp_path)
+        tool, err = _load_manifest(temp_path)
         assert tool is None, "应该返回 None 但返回了工具"
         print("[PASS] 缺少字段的 manifest 验证通过")
     finally:
@@ -118,7 +118,7 @@ def test_load_manifest_invalid_json():
         temp_path = Path(f.name)
 
     try:
-        tool = _load_manifest(temp_path)
+        tool, err = _load_manifest(temp_path)
         assert tool is None, "应该返回 None 但返回了工具"
         print("[PASS] 无效 JSON 的 manifest 验证通过")
     finally:
@@ -142,7 +142,7 @@ def test_discover_custom_dir():
             json.dump(manifest_content, f, ensure_ascii=False)
 
         # 从自定义目录发现工具
-        tools = discover_tools(scan_dirs=[temp_dir])
+        tools, _ = discover_tools(scan_dirs=[temp_dir])
         assert len(tools) == 1, f"期望 1 个工具，实际 {len(tools)}"
         assert tools[0].tool_id == "custom_tool"
 
@@ -151,11 +151,11 @@ def test_discover_custom_dir():
 def test_reload_tools():
     """测试重新加载工具（模拟热重载）"""
     # 第一次加载
-    tools1 = discover_tools()
+    tools1, _ = discover_tools()
     count1 = len(tools1)
 
     # 第二次加载（应该返回相同结果）
-    tools2 = discover_tools()
+    tools2, _ = discover_tools()
     count2 = len(tools2)
 
     assert count1 == count2, f"两次加载结果不同: {count1} vs {count2}"

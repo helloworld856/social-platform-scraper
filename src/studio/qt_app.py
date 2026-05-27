@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PyQt5.QtCore import QProcess, Qt
+from PyQt5.QtCore import QFileSystemWatcher, QProcess, Qt, QTimer
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QAction,
@@ -27,7 +27,7 @@ from PyQt5.QtWidgets import (
 )
 
 from src.core.app_logging import get_logger, setup_console_logging
-from src.studio.discovery import discover_tools
+from src.studio.discovery import SCAN_DIRS, discover_tools
 from src.studio.registry import TOOLS
 
 logger = get_logger(__name__)
@@ -54,6 +54,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         self._build_ui()
         self._apply_style()
         self.refresh_tools()
+        self._setup_watcher()
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -287,21 +288,69 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         self.current_category = current.data(Qt.UserRole) if current else ALL_CATEGORY
         self.refresh_tools()
 
+    def _setup_watcher(self) -> None:
+        self.watcher = QFileSystemWatcher(self)
+        project_root = Path(__file__).resolve().parents[2]
+        for scan_dir in SCAN_DIRS:
+            base = project_root / scan_dir
+            if base.is_dir():
+                self.watcher.addPath(str(base))
+                for p in base.rglob('*'):
+                    if p.is_dir():
+                        self.watcher.addPath(str(p))
+
+        self.reload_timer = QTimer(self)
+        self.reload_timer.setSingleShot(True)
+        self.reload_timer.setInterval(500)
+        self.reload_timer.timeout.connect(self.reload_tools)
+
+        self.watcher.fileChanged.connect(self._on_fs_changed)
+        self.watcher.directoryChanged.connect(self._on_fs_changed)
+
+    def _on_fs_changed(self, path: str) -> None:
+        # 仅对 .manifest.json 或目录变化做响应防抖
+        if path.endswith(".manifest.json") or Path(path).is_dir():
+            self.reload_timer.start()
+
     def reload_tools(self) -> None:
         logger.info("Reloading tools from manifests")
-        self.tools = discover_tools()
+        
+        # 保存状态
+        old_category = self.current_category
+        old_tool = self.selected_tool()
+        old_tool_id = old_tool.tool_id if old_tool else None
+
+        self.tools, errors = discover_tools()
         extra_categories = sorted({tool.category for tool in self.tools} - set(CATEGORY_ORDER))
         self.category_order = [*CATEGORY_ORDER, *extra_categories]
 
         self.nav.clear()
-        for category in self.category_order:
+        found_category = False
+        for i, category in enumerate(self.category_order):
             item = QListWidgetItem(self._category_label(category))
             item.setData(Qt.UserRole, category)
             self.nav.addItem(item)
-        self.nav.setCurrentRow(0)
+            if category == old_category:
+                self.nav.setCurrentRow(i)
+                found_category = True
+        
+        if not found_category:
+            self.nav.setCurrentRow(0)
 
         self.refresh_tools()
+        
+        # 恢复选中工具
+        if old_tool_id:
+            for row in range(self.table.rowCount()):
+                item = self.table.item(row, 0)
+                if item and item.data(Qt.UserRole) == old_tool_id:
+                    self.table.selectRow(row)
+                    break
+
         logger.info("Reloaded %d tools", len(self.tools))
+        if errors:
+            err_msg = "\n".join(errors)
+            QMessageBox.warning(self, "工具加载部分失败", f"部分工具配置加载失败：\n\n{err_msg}")
 
     def refresh_tools(self) -> None:
         query = self.search_entry.text().strip().lower()

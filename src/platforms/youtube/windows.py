@@ -125,6 +125,7 @@ class YouTubeChannelWorksWindow(SimpleToolWindow):
                     placeholder="https://www.youtube.com/@username",
                     required=True,
                 ),
+                FieldSpec("collect_target", "采集目标", kind="combo", options=("全部", "仅视频与Shorts", "仅帖子 (Posts)"), default="全部"),
                 FieldSpec("limit_time", "是否限制时间？", kind="combo", options=("是", "否"), default="否"),
                 FieldSpec("start_date", "开始日期 YYYY-MM-DD", default=DEFAULT_START_DATE),
                 FieldSpec("end_date", "结束日期 YYYY-MM-DD", default=DEFAULT_END_DATE),
@@ -161,6 +162,7 @@ class YouTubeChannelWorksWindow(SimpleToolWindow):
         return run_youtube_channel_works_spider(
             values["api_key"],
             values["channel_urls"],
+            values.get("collect_target", "全部"),
             int(values.get("max_video_items", 5000)),
             int(values.get("max_post_scrolls", 200)),
             values["limit_time"],
