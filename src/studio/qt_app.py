@@ -34,7 +34,7 @@ logger = get_logger(__name__)
 
 
 ALL_CATEGORY = "全部"
-CATEGORY_ORDER = [ALL_CATEGORY, "YouTube", "TikTok", "X/Twitter", "Instagram", "数据处理"]
+CATEGORY_ORDER = [ALL_CATEGORY, "YouTube", "TikTok", "X/Twitter", "Instagram", "Facebook", "数据处理"]
 
 
 class ThreePlatformCrawlerQtApp(QMainWindow):
@@ -66,7 +66,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         title_box = QVBoxLayout()
         self.title_label = QLabel("多平台数据爬取工具")
         self.title_label.setObjectName("titleLabel")
-        self.subtitle_label = QLabel("集中启动 YouTube、TikTok、X/Twitter、Instagram 采集工具和数据处理工具")
+        self.subtitle_label = QLabel("集中启动 YouTube、TikTok、X/Twitter、Instagram、Facebook 采集工具和数据处理工具")
         self.subtitle_label.setObjectName("subtitleLabel")
         title_box.addWidget(self.title_label)
         title_box.addWidget(self.subtitle_label)
