@@ -84,10 +84,15 @@ DEFAULT_CONFIGS: dict[str, dict] = {
         "cooldown_min": 5.0,
         "cooldown_max": 7.0,
         "no_new_scroll_limit": 5,
+        "comment_no_new_scroll_limit": 5,
         "max_scrolls": 200,
         "max_parallel_tabs": 1,
         "max_comment_tabs": 1,
         "max_queue_size": 5000,
+        "search_refresh_count": 3,
+        "search_refresh_interval": 5.0,
+        "comment_refresh_count": 3,
+        "comment_refresh_interval": 5.0,
     },
     "x_tweet_author_profiles": {
         "page_load_timeout": 45000,
@@ -111,12 +116,6 @@ DEFAULT_CONFIGS: dict[str, dict] = {
         "save_batch_size": 10,
         "cooldown_min": 6.0,
         "cooldown_max": 15.0,
-    },
-    "x_top_comments": {
-        "comment_top_limit": 100,
-        "page_load_timeout": 30000,
-        "scroll_interval": 4.0,
-        "no_new_scroll_limit": 5,
     },
     "instagram_profile_works": {
         "max_works": 5000,
