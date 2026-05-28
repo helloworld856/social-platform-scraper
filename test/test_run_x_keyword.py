@@ -8,7 +8,6 @@ project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root))
 
 import threading
-import time
 from src.platforms.x_twitter.keyword import run_x_spider
 
 output_path_result = []
@@ -25,7 +24,7 @@ def finish_callback(path):
             output_path_result.append(path)
             print(f"\n[FINISH] 输出文件: {path}")
         else:
-            print(f"\n[FINISH] 无输出文件")
+            print("\n[FINISH] 无输出文件")
 
 # Run with 2 keywords, no comments for speed
 keywords = ["AI"]
