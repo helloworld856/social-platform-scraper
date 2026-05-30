@@ -159,7 +159,7 @@ def collect_video_ids_with_playwright(page, keyword: str, max_results: int, log_
         scroll_delay = 1.0
         scroll_px = 2500
         
-        target_collect_limit = min(max_results * 3, 300)
+        target_collect_limit = max_results
         
         log_callback(f"  [浏览器优先] 开始滚动加载视频链接 (目标收集量: {target_collect_limit})...")
         
