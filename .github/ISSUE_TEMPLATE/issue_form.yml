@@ -10,18 +10,6 @@ body:
         - [ ] 搜索过已有 issue，确认不是重复问题
         - [ ] 没有敏感信息（API Key、密码等）出现在描述中
 
-  - type: dropdown
-    id: issue-type
-    attributes:
-      label: 类型
-      description: 你要提交什么类型的 issue？
-      options:
-        - "🐛 问题反馈 — 程序崩溃、报错、行为异常"
-        - "✨ 功能建议 — 新功能、改进优化"
-        - "🌐 平台爬取问题 — 采集不到内容、数据缺失、风控异常"
-    validations:
-      required: true
-
   - type: textarea
     id: summary
     attributes:
