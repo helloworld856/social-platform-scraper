@@ -131,7 +131,7 @@ def run_facebook_keyword_search_spider(
                 log_line(log_callback, f"收集完毕，共抓取到 {len(collected_urls)} 个帖子链接。准备进入详情页深度解析...")
                 
                 output_path = _get_output_path(keyword)
-                fieldnames = ["序号", "主页链接", "帖子链接", "发布时间", "帖子内容", "类型", "点赞数", "评论数", "分享数", "播放量"]
+                fieldnames = ["序号", "主页链接", "帖子链接", "发布时间", "帖子内容", "点赞数", "评论数", "分享数", "类型"]
                 
                 # 配置 Sheets
                 sheets_fields = {"帖子内容": fieldnames}

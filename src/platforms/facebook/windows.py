@@ -3,8 +3,8 @@ from src.ui.config_dialog import ConfigParam
 from src.platforms.facebook.profile_works import run_facebook_profile_works_spider
 from src.platforms.facebook.keyword_search import run_facebook_keyword_search_spider
 
-DEFAULT_START_DATE = "2020-01-01"
-DEFAULT_END_DATE = "2026-12-31"
+DEFAULT_START_DATE = "2025-06-04"
+DEFAULT_END_DATE = "2026-6-4"
 
 class FacebookProfileWorksWindow(SimpleToolWindow):
     tool_id = "facebook_profile_works"
@@ -44,6 +44,7 @@ class FacebookProfileWorksWindow(SimpleToolWindow):
             ConfigParam("no_new_scroll_limit", "无新内容停止阈值", kind="int", default=5, minimum=2, maximum=50),
             ConfigParam("scroll_px", "每次滚动像素", kind="int", default=800, minimum=100, maximum=5000, step=100),
             ConfigParam("save_batch_size", "每批保存条数", kind="int", default=10, minimum=1, maximum=100),
+            ConfigParam("comment_top_limit", "最多评论采集数", kind="int", default=100, minimum=1, maximum=500),
         ]
 
     def run_task(self, values: dict, log_callback, finish_callback, stop_event, pause_event):
@@ -58,6 +59,7 @@ class FacebookProfileWorksWindow(SimpleToolWindow):
                 "save_batch_size",
                 "max_posts",
                 "collect_comments",
+                "comment_top_limit",
             )
         }
         return run_facebook_profile_works_spider(
