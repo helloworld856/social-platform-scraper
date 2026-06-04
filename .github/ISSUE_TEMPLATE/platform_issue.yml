@@ -1,0 +1,99 @@
+name: 🌐 平台爬取问题
+description: 采集不到内容、数据缺失、风控/登录异常等平台相关问题
+title: "[平台] "
+labels: ["platform"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请先确认：
+        - [ ] 已在浏览器中手动打开目标链接，确认内容公开可见
+        - [ ] 浏览器已登录对应平台
+        - [ ] 不是账号风控/验证码导致的问题
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 涉及平台
+      options:
+        - YouTube
+        - TikTok
+        - X/Twitter
+        - Instagram
+    validations:
+      required: true
+
+  - type: input
+    id: tool-id
+    attributes:
+      label: 工具 ID
+      description: 哪个工具出的问题？（工具窗口标题栏有名称，或查看 registry.py）
+      placeholder: 例如 tiktok_profile_videos、x_tweet_metrics
+
+  - type: textarea
+    id: urls
+    attributes:
+      label: 目标链接
+      description: 采集时使用的目标链接，脱敏后粘贴
+      placeholder: |
+        ```
+        https://www.tiktok.com/@example/video/123456
+        https://x.com/user/status/789012
+        ```
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-vs-actual
+    attributes:
+      label: 期望 vs 实际
+      description: 期望采集到什么数据，实际采集到什么（采集到 0 条 / 部分字段为空 / 报错等）
+    validations:
+      required: true
+
+  - type: dropdown
+    id: login-status
+    attributes:
+      label: 浏览器登录状态
+      description: 运行时浏览器是否已登录该平台？
+      options:
+        - 已登录，可以正常浏览
+        - 未登录
+        - 不确定
+    validations:
+      required: true
+
+  - type: dropdown
+    id: account-type
+    attributes:
+      label: 目标账号/内容类型
+      options:
+        - 公开账号 / 公开内容
+        - 私密账号 / 受限内容
+        - 不确定
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: 参数配置
+      description: 出问题时「参数配置」中的关键参数值（如超时时间、最大滚动次数等），有修改过默认值的请说明
+      placeholder: |
+        - 页面加载超时：30s（默认）
+        - 最大滚动次数：200（默认）
+        - 其他修改过的参数：...
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志 / 截图
+      description: 程序日志框中的相关输出，或终端的报错信息。截图也可拖到这里。
+      render: text
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: 补充信息（可选）
+      description: 其他任何有助于排查的信息，如是否使用代理、网络环境等

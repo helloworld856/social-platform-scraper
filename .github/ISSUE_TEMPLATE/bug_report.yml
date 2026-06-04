@@ -1,0 +1,100 @@
+name: 🐛 问题反馈
+description: 报告程序运行中的 bug、崩溃或异常行为
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢你花时间反馈问题！提交前请先确认：
+        - [ ] 已经阅读过 [README](https://github.com/helloworld856/社媒平台数据爬取工具/blob/main/README.md) 中的「常见问题」部分
+        - [ ] 不是已知问题或已关闭的旧 issue
+        - [ ] 没有敏感信息（API Key、密码等）出现在描述中
+
+  - type: input
+    id: tool-id
+    attributes:
+      label: 出问题的工具
+      description: 是哪个工具出的问题？例如 `youtube_keyword_mining`、`tiktok_profile_videos` 等
+      placeholder: youtube_keyword_mining
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: 运行环境
+      description: 尽量详细地描述你的运行环境
+      value: |
+        - 操作系统：Windows 11 / Windows 10 ...
+        - Python 版本：3.10 / 3.11 / 3.12 ...
+        - 浏览器：Chrome / Chromium 版本 ...
+        - 运行方式：直接 python main.py / VS Code / 命令行 ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 清晰描述你遇到的问题
+      placeholder: |
+        说明：
+        1. 你做了什么操作
+        2. 期望发生什么
+        3. 实际发生了什么
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 按顺序列出能稳定复现该问题的步骤
+      placeholder: |
+        1. 打开程序，选择 '...' 工具
+        2. 输入参数 '...'，填写链接 / 关键词 '...'
+        3. 点击「开始」
+        4. 看到错误 '...'
+    validations:
+      required: true
+
+  - type: textarea
+    id: input
+    attributes:
+      label: 输入内容
+      description: 出问题时的输入内容（链接、关键词等），敏感信息请脱敏处理
+      placeholder: |
+        如：
+        ```
+        https://www.tiktok.com/@example
+        https://www.youtube.com/watch?v=xxxx
+        ```
+      render: text
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志 / 报错信息
+      description: |
+        把程序日志框中的错误信息或终端的报错粘贴到这里。
+        **如果日志很长，请只粘贴报错前后相关的部分（前后各 20 行左右）。**
+      render: text
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: 截图（可选）
+      description: 如果文字无法描述清楚，可以截图拖到这里
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已确认浏览器已登录对应平台（TikTok / X / Instagram）
+          required: false
+        - label: 我已手动在浏览器中打开目标链接，确认页面可以正常访问
+          required: false
+        - label: 我已尝试重启浏览器和程序，问题依然存在
+          required: false
