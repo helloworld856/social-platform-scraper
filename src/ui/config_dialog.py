@@ -1,3 +1,8 @@
+"""
+配置对话框定义模块。
+提供通用的 GUI 弹窗以供用户查看、调优底层高级策略参数（如延迟、超时、最大限制等），并支持多套命名参数方案（Profile）的存取与删除。
+"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -24,19 +29,27 @@ from PyQt5.QtWidgets import (
 
 @dataclass
 class ConfigParam:
-    key: str
-    label: str
-    kind: str = "int"          # int | float | combo | bool
-    default: Any = 0
-    minimum: float = 0
+    """
+    高级配置参数的声明规范类。
+    """
+    key: str                    # 参数键名
+    label: str                  # 参数显示名称
+    kind: str = "int"          # 参数渲染类型：int | float | combo | bool
+    default: Any = 0            # 默认值
+    minimum: float = 0          # 数字上限
     maximum: float = 999999
-    step: float = 1
-    decimals: int = 1          # for float
-    options: tuple[str, ...] = ()
-    tooltip: str = ""
+    step: float = 1            # 递增步长
+    decimals: int = 1          # 浮点数保留小数位
+    options: tuple[str, ...] = ()  # combo 模式选项
+    tooltip: str = ""           # 浮动工具栏提示说明文本
 
 
 class ConfigDialog(QDialog):
+    """
+    高级策略参数配置弹窗。
+    提供参数值调整、恢复默认值以及“多方案 Profile 另存为/加载/删除”的一套完整管理界面。
+    """
+
     def __init__(
         self,
         title: str,
@@ -46,6 +59,15 @@ class ConfigDialog(QDialog):
         tool_id: str = "",
         current_profile: str | None = None,
     ) -> None:
+        """
+        Args:
+            title: 弹窗标题
+            params: 字段参数声明列表
+            current_values: 传入的当前参数字典
+            parent: 父级窗口指针
+            tool_id: 工具 ID，用于落盘读写
+            current_profile: 当前激活的配置方案名
+        """
         super().__init__(parent)
         self.setWindowTitle(f"{title} — 参数配置")
         self.resize(580, 460)
@@ -64,6 +86,7 @@ class ConfigDialog(QDialog):
         self._apply_current_or_defaults()
 
     def _build_ui(self) -> None:
+        """动态绘制配置对话框布局，渲染方案栏与字段区域。"""
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 14, 16, 14)
         root.setSpacing(10)
@@ -73,6 +96,7 @@ class ConfigDialog(QDialog):
         header.setStyleSheet("color: #667085; font-size: 9pt;")
         root.addWidget(header)
 
+        # 如果工具声明了 ID，则渲染顶部方案方案栏
         if self.tool_id:
             profile_row = QHBoxLayout()
             profile_row.setSpacing(8)
@@ -90,6 +114,7 @@ class ConfigDialog(QDialog):
             profile_row.addWidget(self._delete_btn)
             root.addLayout(profile_row)
 
+        # 中部滚动区域，防止配置字段过多溢出窗口
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
@@ -102,6 +127,7 @@ class ConfigDialog(QDialog):
         form.setVerticalSpacing(8)
         form.setHorizontalSpacing(10)
 
+        # 遍历动态渲染
         for param in self.params:
             widget = self._create_widget(param)
             label = QLabel(param.label)
@@ -110,6 +136,7 @@ class ConfigDialog(QDialog):
             form.addRow(label, widget)
             self._widgets[param.key] = widget
 
+        # 底部确定/恢复默认/取消按钮栏
         buttons = QHBoxLayout()
         restore_btn = QPushButton("恢复默认值")
         restore_btn.clicked.connect(self._apply_defaults)
@@ -163,6 +190,7 @@ class ConfigDialog(QDialog):
         """)
 
     def _create_widget(self, param: ConfigParam):
+        """根据 ConfigParam.kind 类型构建对应的输入控件。"""
         if param.kind == "int":
             widget = QSpinBox()
             widget.setRange(int(param.minimum), int(param.maximum))
@@ -192,11 +220,13 @@ class ConfigDialog(QDialog):
         return widget
 
     def eventFilter(self, obj, event):
+        """阻止高级参数组件响应滚轮滚动，防止修改参数时误操作。"""
         if event.type() == QEvent.Wheel:
             return True
         return super().eventFilter(obj, event)
 
     def _apply_current_or_defaults(self) -> None:
+        """从缓存字典中取值并应用回 GUI 输入框，如缺失则采用默认配置参数。"""
         for param in self.params:
             widget = self._widgets.get(param.key)
             if widget is None:
@@ -212,12 +242,14 @@ class ConfigDialog(QDialog):
                 widget.setChecked(bool(value))
 
     def _on_save(self) -> None:
+        """确认保存。强行同步各微调框中用户手动键入未按回车的文本。"""
         for widget in self._widgets.values():
             if hasattr(widget, "interpretText"):
                 widget.interpretText()
         self.accept()
 
     def _apply_defaults(self) -> None:
+        """将页面所有的输入控件恢复为出厂配置（仅重设显示，点保存才真正生效）。"""
         for param in self.params:
             widget = self._widgets.get(param.key)
             if widget is None:
@@ -232,6 +264,9 @@ class ConfigDialog(QDialog):
                 widget.setChecked(bool(param.default))
 
     def get_values(self) -> dict[str, Any]:
+        """
+        导出配置对话框当前界面的所有最新键值对配置数据。
+        """
         result: dict[str, Any] = {}
         for param in self.params:
             widget = self._widgets.get(param.key)
@@ -254,10 +289,13 @@ class ConfigDialog(QDialog):
         return self._profile
 
     def _refresh_profile_list(self) -> None:
+        """刷新下拉配置方案列表。"""
         if self._profile_combo is None:
             return
         from src.core.config_store import list_profiles
 
+        # blockSignals(True) 暂时屏蔽事件，防止下拉框清除重建过程中
+        # 频繁触发 currentIndexChanged 槽函数去重复加载 IO，导致界面抖动甚至死锁
         self._profile_combo.blockSignals(True)
         self._profile_combo.clear()
         profiles = list_profiles(self.tool_id)
@@ -269,6 +307,7 @@ class ConfigDialog(QDialog):
         self._profile_combo.blockSignals(False)
 
     def _on_profile_changed(self, _index: int) -> None:
+        """方案切换回调：加载新方案对应的配置文件并刷入界面。"""
         if self._profile_combo is None:
             return
         self._profile = self._profile_combo.currentData()
@@ -281,6 +320,7 @@ class ConfigDialog(QDialog):
         self._apply_current_or_defaults()
 
     def _on_delete_profile(self) -> None:
+        """删除当前激活的自定义方案文件并切回默认参数配置。"""
         if self._profile is None:
             return
         reply = QMessageBox.question(
@@ -301,6 +341,7 @@ class ConfigDialog(QDialog):
         self._apply_current_or_defaults()
 
     def _on_save_as(self) -> None:
+        """另存为新方案命名配置。"""
         name, ok = QInputDialog.getText(self, "另存为新方案", "请输入新方案名称：")
         if not ok or not name.strip():
             return
@@ -312,3 +353,4 @@ class ConfigDialog(QDialog):
         self._profile = name
         self._refresh_profile_list()
         self.accept()
+

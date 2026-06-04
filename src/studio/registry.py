@@ -1,3 +1,8 @@
+"""
+爬虫工具静态注册表模块。
+集中定义并硬编码所有预装的爬虫子工具及数据处理工具的元数据声明（ToolSpec），以备主面板初始化展示。
+"""
+
 from __future__ import annotations
 
 from src.studio.base import ToolSpec

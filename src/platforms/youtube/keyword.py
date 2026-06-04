@@ -1,3 +1,12 @@
+# -*- coding: utf-8 -*-
+"""YouTube 关键词搜索采集核心模块。
+
+本模块提供基于关键词的 YouTube 视频挖掘逻辑，
+支持“仅API（消耗配额）”模式和“浏览器优先（模拟搜索省配额）”模式。
+浏览器优先模式利用 Playwright 打开搜索结果页面，并通过向下滚动模拟拉取大量视频 ID，
+之后再批量请求 API 接口获取视频指标，从而节省 99% 的 API 每日配额消耗。
+"""
+
 from __future__ import annotations
 
 import re
@@ -9,6 +18,7 @@ from googleapiclient.discovery import build
 from src.core import XlsxRowWriter, MultiSheetXlsxWriter, build_output_path, sanitize_csv_rows, should_stop, wait_if_paused
 from src.platforms.youtube.comments import fetch_top_level_comments, format_youtube_datetime
 
+# Excel 输出表头字段定义
 CSV_FIELDS = [
     "搜索词",
     "序号",
@@ -21,20 +31,27 @@ CSV_FIELDS = [
     "作者主页链接",
 ]
 
+# 默认时间限制窗口：最近一年
 DEFAULT_START_DATE = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
 DEFAULT_END_DATE = datetime.now().strftime("%Y-%m-%d")
 
+
 def parse_date_range(start_date: str, end_date: str) -> tuple[datetime, datetime]:
+    """解析以 "YYYY-MM-DD" 格式指定的日期字符串，并返回带有时区信息的 datetime 元组。"""
     start_dt = datetime.strptime(start_date.strip(), "%Y-%m-%d").replace(tzinfo=timezone.utc)
     end_dt = datetime.strptime(end_date.strip(), "%Y-%m-%d").replace(tzinfo=timezone.utc)
     if start_dt > end_dt:
         raise ValueError("开始日期不能晚于结束日期")
     return start_dt, end_dt
 
+
 def youtube_rfc3339(dt: datetime) -> str:
+    """将 datetime 时间对象格式化为 YouTube API 支持的 RFC3339 字符串（Z 结尾）。"""
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
+
 def format_youtube_duration(iso_duration: str) -> str:
+    """将 YouTube 返回的 ISO 8601 时长格式转换为标准时间格式（HH:MM:SS）。"""
     match = re.fullmatch(
         r"P(?:(?P<days>\d+)D)?(?:T(?:(?P<hours>\d+)H)?(?:(?P<minutes>\d+)M)?(?:(?P<seconds>\d+)S)?)?",
         iso_duration or "",
@@ -48,15 +65,27 @@ def format_youtube_duration(iso_duration: str) -> str:
     seconds = int(match.group("seconds") or 0)
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
+
 def chunked(values: list[str], size: int) -> list[list[str]]:
+    """将列表数据分块，便于批次处理。"""
     return [values[index:index + size] for index in range(0, len(values), size)]
 
+
 def safe_filename_part(value: str) -> str:
+    """将关键词清理并转换为可用于文件名的安全标识字串，防止非法路径字符引发报错。"""
     cleaned = re.sub(r'[\\/*?:"<>|]', "", value or "").strip()
     cleaned = re.sub(r"\s+", "_", cleaned)
     return cleaned[:80] or "keyword"
 
+
 def iter_search_video_id_batches(youtube, keyword: str, max_results: int, limit_time_bool: bool, start_dt: datetime | None, end_dt: datetime | None, log_callback, stop_event=None, pause_event=None, batch_size: int = 50):
+    """【API模式】分页向 API 接口发起 search 检索，生成当前批次的视频 ID 列表。
+
+    此方式会消耗较多的 YouTube 每日 API 配额（每次搜索消费 100 quota 单位）。
+
+    Yields:
+        list[str]: 批次视频 ID 列表。
+    """
     seen_video_ids: set[str] = set()
     next_page_token = None
 
@@ -98,7 +127,9 @@ def iter_search_video_id_batches(youtube, keyword: str, max_results: int, limit_
         if not next_page_token:
             break
 
+
 def fetch_video_rows(youtube, keyword: str, video_ids: list[str], stop_event=None, pause_event=None, batch_size: int = 50) -> list[dict]:
+    """批量获取指定视频 ID 的详情指标（播放量、点赞数等），封装为导出格式。"""
     rows: list[dict] = []
     for ids in chunked(video_ids, batch_size):
         if should_stop(stop_event):
@@ -134,7 +165,23 @@ def fetch_video_rows(youtube, keyword: str, video_ids: list[str], stop_event=Non
             )
     return rows
 
+
 def collect_video_ids_with_playwright(page, keyword: str, max_results: int, log_callback, stop_event=None, pause_event=None) -> list[str]:
+    """【浏览器优先模式】利用无头浏览器访问搜索页面并滚动，动态拦截解析页面上的所有视频链接。
+
+    此方式不消耗任何 Google API 搜索配额，是极度省配额的首选加载方案。
+
+    Args:
+        page: Playwright 页面实例。
+        keyword: 搜索关键词。
+        max_results: 预期搜集数上限。
+        log_callback: 日志通知。
+        stop_event: 中断事件。
+        pause_event: 暂停事件。
+
+    Returns:
+        list[str]: 抓取去重后的视频 ID 列表。
+    """
     from src.core import interruptible_sleep
     import urllib.parse
 
@@ -151,6 +198,7 @@ def collect_video_ids_with_playwright(page, keyword: str, max_results: int, log_
             return []
 
         try:
+            # 尝试等待视频元素渲染
             page.wait_for_selector('ytd-video-renderer, ytd-reel-item-renderer', timeout=15000)
         except Exception:
             log_callback("  [浏览器优先] 未能即时等待到视频卡片，尝试直接向下滚动解析。")
@@ -163,12 +211,14 @@ def collect_video_ids_with_playwright(page, keyword: str, max_results: int, log_
         
         log_callback(f"  [浏览器优先] 开始滚动加载视频链接 (目标收集量: {target_collect_limit})...")
         
+        # 允许最大滚动 100 轮
         for scroll_index in range(100):
             if should_stop(stop_event):
                 break
             if wait_if_paused(pause_event, stop_event):
                 break
 
+            # 从 DOM 树里提取所有 watch 和 shorts 链接对应的视频 ID
             current_ids = page.evaluate("""() => {
                 const ids = [];
                 for (const a of document.querySelectorAll('a[href*="/watch?v="], a[href*="/shorts/"]')) {
@@ -193,6 +243,7 @@ def collect_video_ids_with_playwright(page, keyword: str, max_results: int, log_
                 no_new_count = 0
             else:
                 no_new_count += 1
+                # 连续 8 次未搜集到新链接，认为列表内容已拉取到底
                 if no_new_count >= 8:
                     log_callback("    连续 8 次无新增链接，判定已加载到底。")
                     break
@@ -201,6 +252,7 @@ def collect_video_ids_with_playwright(page, keyword: str, max_results: int, log_
                 log_callback(f"    已收集到 {len(video_ids)} 条链接，已达到目标数量。")
                 break
 
+            # 向下滚动预设像素值以触发懒加载
             page.evaluate(f"window.scrollBy(0, {scroll_px})")
             if interruptible_sleep(scroll_delay, stop_event):
                 break
@@ -210,7 +262,25 @@ def collect_video_ids_with_playwright(page, keyword: str, max_results: int, log_
 
     return video_ids
 
+
 def run_youtube_spider(api_key, keywords_list, max_results, limit_time_str, start_date, end_date, get_comments_str, max_comments, log_callback, finish_callback, stop_event=None, config=None, pause_event=None):
+    """运行 YouTube 关键词视频采集与评论导出任务的主驱动函数。
+
+    Args:
+        api_key: API Key。
+        keywords_list: 关键词列表（行划分）。
+        max_results: 每个词的最大搜集数量。
+        limit_time_str: 是否限制发布时间窗口（"是"/"否"）。
+        start_date: 开始日期 "YYYY-MM-DD"。
+        end_date: 结束日期 "YYYY-MM-DD"。
+        get_comments_str: 是否获取评论信息。
+        max_comments: 每个视频提取的最大扫描评论数。
+        log_callback: 日志通知。
+        finish_callback: 结束通知。
+        stop_event: 中断事件。
+        config: 高阶环境配置字典。
+        pause_event: 暂停事件。
+    """
     if config is None:
         config = {}
     search_batch_size = int(config.get("youtube_search_batch_size", 50))
@@ -224,7 +294,7 @@ def run_youtube_spider(api_key, keywords_list, max_results, limit_time_str, star
     playwright_context = None
     browser = None
     try:
-        limit_time_bool = limit_time_str == "是"
+        limit_time_bool = limit_time_str == "`是"
         get_comments_bool = get_comments_str == "是"
         start_dt, end_dt = None, None
         if limit_time_bool:
@@ -233,6 +303,7 @@ def run_youtube_spider(api_key, keywords_list, max_results, limit_time_str, star
         youtube = build("youtube", "v3", developerKey=api_key)
         run_stamp = time.strftime("%Y%m%d_%H%M%S")
 
+        # 尝试使用无头浏览器连接环境，获取视频链接
         if use_browser:
             from playwright.sync_api import sync_playwright
             from src.core import connect_existing_chromium, DEFAULT_X_CDP_URL
@@ -271,6 +342,7 @@ def run_youtube_spider(api_key, keywords_list, max_results, limit_time_str, star
             
             all_video_ids = []
             
+            # 浏览器模式优先搜集
             if use_browser and browser:
                 page = None
                 try:
@@ -287,6 +359,7 @@ def run_youtube_spider(api_key, keywords_list, max_results, limit_time_str, star
                         except Exception:
                             pass
             
+            # 若浏览器模式未返回 ID 或获取失败，兜底切换至 API 搜索模式
             if not all_video_ids:
                 log_callback("  使用 API 搜索模式获取视频 ID 列表中...")
                 try:
@@ -308,6 +381,7 @@ def run_youtube_spider(api_key, keywords_list, max_results, limit_time_str, star
                 
                 rows = fetch_video_rows(youtube, keyword, chunk_ids, stop_event, pause_event, video_batch_size)
                 
+                # 针对浏览器模式获取的 ID，在 API 获取详细信息后在本地执行时间筛选过滤
                 if limit_time_bool and start_dt and end_dt:
                     filtered_rows = []
                     for r in rows:
@@ -363,7 +437,7 @@ def run_youtube_spider(api_key, keywords_list, max_results, limit_time_str, star
                     
             writer.save()
             log_callback(f"  写入完成，共 {written_count} 条视频")
-
+ 
         log_callback("完成，已按关键词分别保存：")
         for path in output_paths:
             log_callback(f"  {path}")

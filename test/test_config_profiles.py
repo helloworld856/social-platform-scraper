@@ -311,9 +311,9 @@ def test_config_dialog_save_as_creates_profile():
     tmp = _temp_config_dir()
     with patch("src.core.config_store.get_config_dir", return_value=tmp):
         dialog = ConfigDialog("测试", _SAMPLE_PARAMS, tool_id="test_tool", current_profile=None)
-        # 模拟另存为：直接调用底层 save_config + 检查文件
-        dialog._on_save_as()
-        # 由于 QInputDialog 需要交互，这里绕过 UI 直接测 save 路径
+        # 模拟另存为：通过 Mock 绕过 QInputDialog.getText 交互
+        with patch("src.ui.config_dialog.QInputDialog.getText", return_value=("custom", True)):
+            dialog._on_save_as()
         dialog.close()
 
     # 绕过 QInputDialog：直接测试 save → list → load 路径

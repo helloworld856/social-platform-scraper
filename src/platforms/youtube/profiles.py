@@ -1,3 +1,10 @@
+# -*- coding: utf-8 -*-
+"""YouTube 博主详情数据采集与解析模块。
+
+本模块提供基于 Google YouTube v3 API 的博主/频道主页信息采集，
+支持多种格式的 YouTube 频道 URL 识别、归一化与元数据（如名称、ID、粉丝数、简介）抓取。
+"""
+
 from __future__ import annotations
 
 import time
@@ -7,9 +14,18 @@ from googleapiclient.discovery import build
 
 from src.core import XlsxRowWriter, build_output_path, sanitize_csv_row, should_stop, wait_if_paused
 
+# Excel 输出表头定义
 CSV_FIELDS = ["作者主页链接", "作者名称", "作者ID", "粉丝量", "作者简介"]
 
 def normalize_youtube_url(url: str) -> str:
+    """归一化 YouTube URL 链接，清除 Query 参数和锚点。
+
+    Args:
+        url: 原始 URL。
+
+    Returns:
+        str: 规整后的标准 URL。
+    """
     value = (url or "").strip()
     if not value:
         return ""
@@ -20,6 +36,20 @@ def normalize_youtube_url(url: str) -> str:
     return value.split("?")[0].split("#")[0].rstrip("/")
 
 def parse_channel_url(url: str) -> tuple[str, str]:
+    """解析 YouTube 频道 URL 类型，提取对应的特征识别值。
+
+    支持以下频道链接格式：
+    - ID 模式: youtube.com/channel/UC... (返回 UC...)
+    - 用户名模式: youtube.com/user/username (返回 username)
+    - 唯一标识模式: youtube.com/@handle (返回 @handle)
+    - 自定义/短链接模式: youtube.com/c/custom_name (返回 custom_name)
+
+    Args:
+        url: 频道的 URL。
+
+    Returns:
+        tuple[str, str]: (识别键类型, 特征识别值)。
+    """
     normalized = normalize_youtube_url(url)
     parsed = urlparse(normalized)
     parts = [part for part in parsed.path.split("/") if part]
@@ -38,6 +68,18 @@ def parse_channel_url(url: str) -> tuple[str, str]:
     return "search", first.lstrip("@")
 
 def resolve_channel(youtube, profile_url: str) -> dict:
+    """调用 YouTube API 解析并获取频道的原始元数据。
+
+    根据 URL 特征匹配调用相应的 API 参数（id / forUsername / forHandle）；
+    若非标准结构则采用搜索 API（youtube.search）进行模糊检索定位。
+
+    Args:
+        youtube: 已初始化的 Google API 客户端实例。
+        profile_url: 频道的 URL。
+
+    Returns:
+        dict: API 返回的频道元数据字典，若未找到则返回空字典。
+    """
     hint_type, hint_value = parse_channel_url(profile_url)
     if not hint_value:
         return {}
@@ -49,6 +91,7 @@ def resolve_channel(youtube, profile_url: str) -> dict:
     elif hint_type == "handle":
         response = youtube.channels().list(part="snippet,statistics", forHandle=hint_value).execute()
     else:
+        # 针对自定义别名等非标准路径进行频道搜索
         search_response = youtube.search().list(
             part="id",
             q=hint_value,
@@ -67,6 +110,15 @@ def resolve_channel(youtube, profile_url: str) -> dict:
     return items[0] if items else {}
 
 def channel_row(profile_url: str, item: dict) -> dict:
+    """提取频道元数据字典为符合保存格式的规范字典。
+
+    Args:
+        profile_url: 作者的主页原始 URL。
+        item: API 返回的频道原始字典。
+
+    Returns:
+        dict: 清洗规范化后的导出数据行。
+    """
     snippet = item.get("snippet", {})
     stats = item.get("statistics", {})
     channel_id = item.get("id", "")
@@ -80,6 +132,17 @@ def channel_row(profile_url: str, item: dict) -> dict:
     }
 
 def run_channel_spider(api_key, txt_file_path, log_callback, finish_callback, stop_event=None, config=None, pause_event=None):
+    """运行 YouTube 频道/博主元数据获取任务的驱动入口函数。
+
+    Args:
+        api_key: YouTube API 密钥。
+        txt_file_path: 存放作者主页链接的 TXT 文件路径。
+        log_callback: 运行状态日志回调函数。
+        finish_callback: 结束任务时的回调函数，接收导出的文件路径作为参数。
+        stop_event: 线程停止事件信号。
+        config: 任务参数配置字典。
+        pause_event: 线程暂停事件信号。
+    """
     output_path = None
     try:
         with open(txt_file_path, "r", encoding="utf-8-sig") as f:
@@ -90,6 +153,7 @@ def run_channel_spider(api_key, txt_file_path, log_callback, finish_callback, st
             log_callback("TXT 中没有有效的 YouTube 作者主页链接。")
             return
 
+        # 实例化 YouTube V3 API 服务客户端
         youtube = build("youtube", "v3", developerKey=api_key)
         output_path = build_output_path("youtube", f"youtube_profiles_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
 

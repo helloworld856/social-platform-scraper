@@ -1,1 +1,3 @@
-"""PyQt launcher for the three-platform data crawler."""
+"""
+多平台数据爬取工具工作台的主启动入口及 GUI 启动器。
+"""

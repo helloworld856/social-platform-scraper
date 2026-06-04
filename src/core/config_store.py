@@ -7,47 +7,49 @@ from pathlib import Path
 
 from src.core.output import get_workspace_root
 
+# 配置文件存放目录名称
 _CONFIG_DIR_NAME = "config"
 
+# 系统所有工具的默认配置项字典。这些值作为配置缺省或校验时的基准
 DEFAULT_CONFIGS: dict[str, dict] = {
     "youtube_keyword_mining": {
-        "max_results": 5000,
-        "youtube_search_batch_size": 50,
-        "youtube_video_batch_size": 50,
-        "comment_top_limit": 100,
+        "max_results": 5000,                  # 搜索结果最大爬取数
+        "youtube_search_batch_size": 50,       # 搜索 API 批量请求大小
+        "youtube_video_batch_size": 50,        # 视频详情 API 批量请求大小
+        "comment_top_limit": 100,              # 每个视频提取的热门评论数上限
     },
     "youtube_paired_context_metrics": {
-        "context_size": 5,
-        "max_upload_pages": 200,
+        "context_size": 5,                     # 上下文选取大小（目标视频前后各取 N 个）
+        "max_upload_pages": 200,               # 上传列表分页获取最大页数
     },
     "youtube_channel_works": {
-        "max_video_items": 5000,
-        "page_load_timeout": 45000,
-        "scroll_delay": 0.8,
-        "no_new_scroll_limit": 6,
-        "scroll_px": 2800,
-        "max_post_scrolls": 200,
-        "save_batch_size": 10,
+        "max_video_items": 5000,               # 频道作品提取上限
+        "page_load_timeout": 45000,            # 页面加载超时（毫秒）
+        "scroll_delay": 0.8,                   # 滚动间隔延迟（秒）
+        "no_new_scroll_limit": 6,              # 连续无新作品产出则停止滚动的极限次数
+        "scroll_px": 2800,                     # 单次滚动的像素距离
+        "max_post_scrolls": 200,               # 帖子/社区内容滚动的最大次数
+        "save_batch_size": 10,                 # 数据批量落盘的条数
     },
     "youtube_top_comments": {
-        "max_scan_comments": 500,
+        "max_scan_comments": 500,              # 扫描评论最大上限
         "comment_top_limit": 100,
-        "youtube_api_page_size": 100,
+        "youtube_api_page_size": 100,          # API 每页请求数量
     },
     "tiktok_keyword_metrics": {
         "max_videos": 1000,
-        "max_candidates": 3000,
+        "max_candidates": 3000,                # 候选视频扫描上限（去重过滤前的上限）
         "scroll_interval": 0.7,
         "max_search_scrolls": 360,
         "no_new_scroll_limit": 12,
         "comment_top_limit": 100,
-        "max_parallel_tabs": 1,
+        "max_parallel_tabs": 1,                # 并发执行的标签页数
         "max_comment_tabs": 1,
-        "max_queue_size": 5000,
+        "max_queue_size": 5000,                # 缓冲队列最大容量
     },
     "tiktok_profile_directory": {
         "page_load_timeout": 35000,
-        "captcha_wait": 12,
+        "captcha_wait": 12,                    # 遇到验证码时手动滑块的等待时间（秒）
     },
     "tiktok_profile_videos": {
         "page_load_timeout": 45000,
@@ -56,8 +58,8 @@ DEFAULT_CONFIGS: dict[str, dict] = {
         "max_scrolls": 200,
         "link_batch_size": 50,
         "save_batch_size": 10,
-        "cooldown_min": 10.0,
-        "cooldown_max": 20.0,
+        "cooldown_min": 10.0,                  # 视频抓取最小冷却延迟（秒）
+        "cooldown_max": 20.0,                  # 视频抓取最大冷却延迟（秒）
     },
     "tiktok_profile_play_counts": {
         "page_load_timeout": 45000,
@@ -79,7 +81,7 @@ DEFAULT_CONFIGS: dict[str, dict] = {
         "max_scroll_rounds": 80,
     },
     "x_keyword_video_search": {
-        "slice_days": 7,
+        "slice_days": 7,                       # 时间跨度切分天数，用于按区间精准爬取
         "search_page_timeout": 40000,
         "cooldown_min": 5.0,
         "cooldown_max": 7.0,
@@ -133,29 +135,62 @@ DEFAULT_CONFIGS: dict[str, dict] = {
     "judge_aigc": {
         "temperature": 0.1,
         "sleep_seconds": 0.5,
-        "trust_local_negative_aigc": False,
+        "trust_local_negative_aigc": False,   # 本地正则判定为否定时，是否信任本地结果（跳过大模型）
     },
 }
 
 
 def get_config_dir() -> Path:
+    """
+    获取配置存储根目录路径。
+
+    Returns:
+        Path: 配置文件夹的 Path 对象
+    """
     return get_workspace_root() / _CONFIG_DIR_NAME
 
 
 def get_config_path(tool_id: str) -> Path:
+    """
+    获取指定工具默认配置文件的绝对路径。
+
+    Args:
+        tool_id: 工具标识名
+
+    Returns:
+        Path: 对应的 JSON 配置文件路径
+    """
     return get_config_dir() / f"{tool_id}.json"
 
 
 def get_config_path_for_profile(tool_id: str, profile: str | None) -> Path:
-    """获取指定方案的配置文件路径。profile 为 None 时使用默认文件。"""
+    """
+    获取指定方案的配置文件路径。profile 为 None 时使用默认文件。
+
+    Args:
+        tool_id: 工具标识名
+        profile: 自定义配置方案名称
+
+    Returns:
+        Path: 对应的 JSON 配置文件路径
+    """
     if not profile:
         return get_config_path(tool_id)
+    # 使用 translate 去除文件名中的非法字符，以防 profile 包含非法文件名路径产生注入或报错
     safe_name = profile.strip().translate(str.maketrans({c: "_" for c in r'\/:*?"<>|'}))
     return get_config_dir() / f"{tool_id}_{safe_name}.json"
 
 
 def list_profiles(tool_id: str) -> list[tuple[str, str | None]]:
-    """列出某个工具的所有配置方案。返回 [(显示名, profile_key), ...]，profile_key 为 None 表示默认。"""
+    """
+    列出某个工具的所有配置方案。
+
+    Args:
+        tool_id: 工具标识名
+
+    Returns:
+        list[tuple[str, str | None]]: 返回列表，格式为 [(方案显示名称, profile_key), ...]，profile_key 为 None 表示默认配置。
+    """
     config_dir = get_config_dir()
     if not config_dir.exists():
         return [("默认配置", None)]
@@ -171,11 +206,16 @@ def list_profiles(tool_id: str) -> list[tuple[str, str | None]]:
 
 
 def _coerce_value(value, default):
-    """将加载的 JSON 值强制转换为与默认值相同的类型。"""
+    """
+    将加载的 JSON 值强制转换为与默认配置值相同的 Python 原生类型。
+    主要是为了防止手动修改 JSON 配置导致字段类型混乱（比如布尔值变成字符串）。
+    """
     if isinstance(default, bool):
         if isinstance(value, str):
             return value.lower() in ("true", "1", "yes")
         return bool(value)
+    # Python 中 bool 是 int 的子类，所以 isinstance(True, int) 为 True。
+    # 这里必须加 isinstance(default, bool) 排除条件，否则布尔值会被误强转为 0 或 1。
     if isinstance(default, int) and not isinstance(default, bool):
         try:
             return int(value)
@@ -190,7 +230,17 @@ def _coerce_value(value, default):
 
 
 def load_config(tool_id: str, defaults: dict, profile: str | None = None) -> dict:
-    """加载配置，缺失字段用 defaults 补齐。profile 为 None 时加载默认配置。"""
+    """
+    从本地 JSON 文件加载配置，缺失字段用 defaults 自动补齐。
+
+    Args:
+        tool_id: 工具标识名
+        defaults: 默认参数键值对字典
+        profile: 配置方案名称，为 None 时加载默认配置
+
+    Returns:
+        dict: 最终补齐并强转完类型后的配置字典
+    """
     result = dict(defaults)
     path = get_config_path_for_profile(tool_id, profile)
     if path.exists():
@@ -207,7 +257,15 @@ def load_config(tool_id: str, defaults: dict, profile: str | None = None) -> dic
 
 
 def save_config(tool_id: str, values: dict, defaults: dict | None = None, profile: str | None = None) -> None:
-    """保存配置到 JSON 文件，只保留 defaults 中存在的 key。profile 为 None 时保存到默认配置。"""
+    """
+    保存配置到本地 JSON 文件，只保留 defaults 中定义过的有效参数 Key。
+
+    Args:
+        tool_id: 工具标识名
+        values: 准备保存的键值对字典
+        defaults: 可选，作为字段校验的默认字典，默认自动读取 DEFAULT_CONFIGS
+        profile: 方案名称，为 None 时保存到默认配置
+    """
     if defaults is None:
         defaults = DEFAULT_CONFIGS.get(tool_id, {})
     if not defaults:
@@ -216,6 +274,8 @@ def save_config(tool_id: str, values: dict, defaults: dict | None = None, profil
     config_dir = get_config_dir()
     config_dir.mkdir(parents=True, exist_ok=True)
     path = get_config_path_for_profile(tool_id, profile)
+    # 采用原子写入模式：先写入临时文件，再做文件替换。
+    # 这样可以防止在写入过程中发生断电或程序强退导致原 JSON 配置文件内容被清空或损坏。
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(filtered, f, ensure_ascii=False, indent=2)
@@ -223,7 +283,9 @@ def save_config(tool_id: str, values: dict, defaults: dict | None = None, profil
 
 
 def generate_all_defaults() -> None:
-    """为所有工具生成默认配置 JSON（已存在的文件不会被覆盖）。"""
+    """
+    启动应用时，为 DEFAULT_CONFIGS 中所有的工具生成默认的 JSON 配置文件（已存在的文件不会被覆盖）。
+    """
     for tool_id, defaults in DEFAULT_CONFIGS.items():
         path = get_config_path(tool_id)
         if not path.exists():
@@ -231,7 +293,16 @@ def generate_all_defaults() -> None:
 
 
 def delete_profile(tool_id: str, profile: str) -> bool:
-    """删除指定方案。profile 不能为空。返回是否删除成功。"""
+    """
+    删除指定的自定义配置方案文件（默认配置无法删除）。
+
+    Args:
+        tool_id: 工具标识名
+        profile: 要删除的方案名称，不能为空
+
+    Returns:
+        bool: 是否删除成功
+    """
     if not profile:
         return False
     path = get_config_path_for_profile(tool_id, profile)
@@ -239,3 +310,4 @@ def delete_profile(tool_id: str, profile: str) -> bool:
         path.unlink()
         return True
     return False
+

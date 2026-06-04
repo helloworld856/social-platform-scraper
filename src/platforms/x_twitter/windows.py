@@ -249,3 +249,56 @@ class XProfileTweetsWindow(SimpleToolWindow):
         )
 
 
+class XCommentsWindow(SimpleToolWindow):
+    """X (Twitter) 热门评论抓取窗口。
+
+    读取每行一个推文链接的 TXT 文件，连接浏览器扫描首层评论，并按点赞量降序输出。
+    """
+    tool_id = "x_top_comments"
+
+    def tool_config_params(self):
+        return [
+            ConfigParam("comment_top_limit", "最多输出评论数", kind="int", default=100, minimum=1, maximum=500),
+            ConfigParam("page_load_timeout", "页面加载超时(毫秒)", kind="int", default=30000, minimum=10000, maximum=120000, step=1000),
+            ConfigParam("scroll_interval", "评论滚动间隔(秒)", kind="float", default=4.0, minimum=0.1, maximum=10.0, step=0.1, decimals=1),
+            ConfigParam("no_new_scroll_limit", "无新评论滚动次数阈值", kind="int", default=5, minimum=2, maximum=50),
+        ]
+
+    def __init__(self) -> None:
+        super().__init__(
+            "X 热门评论",
+            [
+                FieldSpec(
+                    "txt_path",
+                    "推文链接，每行一个",
+                    kind="text_or_file",
+                    required=True,
+                    placeholder="https://x.com/username/status/1234567890",
+                ),
+                FieldSpec(
+                    "max_scan_comments",
+                    "每个推文最多扫描评论数",
+                    kind="int",
+                    default=500,
+                    minimum=100,
+                    maximum=10000,
+                ),
+            ],
+        )
+
+    def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
+        from src.platforms.x_twitter.comments import run_x_top_comments_spider
+
+        config = {k: v for k, v in values.items() if k in ("page_load_timeout", "comment_top_limit", "scroll_interval", "no_new_scroll_limit")}
+        return run_x_top_comments_spider(
+            self._text_to_tempfile(values["txt_path"]),
+            DEFAULT_X_CDP_URL,
+            int(values["max_scan_comments"]),
+            log_callback,
+            finish_callback,
+            stop_event,
+            pause_event=pause_event,
+            config=config,
+        )
+
+

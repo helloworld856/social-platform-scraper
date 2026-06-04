@@ -20,6 +20,9 @@ from src.core import (
 CSV_FIELDS = ["博主主页链接", "博主名称", "博主ID", "粉丝量", "作者简介"]
 
 def clean_url(url: str) -> str:
+    """
+    清洗并规范化输入的主页链接，补齐协议头并裁剪查询参数。
+    """
     url = (url or "").strip()
     if not url:
         return ""
@@ -32,15 +35,24 @@ def clean_url(url: str) -> str:
     return url.split("?")[0].split("#")[0].rstrip("/")
 
 def normalize_profile_url(url: str) -> str:
+    """
+    从链接中提取博主 ID，组装成标准的 TikTok 博主主页 URL。
+    """
     cleaned = clean_url(url)
     match = re.search(r"tiktok\.com/(@[^/?#]+)", cleaned)
     return f"https://www.tiktok.com/{match.group(1)}" if match else ""
 
 def profile_id_from_url(profile_url: str) -> str:
+    """
+    从博主主页 URL 提取 @username 博主 ID。
+    """
     match = re.search(r"tiktok\.com/@([^/?#]+)", profile_url)
     return f"@{match.group(1)}" if match else ""
 
 def parse_profile_urls(txt_path: str) -> list[str]:
+    """
+    从博主 TXT 配置文件中读取全部非重复且合法的博主主页链接。
+    """
     urls: list[str] = []
     seen = set()
     with open(txt_path, "r", encoding="utf-8-sig") as f:
@@ -57,6 +69,9 @@ def parse_profile_urls(txt_path: str) -> list[str]:
     return urls
 
 def get_first_text(page, selectors: list[str], timeout: int = 2500) -> str:
+    """
+    使用多重选择器候选列表，安全返回页面中第一个匹配成功的节点的 inner_text。
+    """
     for selector in selectors:
         try:
             loc = page.locator(selector).first
@@ -70,10 +85,15 @@ def get_first_text(page, selectors: list[str], timeout: int = 2500) -> str:
     return ""
 
 def extract_profile_row(page, profile_url: str, page_load_timeout: int = 35000, captcha_wait: int = 12) -> dict[str, str]:
+    """
+    进入指定的博主主页，检测人机验证码，并安全提取博主名称、ID、粉丝量、博主简介等元数据。
+    如果账号不存在或已注销，进行优雅的错误处理并返回标识字段。
+    """
     page.goto(profile_url, wait_until="domcontentloaded", timeout=page_load_timeout)
     time.sleep(random.uniform(1.4, 2.2))
 
     try:
+        # 检测是否弹出人机验证页面，若有则睡眠指定秒数供人工操作
         if "captcha" in page.url or page.locator("div[id^='captcha']").count() > 0:
             time.sleep(captcha_wait)
     except Exception:
@@ -89,6 +109,7 @@ def extract_profile_row(page, profile_url: str, page_load_timeout: int = 35000, 
             "作者简介": "账号不存在、已注销或当前不可见",
         }
 
+    # 多重元素路径定位保障数据高提取率
     user_title = get_first_text(page, ["[data-e2e='user-title']", "h1"])
     user_subtitle = get_first_text(page, ["[data-e2e='user-subtitle']", "h2"])
     followers = expand_compact_number(get_first_text(page, ["[data-e2e='followers-count']"]))
@@ -107,6 +128,11 @@ def extract_profile_row(page, profile_url: str, page_load_timeout: int = 35000, 
     }
 
 def run_tiktok_profile_spider(txt_path: str, cdp_port_or_url: str, log_callback, finish_callback, stop_event=None, pause_event=None, config=None):
+    """
+    TikTok 博主主页基础元数据爬虫主入口。
+    顺序遍历 TXT 文件中的博主链接，提取基础元数据并保存至对应的 Excel 报表中，
+    支持随机频控降温和动态配置超时及验证码等待秒数。
+    """
     if config is None:
         config = {}
     page_load_timeout = int(config.get("page_load_timeout", 35000))
@@ -153,6 +179,7 @@ def run_tiktok_profile_spider(txt_path: str, cdp_port_or_url: str, log_callback,
                     log_callback(f"  失败：{exc}")
 
                 writer.writerow(sanitize_csv_row(row))
+                # 每抓取 5 个博主主页进行随机冷却，以避免触发高频风控限制
                 if index % 5 == 0:
                     if random_cooldown(log_callback, stop_event, 3.0, 8.0):
                         break

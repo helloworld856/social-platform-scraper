@@ -1,14 +1,25 @@
+"""
+YouTube 频道作品采集模块。
+该模块包含以下核心功能：
+1. API 模式采集：在提供有效的 API Key 时，优先使用 YouTube Data API v3 接口，通过频道的 uploads 播放列表批量、快速、低额度消耗地提取视频/Shorts作品。
+2. 浏览器 Fallback 模式：当 API Key 无效、超限或不可用时，降级使用 Playwright 浏览器接管本地 Chrome 并滚动页面解析 DOM 元素。
+3. 帖子（Posts）采集：因为 API 的上传列表中不含帖子，故统一使用 Playwright 模拟滚动和 DOM 抓取。
+4. 评论信息抓取：若用户选择采集评论，可在作品拉取完成后，利用 API 对所有提取到的视频/Shorts 批量拉取一级评论并按点赞量降序保存。
+"""
+
 from __future__ import annotations
 
 import re
 import time
 from urllib.parse import urlparse
 
+# 尝试导入 Google API Client，如果环境未安装则标记为 None（后续降级到浏览器提取）
 try:
     from googleapiclient.discovery import build
 except ModuleNotFoundError:
     build = None
 
+# 尝试导入 Playwright 同步 API，如未安装则设置 Fallback
 try:
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
     from playwright.sync_api import sync_playwright
@@ -20,7 +31,7 @@ from src.core import DEFAULT_X_CDP_URL, MultiSheetXlsxWriter, XlsxRowWriter, bui
 from src.platforms.youtube.comments import fetch_top_level_comments
 from src.platforms.youtube.keyword import parse_date_range
 
-
+# 导出到 Excel 中的表格头部字段定义
 CSV_FIELDS = [
     "序号",
     "编号",
@@ -40,22 +51,33 @@ CSV_FIELDS = [
     "点赞数",
     "评论数",
 ]
-PAGE_LOAD_TIMEOUT = 45000
-INITIAL_LOAD_DELAY = 1.8
-POST_SCROLL_DELAY = 0.8
-POST_SCROLL_PX = 2800
-NO_NEW_POST_LIMIT = 6
-DEFAULT_MAX_POST_SCROLLS = 120
-DEFAULT_MAX_VIDEO_ITEMS = 500
-SAVE_BATCH_SIZE = 10
+
+# 浏览器爬虫相关的延迟与限制常量
+PAGE_LOAD_TIMEOUT = 45000       # 页面最大加载超时（毫秒）
+INITIAL_LOAD_DELAY = 1.8        # 页面加载后初次等待渲染延迟（秒）
+POST_SCROLL_DELAY = 0.8         # 每次滚动后的页面稳定等待时间（秒）
+POST_SCROLL_PX = 2800           # 每次滚动的垂直像素高度
+NO_NEW_POST_LIMIT = 6           # 连续多少次滚动无新增内容则视作到底部并停止
+DEFAULT_MAX_POST_SCROLLS = 120  # 默认最大滚动次数
+DEFAULT_MAX_VIDEO_ITEMS = 500   # 默认 API/浏览器提取视频的最大条数限制
+SAVE_BATCH_SIZE = 10            # 爬取过程中的分批写入磁盘的行数阀值
+
 
 
 def log_line(log_callback, text: str):
+    """
+    通用日志输出函数，当传入 log_callback 回调函数时调用。
+    """
     if log_callback:
         log_callback(text)
 
 
 def clean_channel_url(url: str) -> str:
+    """
+    清理并规范化 YouTube 频道主页 URL。
+    支持补全协议头、自动处理以斜杠开头的路径，
+    并剔除 URL 尾部的 /videos、/shorts、/posts 等子路径或查询参数，返回干净的主页根链接。
+    """
     value = (url or "").strip()
     if not value:
         return ""
@@ -66,15 +88,21 @@ def clean_channel_url(url: str) -> str:
     if not value.startswith("http"):
         value = "https://" + value
     value = value.split("?")[0].split("#")[0].rstrip("/")
+    # 正则去除尾部常见的标签页路径
     value = re.sub(r"/(videos|shorts|posts|community|featured)$", "", value, flags=re.I)
     return value
 
 
 def parse_channel_urls(text: str) -> list[str]:
+    """
+    从文本框输入的字符串中解析出所有合法的 YouTube 频道链接。
+    过滤掉以 # 开头的注释行、空行，对链接进行净化后进行去重。
+    """
     urls: list[str] = []
     seen = set()
     for line in (text or "").splitlines():
         stripped = line.strip()
+        # 跳过空行和以 # 开头的注释行
         if not stripped or stripped.startswith("#"):
             continue
         url = clean_channel_url(stripped.split()[0])
@@ -85,6 +113,13 @@ def parse_channel_urls(text: str) -> list[str]:
 
 
 def parse_channel_url(url: str) -> tuple[str, str]:
+    """
+    分析 YouTube 频道链接的路径结构，提取识别频道的 hint 类型及值。
+    - /channel/ID -> 返回 ("id", ID)
+    - /user/Name -> 返回 ("username", Name)
+    - 以 @ 开头的 Handle -> 返回 ("handle", @Handle)
+    - 其它（如 /c/ 或 /custom/） -> 返回 ("search", Name) 以进行 API 检索
+    """
     normalized = clean_channel_url(url)
     parsed = urlparse(normalized)
     parts = [part for part in parsed.path.split("/") if part]
@@ -104,10 +139,17 @@ def parse_channel_url(url: str) -> tuple[str, str]:
 
 
 def posts_url(channel_url: str) -> str:
+    """
+    拼接频道的社区帖子（Posts）标签页完整链接。
+    """
     return f"{clean_channel_url(channel_url)}/posts"
 
 
 def normalize_youtube_href(href: str) -> str:
+    """
+    标准化视频或 Shorts 的跳转 URL。
+    去除推荐参数 &pp= 等，并统一提取成标准的 watch?v= 视频地址或 /shorts/ 视频地址。
+    """
     value = (href or "").strip()
     if not value:
         return ""
@@ -126,6 +168,9 @@ def normalize_youtube_href(href: str) -> str:
 
 
 def normalize_metric_text(text: str) -> str:
+    """
+    提取统计数据（如播放量、点赞量等）文本中的数字及数量单位（如 K, M, 万, 亿 等）。
+    """
     value = re.sub(r"\s+", " ", text or "").strip()
     if not value:
         return ""
@@ -134,14 +179,27 @@ def normalize_metric_text(text: str) -> str:
 
 
 def tab_url(channel_url: str, tab: str) -> str:
+    """
+    拼接指定标签页（如 videos、shorts）的完整链接。
+    """
     return f"{clean_channel_url(channel_url)}/{tab}"
 
 
 def chunked(values: list[str], size: int) -> list[list[str]]:
+    """
+    辅助函数：按指定大小 size 将列表 values 分割为多个子列表。
+    """
     return [values[index:index + size] for index in range(0, len(values), size)]
 
 
+
 def fetch_channel_item(youtube, channel_url: str) -> dict:
+    """
+    使用 YouTube Data API v3 获取频道的详情信息。
+    根据 parse_channel_url 返回的定位类型，依次调用 channels().list，
+    提取频道关联的 contentDetails (包含 uploads 上传播放列表 ID)。
+    若需要搜索定位，则调用 search().list 找出频道 ID 后再查询详情。
+    """
     hint_type, hint_value = parse_channel_url(channel_url)
     if not hint_value:
         return {}
@@ -153,6 +211,7 @@ def fetch_channel_item(youtube, channel_url: str) -> dict:
     elif hint_type == "handle":
         response = youtube.channels().list(part="snippet,contentDetails", forHandle=hint_value).execute()
     else:
+        # 自定义名或未定结构采用搜索接口进行模糊查找
         search_response = youtube.search().list(part="id", q=hint_value, type="channel", maxResults=1).execute()
         items = search_response.get("items", [])
         channel_id = items[0].get("id", {}).get("channelId", "") if items else ""
@@ -165,6 +224,11 @@ def fetch_channel_item(youtube, channel_url: str) -> dict:
 
 
 def collect_upload_video_ids(youtube, uploads_playlist_id: str, max_video_items: int, limit_time_bool: bool, start_dt, end_dt, log_callback, stop_event=None, pause_event=None) -> list[str]:
+    """
+    从指定的 uploads 播放列表中分页拉取所有视频的 videoId。
+    - limit_time_bool: 为真时，若视频发布日期早于 start_dt，自动触发 date 拦截，停止向后加载更多历史页面；若晚于 end_dt，则跳过此项视频继续往下。
+    - 支持事件暂停 pause_event 与停止 stop_event。
+    """
     video_ids: list[str] = []
     seen = set()
     page_token = None
@@ -185,6 +249,7 @@ def collect_upload_video_ids(youtube, uploads_playlist_id: str, max_video_items:
         stopped_by_date = False
         for item in response.get("items", []):
             pub_time = item.get("contentDetails", {}).get("videoPublishedAt", "")
+            # 时间过滤逻辑：拦截早于开始日期的列表
             if limit_time_bool and pub_time:
                 from datetime import datetime
                 try:
@@ -215,6 +280,11 @@ def collect_upload_video_ids(youtube, uploads_playlist_id: str, max_video_items:
 
 
 def video_rows_from_api(youtube, video_ids: list[str], stop_event=None, pause_event=None) -> list[dict[str, str]]:
+    """
+    根据视频 ID 列表，分页批量抓取视频详情元数据。
+    调用 videos().list 获取 snippet (标题、描述、发布时间、频道)、statistics (播放、点赞、评论数) 和 contentDetails (时长)。
+    - 根据视频时长（ISO 8601 格式，如 PT1M5S 转换为秒数）判断视频类型：小于等于 60 秒为 Shorts，否则为普通视频。
+    """
     rows: list[dict[str, str]] = []
     from src.platforms.youtube.comments import format_youtube_datetime, build_video_url
     from src.platforms.youtube.keyword import format_youtube_duration as kw_format
@@ -233,8 +303,10 @@ def video_rows_from_api(youtube, video_ids: list[str], stop_event=None, pause_ev
             total_seconds = parts[0] * 60 + parts[1]
         else:
             total_seconds = parts[0]
+        # 时长不大于60秒判定为 Shorts 短视频
         return "Shorts" if total_seconds <= 60 else "普通视频"
 
+    # API 限制单次请求最大 50 条
     for batch in chunked(video_ids, 50):
         if should_stop(stop_event):
             break
@@ -283,6 +355,10 @@ def video_rows_from_api(youtube, video_ids: list[str], stop_event=None, pause_ev
 
 
 def collect_video_works_with_api(youtube, channel_url: str, max_video_items: int, limit_time_bool: bool, start_dt, end_dt, log_callback, stop_event=None, pause_event=None) -> list[dict[str, str]]:
+    """
+    完整的 API 模式博主视频采集。
+    获取频道的 uploads 播放列表 -> 获取列表下符合时间条件的视频 ID -> 批量拉取视频统计详情。
+    """
     channel_item = fetch_channel_item(youtube, channel_url)
     if not channel_item:
         log_line(log_callback, "  API 未找到频道信息。")
@@ -306,7 +382,15 @@ def collect_video_works_with_api(youtube, channel_url: str, max_video_items: int
     return rows
 
 
+
 def extract_visible_video_cards(page, tab: str) -> list[dict[str, str]]:
+    """
+    使用 Playwright 在浏览器上下文内执行 JavaScript。
+    抓取当前页面 DOM 中可见的视频卡片信息。
+    - 针对 videos 标签页使用选择器 'a[href*="/watch?v="]'，针对 shorts 标签页使用 'a[href*="/shorts/"]'。
+    - 适配多种卡片容器选择器（如 ytd-rich-item-renderer、ytd-video-renderer 等），提取链接、标题、播放量文本。
+    - 标题提取支持多种候选属性与子节点，并过滤清洗多余字符。
+    """
     return page.evaluate(
         """({ tab }) => {
             const absUrl = href => {
@@ -392,6 +476,12 @@ def extract_visible_video_cards(page, tab: str) -> list[dict[str, str]]:
 
 def collect_video_tab_with_playwright(page, channel_url: str, tab: str, max_scrolls: int, log_callback, stop_event=None, pause_event=None,
                                       page_timeout=None, scroll_delay=None, no_new_limit=None, scroll_px=None) -> list[dict[str, str]]:
+    """
+    使用 Playwright 模拟用户滚动获取视频（Videos）或短视频（Shorts）列表。
+    - 拼接标签页 URL 自动跳转，并等待首个视频卡片加载。
+    - 循环执行模拟页面滚动，获取当前 DOM 树中的可见卡片进行去重去空累加。
+    - 若连续滚动 no_new_limit 次未发现任何新作品，认为已加载至列表最底端，自动退出。
+    """
     if page_timeout is None:
         page_timeout = PAGE_LOAD_TIMEOUT
     if scroll_delay is None:
@@ -477,7 +567,16 @@ def collect_video_tab_with_playwright(page, channel_url: str, tab: str, max_scro
     return works
 
 
+
 def extract_visible_posts(page) -> list[dict[str, str]]:
+    """
+    使用 Playwright 在浏览器上下文内执行 JavaScript。
+    抓取当前页面 DOM 中可见的社区帖子（Posts）。
+    - 针对帖子卡片容器使用选择器（如 ytd-backstage-post-thread-renderer 等）。
+    - 提取帖子正文内容及可能包含的图片附件标识（`[图片]`）。
+    - 提取点赞数、评论数、浏览数。为应对不同界面的渲染差异，支持从 HTML 节点的 outerHTML 属性中用正则尝试还原包含 `viewCount`/`commentCount`/`likeCount` 的 JSON API 端点信息。
+    - 寻找帖子专属详情跳转链接。
+    """
     return page.evaluate(
         """() => {
             const absUrl = href => {
@@ -597,6 +696,12 @@ def extract_visible_posts(page) -> list[dict[str, str]]:
 
 def collect_posts_with_playwright(page, channel_url: str, max_post_scrolls: int, log_callback, stop_event=None, pause_event=None,
                                    page_timeout=None, scroll_delay=None, no_new_limit=None, scroll_px=None) -> list[dict[str, str]]:
+    """
+    使用 Playwright 模拟用户滚动获取社区帖子（Posts）列表。
+    - 自动打开 Posts 标签页，并获取当前 DOM 中已加载的帖子并清洗。
+    - 循环执行模拟页面滚动，获取当前 DOM 树中的可见帖子并累加。
+    - 若连续滚动 no_new_limit 次未发现任何新帖子，认为已加载至列表最底端，自动退出。
+    """
     if page_timeout is None:
         page_timeout = PAGE_LOAD_TIMEOUT
     if scroll_delay is None:
@@ -666,6 +771,10 @@ def collect_posts_with_playwright(page, channel_url: str, max_post_scrolls: int,
 
 
 def row_from_work(index: int, work: dict[str, str], channel_url: str = "") -> dict[str, str]:
+    """
+    数据行格式化工具。
+    将内部采集得到的 dict 格式作品字段转换为最终写入 Excel 的列对应的统一 KV。
+    """
     ch_id = work.get("channel_id", "")
     ch_url = f"https://www.youtube.com/channel/{ch_id}" if ch_id else channel_url
     
@@ -707,6 +816,18 @@ def run_youtube_channel_works_spider(
     config: dict | None = None,
     pause_event=None,
 ):
+    """
+    YouTube 频道作品及评论采集的主入口调度器。
+    - 参数支持 API Key、作者主页 URL 列表、采集目标（视频/Shorts/Posts/全部）、限制日期、是否同时爬取评论、评论数限制等。
+    - 调度流程：
+      1. 解析并去重输入的主页 URL 列表。
+      2. 尝试使用 google-api-python-client 库建立 API 连接。
+      3. 遍历博主主页，如果目标是全部或仅视频与Shorts，且 API 可用，则调用 collect_video_works_with_api 走 API 极速通道获取视频/Shorts详情。
+      4. 如果 API 报错或连接失败，或者 API 没有返回数据，程序会自动将 should_fallback_video_tabs 标为 True，无缝降级走 Playwright 模拟浏览器滚动提取 videos 和 shorts。
+      5. 帖子（Posts）的采集不属于 API 的 uploads 范畴，因此统一通过 Playwright 页面采集器 collect_posts_with_playwright 模拟滚动和 DOM 抽取。
+      6. 对采集的所有作品批量进行统一映射转换，并视配置通过 API 在线增量拉取首层视频评论。
+      7. 将结果分批保存到临时 rows_buffer 并写入 Excel，在最终结束或出现异常时，确保关闭 Playwright 的 Browser 进程与相关上下文，防止出现资源泄露。
+    """
     if config is None:
         config = {}
     page_timeout = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
@@ -904,3 +1025,4 @@ def run_youtube_channel_works_spider(
             pass
         if finish_callback:
             finish_callback(completed_path)
+

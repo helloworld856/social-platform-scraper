@@ -45,6 +45,9 @@ MIN_GUARANTEED_VIDEOS = 5
 
 
 def parse_date_range(start_date: str, end_date: str) -> tuple[datetime, datetime]:
+    """
+    解析并校验日期范围字符串，返回对应的 datetime 对象元组。
+    """
     start_dt = datetime.strptime(start_date.strip(), "%Y-%m-%d")
     end_dt = datetime.strptime(end_date.strip(), "%Y-%m-%d")
     if start_dt > end_dt:
@@ -53,6 +56,9 @@ def parse_date_range(start_date: str, end_date: str) -> tuple[datetime, datetime
 
 
 def parse_publish_date(value: str) -> datetime | None:
+    """
+    解析发布日期字符串，尝试匹配并提取 'YYYY-MM-DD' 格式，返回 datetime 对象。
+    """
     text = (value or "").strip()
     match = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", text)
     if not match:
@@ -64,6 +70,9 @@ def parse_publish_date(value: str) -> datetime | None:
 
 
 def in_date_range(publish_time: str, start_dt: datetime, end_dt: datetime) -> bool:
+    """
+    判断发布时间是否处于给定的开始日期和结束日期范围之内。
+    """
     publish_dt = parse_publish_date(publish_time)
     if not publish_dt:
         return False
@@ -71,6 +80,9 @@ def in_date_range(publish_time: str, start_dt: datetime, end_dt: datetime) -> bo
 
 
 def format_plain_text(value) -> str:
+    """
+    格式化纯文本内容，过滤掉空值或常见的 JS 空值占位符（如 'none', 'null', 'undefined', 'nan'）。
+    """
     if value is None or isinstance(value, bool):
         return ""
     if isinstance(value, (dict, list, tuple)):
@@ -80,6 +92,9 @@ def format_plain_text(value) -> str:
 
 
 def format_count(value) -> str:
+    """
+    格式化数值型或文本型统计数据，过滤空值占位符，并将形如 '1.2K', '3.4M' 的数值统一归一化为完整整数。
+    """
     if value is None or isinstance(value, bool):
         return ""
     if isinstance(value, float) and value.is_integer():
@@ -93,6 +108,9 @@ def format_count(value) -> str:
 
 
 def format_publish_time(value) -> str:
+    """
+    格式化发布时间。若传入为 Unix 时间戳则转换为 'YYYY-MM-DD HH:MM:SS'，否则转为清洗后的纯文本。
+    """
     try:
         timestamp = int(value)
         if timestamp > 0:
@@ -103,6 +121,9 @@ def format_publish_time(value) -> str:
 
 
 def iter_dicts(value):
+    """
+    递归生成器：遍历嵌套的 dict 和 list 结构，产出其中所有的字典对象，用于解析页面复杂状态。
+    """
     if isinstance(value, dict):
         yield value
         for child in value.values():
@@ -113,6 +134,9 @@ def iter_dicts(value):
 
 
 def parse_script_json(html: str, script_id: str):
+    """
+    使用正则表达式匹配并提取 HTML 页面中指定 ID 的 <script> 标签内的 JSON 内容，并进行反转义解析。
+    """
     pattern = rf'<script[^>]+id=["\']{re.escape(script_id)}["\'][^>]*>(.*?)</script>'
     match = re.search(pattern, html, re.S)
     if not match:
@@ -124,6 +148,9 @@ def parse_script_json(html: str, script_id: str):
 
 
 def page_state_sources(page) -> list[dict]:
+    """
+    获取页面渲染状态源。分别从 Playwright window 对象和 HTML script 脚本节点中提取并反序列化 TikTok 数据状态。
+    """
     sources: list[dict] = []
     try:
         raw = page.evaluate(
@@ -153,6 +180,9 @@ def page_state_sources(page) -> list[dict]:
 
 
 def find_item_in_state(sources: list[dict], video_id: str) -> dict:
+    """
+    在多份页面状态源中深度检索匹配指定 video_id 的视频详情字典（支持 ItemModule、itemStruct 等多种嵌套布局）。
+    """
     if not video_id:
         return {}
     for source in sources:
@@ -172,6 +202,9 @@ def find_item_in_state(sources: list[dict], video_id: str) -> dict:
 
 
 def item_metric(item: dict, *keys: str) -> str:
+    """
+    从提取出的视频详情字典中，依次匹配候选的统计字段键（例如 diggCount, stats.diggCount 等），并归一化输出。
+    """
     stats_sources = []
     for key in ("stats", "statsV2", "stats_v2", "statistics"):
         value = item.get(key)
@@ -188,6 +221,9 @@ def item_metric(item: dict, *keys: str) -> str:
 
 
 def extract_metric(page, data_e2e_candidates, removable_words=(), default=""):
+    """
+    DOM 降级兜底方案：从页面中定位指定 data-e2e 候选元素并解析提取其文本统计值。
+    """
     candidates = data_e2e_candidates if isinstance(data_e2e_candidates, (list, tuple)) else [data_e2e_candidates]
     for data_e2e in candidates:
         try:
@@ -206,11 +242,17 @@ def extract_metric(page, data_e2e_candidates, removable_words=(), default=""):
 
 
 def log_line(log_callback, message: str) -> None:
+    """
+    执行日志回调输出。
+    """
     if log_callback:
         log_callback(message)
 
 
 def clean_url(url: str) -> str:
+    """
+    对 URL 进行基础清洗，剥离查询参数与哈希锚点，补全协议头。
+    """
     value = (url or "").strip()
     if not value:
         return ""
@@ -224,12 +266,18 @@ def clean_url(url: str) -> str:
 
 
 def normalize_profile_url(url: str) -> str:
+    """
+    将博主主页链接归一化为标准的 https://www.tiktok.com/@username 格式。
+    """
     cleaned = clean_url(url)
     match = re.search(r"tiktok\.com/(@[^/?#]+)", cleaned)
     return f"https://www.tiktok.com/{match.group(1)}" if match else ""
 
 
 def parse_profile_urls(txt_path: str) -> list[str]:
+    """
+    从 TXT 文件中读取并清洗出所有不重复的 TikTok 博主主页 URL。
+    """
     urls: list[str] = []
     seen = set()
     with open(txt_path, "r", encoding="utf-8-sig") as file:
@@ -247,11 +295,17 @@ def parse_profile_urls(txt_path: str) -> list[str]:
 
 
 def parse_video_id(video_url: str) -> str:
+    """
+    从视频 URL 中提取唯一的纯数字视频 ID。
+    """
     match = re.search(r"/video/(\d+)", video_url or "")
     return match.group(1) if match else ""
 
 
 def normalize_video_url(url: str) -> str:
+    """
+    验证并归一化视频 URL 为标准格式，不合法的返回空字符串。
+    """
     value = (url or "").strip()
     if value.startswith("//"):
         value = "https:" + value
@@ -266,6 +320,12 @@ def normalize_video_url(url: str) -> str:
 
 
 def trigger_profile_lazy_load(page) -> None:
+    """
+    触发博主主页视频列表的下拉懒加载：
+    - 垂直滚动指定高度；
+    - 对所有带有滚动条的 overflow 容器派发滚动事件，唤醒 TikTok 的列表渲染机制；
+    - 结合 mouse.wheel 进行平滑向下滚动兜底。
+    """
     try:
         page.evaluate(
             f"""() => {{
@@ -294,6 +354,9 @@ def trigger_profile_lazy_load(page) -> None:
 
 
 def collect_visible_video_links(page, seen: set[str]) -> list[str]:
+    """
+    搜集当前主页视口中所有可见的视频链接。对抓取到的 URL 进行归一化并利用已见集合 seen 进行去重。
+    """
     links: list[str] = []
     try:
         anchors = page.locator("a[href*='/video/']").all()
@@ -312,11 +375,18 @@ def collect_visible_video_links(page, seen: set[str]) -> list[str]:
 
 
 def item_detail_from_state(page, video_url: str) -> dict:
+    """
+    从页面提取出 video_url 对应视频 ID 的 JSON 数据对象。
+    """
     video_id = parse_video_id(video_url)
     return find_item_in_state(page_state_sources(page), video_id)
 
 
 def extract_video_detail(page, video_url: str) -> dict[str, str]:
+    """
+    打开视频详情页，提取并清洗视频关键指标（点赞量、评论量、收藏量、分享量、发布时间、视频描述描述等）。
+    支持重试加载 JSON Rehydration 状态，并对 DOM 进行兜底解析以规避 JS 反爬风控带来的数据缺失。
+    """
     page.goto(video_url, wait_until="domcontentloaded", timeout=DETAIL_LOAD_TIMEOUT)
     try:
         page.wait_for_selector(
@@ -397,6 +467,9 @@ def extract_video_detail(page, video_url: str) -> dict[str, str]:
 
 
 def row_from_detail(index: int, detail: dict[str, str], play_count: str = "") -> dict[str, str]:
+    """
+    根据提取的详情字典以及额外的播放量指标拼装成与 Excel 列对应的结构化数据字典。
+    """
     row = {
         "序号": str(index),
         "视频链接": detail.get("video_url", ""),
@@ -415,6 +488,9 @@ def row_from_detail(index: int, detail: dict[str, str], play_count: str = "") ->
 
 
 def wait_after_detail(log_callback, stop_event=None, pause_event=None) -> bool:
+    """
+    爬取每条视频后的冷却时间，以防短时间内频繁请求被 TikTok 拦截。
+    """
     if wait_if_paused(pause_event, stop_event):
         return True
     seconds = random.uniform(DETAIL_DELAY_MIN_SECONDS, DETAIL_DELAY_MAX_SECONDS)
@@ -443,6 +519,12 @@ def process_video_batch(
     play_counts_map: dict[str, int] = None,
     fetch_play_counts_bool: bool = False,
 ) -> tuple[int, int, bool, int]:
+    """
+    批量爬取当前收集的视频链接：
+    - 根据各项 boolean 参数抓取详情、播放量、或主楼评论；
+    - 执行严格的发布时间范围限流校验：如果在指定时间段外，且当前已抓取数大于 MIN_GUARANTEED_VIDEOS 保底要求，将立即触发当前主页的停止动作；
+    - 针对分批写入实施随机等待降温冷却，降低 IP 被封锁概率。
+    """
     stop_profile = False
     batch_written = 0
     log_line(log_callback, f"  开始爬取本批 {len(video_links)} 条视频。")
@@ -460,9 +542,11 @@ def process_video_batch(
                 detail = extract_video_detail(detail_page, video_url)
                 published_at = detail.get("published_at", "")
 
+                # 发布日期范围校验
                 if limit_time_bool and start_dt and end_dt:
                     publish_dt = parse_publish_date(published_at)
                     if publish_dt and publish_dt.date() < start_dt.date():
+                        # 超出日期下限，若已满足保底抓取视频条数，则中断该主页的进一步抓取
                         if processed_count >= MIN_GUARANTEED_VIDEOS:
                             log_line(log_callback, f"      停止当前主页：视频发布时间早于开始日期（{published_at}）。")
                             stop_profile = True
@@ -487,6 +571,7 @@ def process_video_batch(
             processed_count += 1
             vid = parse_video_id(video_url)
             play_count = ""
+            # 获取拦截 API 拿到的播放量映射值
             if fetch_play_counts_bool and play_counts_map and vid in play_counts_map:
                 play_count = str(play_counts_map[vid])
                 
@@ -494,6 +579,7 @@ def process_video_batch(
             if fetch_play_counts_bool and not get_video_info_bool:
                 row_base["播放量"] = play_count
 
+            # 抓取视频的主楼评论
             if get_comments_bool:
                 comments = collect_video_comments(detail_page, video_url, max_comments, log_callback, stop_event, pause_event=pause_event)
                 writer.writerow("视频信息", sanitize_csv_row(row_base))
@@ -526,6 +612,7 @@ def process_video_batch(
                     log_line(log_callback, f"      写入视频链接：{video_url}")
 
             serial_number += 1
+            # 当写入条数到达分批尺寸，进行较长时间的冷却降温
             if batch_written >= save_batch_size:
                 if wait_if_paused(pause_event, stop_event):
                     break
@@ -560,6 +647,13 @@ def run_tiktok_profile_videos_spider(
     pause_event=None,
     config=None,
 ):
+    """
+    TikTok 博主主页视频抓取爬虫入口函数。
+    支持：
+    - 读取多个博主主页；
+    - 基于 Playwright 网络拦截（监控 /api/post/item_list 接口）并行收集视频播放量；
+    - 执行页面滚动以及分批次拉取视频详情与评论逻辑，保存为 Excel 结果报表。
+    """
     if config is None:
         config = {}
     page_load_timeout = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
@@ -637,6 +731,7 @@ def run_tiktok_profile_videos_spider(
                 log_line(log_callback, f"[{profile_index}/{len(profile_urls)}] 读取主页：{profile_url}")
                 
                 play_counts_map = {}
+                # 定义网络流量拦截监听器，提取接口响应数据
                 def handle_response(response):
                     if "/api/post/item_list" in response.url and "secUid" in response.url:
                         try:
@@ -680,6 +775,7 @@ def run_tiktok_profile_videos_spider(
                     else:
                         no_new_count += 1
 
+                    # 当堆积的待爬视频数量到达 link_batch_size 批次限制，触发爬取，防止内存积压
                     while len(pending_links) >= link_batch_size and not stop_profile and not should_stop(stop_event):
                         batch = pending_links[:link_batch_size]
                         del pending_links[:link_batch_size]
@@ -708,6 +804,7 @@ def run_tiktok_profile_videos_spider(
                     if stop_profile:
                         break
 
+                    # 连续无新视频滚动轮数超过上限，退出滚动循环
                     if no_new_count >= no_new_limit:
                         if pending_links and not should_stop(stop_event):
                             serial_number, written_count, stop_profile, processed_count = process_video_batch(
@@ -740,6 +837,7 @@ def run_tiktok_profile_videos_spider(
                     if interruptible_sleep(scroll_interval, stop_event):
                         break
 
+                # 离开前处理最后一批零碎的链接
                 if pending_links and not stop_profile and not should_stop(stop_event):
                     serial_number, written_count, stop_profile, processed_count = process_video_batch(
                         detail_page,

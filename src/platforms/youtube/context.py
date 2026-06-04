@@ -1,3 +1,11 @@
+# -*- coding: utf-8 -*-
+"""YouTube 视频上下文获取与对比模块。
+
+本模块根据输入的“目标视频 + 频道主页”配对数据，利用 YouTube API 自动加载该频道的
+最新上传列表（uploads），并定位该目标视频在发布时间轴上的物理索引，进而提取出该视频
+发布之前后各 N 个视频的相关元数据（标题、发布时间、点赞数、播放量等）。
+"""
+
 from __future__ import annotations
 
 import re
@@ -9,10 +17,14 @@ from googleapiclient.errors import HttpError
 
 from src.core import XlsxRowWriter, build_output_path, sanitize_csv_rows, should_stop, wait_if_paused
 
+# 默认获取视频前后各 5 条作为上下文
 CONTEXT_SIZE = 5
+# 用于匹配 11 位 YouTube 视频 ID 的正则表达式
 VIDEO_ID_RE = re.compile(r"(?:v=|youtu\.be/|/shorts/|/embed/)([0-9A-Za-z_-]{11})")
 
+
 def parse_video_id(url: str) -> str:
+    """从输入字串或链接中提取 YouTube 11 位视频 ID。"""
     match = VIDEO_ID_RE.search(url or "")
     if match:
         return match.group(1)
@@ -20,19 +32,24 @@ def parse_video_id(url: str) -> str:
         return url.strip()
     return ""
 
+
 def parse_input_pairs(txt_path: str) -> list[tuple[str, str]]:
+    """从 TXT 文本中分行读取“目标视频链接 + 频道主页链接”的配对，支持 Tab 或空格分隔。"""
     pairs: list[tuple[str, str]] = []
     with open(txt_path, "r", encoding="utf-8-sig") as f:
         for line in f:
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
                 continue
+            # 优先采用 Tab 分隔符，其次使用空白符切割
             parts = [part.strip() for part in stripped.split("\t") if part.strip()] if "\t" in stripped else stripped.split()
             if len(parts) >= 2:
                 pairs.append((parts[0], parts[1]))
     return pairs
 
+
 def normalize_youtube_url(url: str) -> str:
+    """补全并规整化 YouTube URL。"""
     url = (url or "").strip()
     if not url:
         return ""
@@ -42,12 +59,26 @@ def normalize_youtube_url(url: str) -> str:
         return "https://" + url
     return url
 
+
 def relation_for_index(target_index: int, current_index: int) -> str:
+    """根据目标索引和当前索引的差值，计算该视频在发布时间轴上的物理相对关系（前或后）。
+
+    发布顺序是越新发布的视频越在列表前面（索引越小表示发布越新）。
+
+    Args:
+        target_index: 目标视频的物理索引。
+        current_index: 当前被比对视频的物理索引。
+
+    Returns:
+        str: 时间轴关系的中文描述。
+    """
     if current_index < target_index:
         return f"目标后发布第{target_index - current_index}条"
     return f"目标前发布第{current_index - target_index}条"
 
+
 def extract_channel_hint(profile_url: str) -> tuple[str, str]:
+    """解析 YouTube 博主主页 URL，确定其频道检索类型（id/username/handle/search）。"""
     normalized = normalize_youtube_url(profile_url)
     parsed = urlparse(normalized)
     path_parts = [part for part in parsed.path.split("/") if part]
@@ -65,7 +96,9 @@ def extract_channel_hint(profile_url: str) -> tuple[str, str]:
         return "search", path_parts[1]
     return "search", first.lstrip("@")
 
+
 def resolve_channel(youtube, profile_url: str) -> dict:
+    """调用 API 解析获取博主的频道信息（snippet 及 contentDetails 的上传播放列表 ID）。"""
     hint_type, hint_value = extract_channel_hint(profile_url)
     if not hint_value:
         return {}
@@ -76,6 +109,7 @@ def resolve_channel(youtube, profile_url: str) -> dict:
         elif hint_type == "username":
             res = youtube.channels().list(part="snippet,contentDetails", forUsername=hint_value).execute()
         elif hint_type == "handle":
+            # 针对 forHandle 参数，尝试兼容加上 @ 及去掉 @ 的两种情况
             res = {"items": []}
             handle_variants = []
             clean_handle = hint_value.lstrip("@")
@@ -98,7 +132,9 @@ def resolve_channel(youtube, profile_url: str) -> dict:
     items = res.get("items", [])
     return items[0] if items else {}
 
+
 def resolve_channel_from_video(youtube, video_id: str) -> dict:
+    """兜底降级方法：当通过频道主页 URL 无法解析时，通过视频 ID 直接反查其所属频道并获取上传播放列表 ID。"""
     res = youtube.videos().list(part="snippet", id=video_id, maxResults=1).execute()
     items = res.get("items", [])
     if not items:
@@ -110,7 +146,22 @@ def resolve_channel_from_video(youtube, video_id: str) -> dict:
     channel_items = channel_res.get("items", [])
     return channel_items[0] if channel_items else {}
 
+
 def find_context_video_ids(youtube, uploads_playlist_id: str, target_video_id: str, stop_event=None, pause_event=None, max_pages: int = 200, context_size: int = CONTEXT_SIZE) -> tuple[list[str], int, list[str]]:
+    """分页拉取频道上传播放列表，定位目标视频，并过滤出前后各 N 个视频的 ID。
+
+    Args:
+        youtube: API 客户端。
+        uploads_playlist_id: 上传列表（uploads）播放列表的唯一 ID。
+        target_video_id: 目标视频唯一 ID。
+        stop_event: 停止信号。
+        pause_event: 暂停信号。
+        max_pages: 最大拉取分页数。
+        context_size: 视频前后截取区间大小。
+
+    Returns:
+        tuple: (选定的上下文视频 ID 列表, 目标视频在全列表的发布索引, 完整拉取的视频 ID 轴)。
+    """
     video_ids: list[str] = []
     next_page_token = None
     page_count = 0
@@ -121,6 +172,8 @@ def find_context_video_ids(youtube, uploads_playlist_id: str, target_video_id: s
             return [], -1, video_ids
         if wait_if_paused(pause_event, stop_event):
             return [], -1, video_ids
+        
+        # 批量获取播放列表内容项
         res = youtube.playlistItems().list(
             part="contentDetails",
             playlistId=uploads_playlist_id,
@@ -133,6 +186,7 @@ def find_context_video_ids(youtube, uploads_playlist_id: str, target_video_id: s
             if vid:
                 video_ids.append(vid)
 
+        # 一旦发现列表里包含了目标视频，且列表总数已足够覆盖目标右侧（后发布）的上下文，即可安全停止分页
         if target_video_id in video_ids:
             target_index = video_ids.index(target_video_id)
             if len(video_ids) >= target_index + context_size + 1:
@@ -145,12 +199,15 @@ def find_context_video_ids(youtube, uploads_playlist_id: str, target_video_id: s
     if target_video_id not in video_ids:
         return [], -1, video_ids
 
+    # 切分出前后各 N 个视频 ID
     target_index = video_ids.index(target_video_id)
     selected_indices = list(range(max(0, target_index - context_size), target_index))
     selected_indices += list(range(target_index + 1, min(len(video_ids), target_index + context_size + 1)))
     return [video_ids[idx] for idx in selected_indices], target_index, video_ids
 
+
 def fetch_video_details(youtube, video_ids: list[str], stop_event=None, pause_event=None) -> dict[str, dict]:
+    """批量获取指定视频列表的精细元数据。"""
     details: dict[str, dict] = {}
     from src.platforms.youtube.keyword import format_youtube_duration as kw_format
     
@@ -188,6 +245,8 @@ def fetch_video_details(youtube, video_ids: list[str], stop_event=None, pause_ev
             }
     return details
 
+
+# 导出 Excel 数据表字段定义
 OUTPUT_FIELDS = [
     "博主链接",
     "目标视频链接",
@@ -210,12 +269,14 @@ OUTPUT_FIELDS = [
 
 
 def build_pair_rows(youtube, target_video_url: str, profile_url: str, channel_cache: dict[str, dict], log_callback, stop_event=None, pause_event=None, context_size: int = CONTEXT_SIZE, max_upload_pages: int = 200) -> list[dict]:
+    """针对单对“目标视频 + 博主主页”解析其前后关联的上下文数据行。"""
     rows: list[dict] = []
     target_video_id = parse_video_id(target_video_url)
     if not target_video_id:
         log_callback("  跳过：无法解析视频 ID。")
         return rows
 
+    # 通过内存字典缓存已解析的博主频道数据，减少重复 API 配额消耗
     channel = channel_cache.get(profile_url)
     if channel is None:
         channel = resolve_channel(youtube, profile_url)
@@ -239,6 +300,7 @@ def build_pair_rows(youtube, target_video_url: str, profile_url: str, channel_ca
         log_callback("  跳过：目标视频不在该博主公开上传列表中。")
         return rows
 
+    # 批量解析抓取的上下文视频 ID 指标
     details = fetch_video_details(youtube, selected_ids, stop_event, pause_event)
     from src.platforms.youtube.comments import format_youtube_datetime
     for vid in selected_ids:
@@ -272,6 +334,17 @@ def build_pair_rows(youtube, target_video_url: str, profile_url: str, channel_ca
 
 
 def run_youtube_paired_context_spider(api_key: str, txt_path: str, log_callback, finish_callback, stop_event=None, config=None, pause_event=None):
+    """运行 YouTube 关联上下文视频挖掘主驱动函数。
+
+    Args:
+        api_key: API 密钥。
+        txt_path: 视频 + 主页配对 TXT 路径。
+        log_callback: 日志通知。
+        finish_callback: 结束通知。
+        stop_event: 中断信号。
+        config: 特殊配置项。
+        pause_event: 暂停信号。
+    """
     if config is None:
         config = {}
     context_size = int(config.get("context_size", CONTEXT_SIZE))

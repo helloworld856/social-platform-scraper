@@ -1,5 +1,9 @@
-# judge_AIGC.py
-# 判断视频标题是否是 AIGC 内容，并判断主要语言
+# -*- coding: utf-8 -*-
+"""AIGC 判断与语种识别核心逻辑模块。
+
+本模块通过本地启发式规则（正则匹配与字符统计）和 LLM（大语言模型）结合的方式，
+对推文或视频的标题文本进行 AIGC（AI 生成内容）标记判定以及主要语种识别，并输出结果。
+"""
 
 import json
 import re
@@ -13,10 +17,17 @@ from src.core import interruptible_sleep, wait_if_paused
 
 
 class State(TypedDict):
+    """LangGraph 工作流的状态定义。
+
+    Attributes:
+        data: 输入的标题列表，每一项为 [序号, 标题]。
+        ai_response: AI 模型返回的原始文本内容。
+    """
     data: List[List[Any]]
     ai_response: str
 
 
+# 本地快速判定 AIGC 内容的关键词库（不区分大小写）
 AIGC_KEYWORDS = (
     "ai生成",
     "ai动画",
@@ -42,6 +53,7 @@ AIGC_KEYWORDS = (
     "aiart",
 )
 
+# 系统支持的主要语言选项集合（标准名称）
 LANGUAGE_OPTIONS = {
     "中文",
     "英语",
@@ -63,6 +75,7 @@ LANGUAGE_OPTIONS = {
     "未知",
 }
 
+# 常见语言别名至标准名称的映射字典
 LANGUAGE_ALIASES = {
     "中文": "中文",
     "汉语": "中文",
@@ -107,12 +120,21 @@ LANGUAGE_ALIASES = {
 
 
 def start_node(state: State) -> State:
+    """LangGraph 工作流的入口节点。
+
+    直接透传状态，不做任何处理。
+    """
     return state
 
 
 def clean_json_text(text: str) -> str:
-    """
-    清理 AI 返回内容，防止它偶尔包上 ```json 代码块。
+    """清理 AI 返回的内容，防止其输出带有 ```json 代码块包裹。
+
+    Args:
+        text: 待清理的原始文本。
+
+    Returns:
+        清理后的 JSON 格式文本字符串。
     """
     text = text.strip()
 
@@ -129,8 +151,13 @@ def clean_json_text(text: str) -> str:
 
 
 def extract_ai_content(response: dict) -> str:
-    """
-    从 LangChain create_agent 的返回结果中提取最后一条 AI 消息 content。
+    """从 LangChain agent 返回结果中解析并提取最后一条 AI 消息内容。
+
+    Args:
+        response: 代理返回的原始响应字典。
+
+    Returns:
+        AI 返回的文本内容。
     """
     messages = response.get("messages", [])
 
@@ -149,6 +176,14 @@ def extract_ai_content(response: dict) -> str:
 
 
 def generate_node(state: State) -> State:
+    """LangGraph 的生成节点，调用大模型分析标题数据。
+
+    Args:
+        state: 当前工作流状态。
+
+    Returns:
+        更新了 ai_response 的状态字典。
+    """
     data_input = state["data"]
 
     user_prompt = f"""
@@ -180,10 +215,19 @@ def generate_node(state: State) -> State:
 
 
 def end_node(state: State) -> State:
+    """LangGraph 工作流的终点节点。
+
+    直接透传状态，不做额外处理。
+    """
     return state
 
 
 def create_graph():
+    """编译并生成 LangGraph 的状态图工作流。
+
+    Returns:
+        编译后的 StateGraph 实例。
+    """
     from langgraph.graph import StateGraph, END
 
     builder = StateGraph(State)
@@ -201,14 +245,19 @@ def create_graph():
 
 
 def read_txt(file_path: str, row_limit: int):
-    """
-    读取 txt 文件。
+    """分批读取包含序号和标题的 TXT 输入文件。
 
-    支持格式：
-    1   视频标题
-    2\t视频标题
+    每行支持以下格式：
+    - "1   视频标题" (使用空格分隔)
+    - "2\t视频标题" (使用 Tab 分隔)
+    - 或者是被自动合并到上一行的多行标题内容。
 
-    序号和标题之间可以是 tab、一个空格或多个空格。
+    Args:
+        file_path: 输入 TXT 文件的绝对路径。
+        row_limit: 每一批（Batch）的最大行数限制。
+
+    Yields:
+        List[List[Any]]: 一个批次的数据，每项格式为 [序号(int), 标题(str)]。
     """
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"找不到输入文件：{file_path}")
@@ -223,9 +272,11 @@ def read_txt(file_path: str, row_limit: int):
             if not line:
                 continue
 
+            # 使用正则匹配行首的数字序号，后续跟空格/Tab，再跟标题文本
             match = re.match(r"^(\d+)[ \t]+(.+)$", line)
 
             if not match:
+                # 若无法解析出序号，则将当前行追加入上一个解析出的标题中（处理换行折行标题）
                 if last_item is not None:
                     last_item[1] = f"{last_item[1]} {line}"
                 else:
@@ -247,15 +298,21 @@ def read_txt(file_path: str, row_limit: int):
 
 
 def parse_ai_json(json_text: str, batch_index: int):
-    """
-    解析 AI 返回的 JSON。
-    如果失败，把错误内容保存下来，方便排查。
+    """解析 AI 模型返回的 JSON 文本数据，失败时保存问题内容以供调试。
+
+    Args:
+        json_text: 模型返回的包含 JSON 的文本。
+        batch_index: 当前处理的批次序号。
+
+    Returns:
+        List[Dict/List]: 反序列化后的 JSON 数组数据。
     """
     json_text = clean_json_text(json_text)
 
     try:
         data = json.loads(json_text)
     except json.JSONDecodeError as e:
+        # 当 JSON 解析失败，将错误内容保存到当前目录，防止数据丢失且便于排查
         bad_file = f"bad_response_batch_{batch_index}.txt"
 
         try:
@@ -280,15 +337,46 @@ def parse_ai_json(json_text: str, batch_index: int):
 
 
 def detect_aigc_locally(title: str) -> str:
+    """本地进行快速的 AIGC 关键词匹配判定。
+
+    不区分大小写匹配内置的 AIGC_KEYWORDS 关键词列表。
+
+    Args:
+        title: 视频或推文标题。
+
+    Returns:
+        "是" 或 "否"。
+    """
     title_lower = title.lower()
     return "是" if any(keyword.lower() in title_lower for keyword in AIGC_KEYWORDS) else "否"
 
 
 def normalize_language(language: Any) -> str:
+    """将 AI 返回的语言别名归一化为标准的系统语种名称。
+
+    Args:
+        language: AI 返回的任意格式的语言标识符。
+
+    Returns:
+        str: 归一化后的标准语种名称（如 "中文", "英语" 等）。
+    """
     return LANGUAGE_ALIASES.get(str(language).strip(), str(language).strip())
 
 
 def detect_language_locally(title: str) -> str:
+    """本地启发式语种识别算法。
+
+    通过特定语种的特殊变音符号（Markers）及独有高频虚词（Words）判定拉丁字母系语种；
+    通过 Unicode 字符集编码范围判定中日韩、泰、俄（西里尔）、阿拉伯、印地等非拉丁系语种；
+    如果多种语种并存且权重相当，判定为混合语言。
+
+    Args:
+        title: 待识别的标题文本。
+
+    Returns:
+        str: 标准的语种名称。
+    """
+    # 1. 各拉丁目系语种的特异性标记及高频特征词定义
     spanish_markers = ("ñ", "á", "é", "í", "ó", "ú", "¿", "¡")
     spanish_words = (" el ", " la ", " los ", " las ", " del ", " que ", " una ", " por ")
     vietnamese_markers = ("ă", "đ", "ơ", "ư")
@@ -304,22 +392,33 @@ def detect_language_locally(title: str) -> str:
     turkish_markers = ("ğ", "ı", "İ", "ş", "ç", "ö", "ü")
     turkish_words = (" bir ", " ve ", " için ", " ile ", " değil ")
 
+    # 2. 通过 Unicode 编码区间统计各类特殊字符个数
+    # 平假名/片假名区间
     hira_kata = sum(
         1
         for char in title
         if "\u3041" <= char <= "\u30ff" or "\u31f0" <= char <= "\u31ff"
     )
+    # 朝鲜谚文（韩语文字）区间
     hangul = sum(1 for char in title if "\uac00" <= char <= "\ud7af")
+    # 泰文字符区间
     thai = sum(1 for char in title if "\u0e00" <= char <= "\u0e7f")
+    # 西里尔字母（俄语）区间
     cyrillic = sum(1 for char in title if "\u0400" <= char <= "\u04ff")
+    # 阿拉伯文字区间
     arabic = sum(1 for char in title if "\u0600" <= char <= "\u06ff")
+    # 天城文（印地语）区间
     devanagari = sum(1 for char in title if "\u0900" <= char <= "\u097f")
+    # 汉字（CJK 统一汉字）区间
     cjk = sum(1 for char in title if "\u4e00" <= char <= "\u9fff")
+    # 拉丁字母（ASCII 纯字母）
     latin = sum(1 for char in title if char.isascii() and char.isalpha())
 
+    # 为词汇边界匹配首尾补空格
     lowered = f" {title.lower()} "
     detected = []
 
+    # 3. 统计并添加非拉丁目系语种的得分候选项
     if hangul:
         detected.append(("韩语", hangul))
 
@@ -336,10 +435,12 @@ def detect_language_locally(title: str) -> str:
         detected.append(("印地语", devanagari))
 
     if hira_kata:
+        # 日语包含平假名/片假名，其汉字部分（CJK）一同累计作为日语权重
         detected.append(("日语", hira_kata + cjk))
     elif cjk:
         detected.append(("中文", cjk))
 
+    # 4. 统计并计算拉丁目系语种的启发式得分
     latin_candidates = [
         ("越南语", vietnamese_markers, vietnamese_words),
         ("德语", german_markers, german_words),
@@ -353,10 +454,13 @@ def detect_language_locally(title: str) -> str:
     latin_detected = []
 
     for language, markers, words in latin_candidates:
+        # 每个变音特殊符号得 2 分
         marker_score = sum(2 for marker in markers if marker in lowered)
+        # 每个特征高频词得 1 分
         word_score = sum(1 for word in words if word in lowered)
         score = marker_score + word_score
         if score:
+            # 候选得分取拉丁字母总数与特征得分的最大值，确保特异识别
             latin_detected.append((language, max(latin, score)))
 
     if latin_detected:
@@ -405,6 +509,16 @@ def validate_result_rows(
     result_rows: List[List[Any]],
     batch_index: int,
 ):
+    """校验 AI 模型或本地处理返回的行数据，确保序号和标题完全对应，数据项符合规范。
+
+    Args:
+        input_rows: 送入处理的原始行列表，结构为 [[序号, 标题], ...]。
+        result_rows: 处理返回的结果行列表，结构为 [[序号, 标题, AIGC判定, 语种], ...]。
+        batch_index: 当前处理的批次标识符。
+
+    Returns:
+        List[List[Any]]: 校验并规范化之后的行数据列表。
+    """
     if len(result_rows) != len(input_rows):
         raise ValueError(
             f"第 {batch_index} 批返回数量不一致：输入 {len(input_rows)} 行，返回 {len(result_rows)} 行"
@@ -426,6 +540,7 @@ def validate_result_rows(
         except (TypeError, ValueError) as exc:
             raise ValueError(f"第 {batch_index} 批序号不是数字：{actual}") from exc
 
+        # 校验序号顺序和标题文本是否完全吻合，避免 LLM 幻觉产生错位
         if actual_number != expected_number:
             raise ValueError(
                 f"第 {batch_index} 批序号顺序不一致：期望 {expected_number}，实际 {actual_number}"
@@ -446,19 +561,39 @@ def validate_result_rows(
 
 
 def merge_ai_rows(local_rows: List[List[Any]], ai_rows: List[List[Any]]):
+    """将大模型判定后的疑难结果行合并覆盖回本地预分类结果中。
+
+    Args:
+        local_rows: 本地快速判定得出的初始结果行列表。
+        ai_rows: 调用大模型补充判定得出的结果行列表。
+
+    Returns:
+        List[List[Any]]: 合并更新后的最终结果行列表。
+    """
+    # 建立序号对行的映射，方便快速覆盖
     ai_by_number: Dict[int, List[Any]] = {int(row[0]): row for row in ai_rows}
     merged = []
 
     for row in local_rows:
         number = int(row[0])
+        # 如果 AI 判定的映射中有当前序号，则使用 AI 判定的数据覆盖，否则保留本地预判定
         merged.append(ai_by_number.get(number, row))
 
     return merged
 
 
 def get_existing_numbers(ws) -> Set[int]:
+    """读取已存在的 Excel 列表，提取所有已处理的序号集合，用于断点续传。
+
+    Args:
+        ws: openpyxl Worksheet 实例。
+
+    Returns:
+        Set[int]: 所有已写入过的序号集合。
+    """
     numbers = set()
 
+    # 从第二行开始逐行扫描首列的序号
     for row in ws.iter_rows(min_row=2, values_only=True):
         number = row[0]
         if number is None:
@@ -473,9 +608,13 @@ def get_existing_numbers(ws) -> Set[int]:
 
 
 def create_or_load_excel(save_path: str):
-    """
-    如果 Excel 已存在，则打开；
-    如果不存在，则新建并写入表头。
+    """创建或加载 Excel 工作簿。若已存在则直接加载，若不存在则新建并初始化表头。
+
+    Args:
+        save_path: 目标 Excel 保存路径。
+
+    Returns:
+        tuple[Workbook, Worksheet]: openpyxl Workbook 与活动的 Worksheet 对象。
     """
     output_dir = os.path.dirname(os.path.abspath(save_path))
     if output_dir:
@@ -494,12 +633,30 @@ def create_or_load_excel(save_path: str):
 
 
 def split_evenly(values: List[List[Any]], group_count: int):
+    """将列表数据尽可能均匀地切分成指定组数，用于线程池多任务并发。
+
+    Args:
+        values: 待切分的行列表。
+        group_count: 期望切分成的组数。
+
+    Returns:
+        List[List[List[Any]]]: 切分后的二维列表。
+    """
     group_count = max(1, min(group_count, len(values)))
     chunk_size = (len(values) + group_count - 1) // group_count
     return [values[index:index + chunk_size] for index in range(0, len(values), chunk_size)]
 
 
 def ask_ai_for_lines(lines: List[List[Any]], batch_index: Any):
+    """构建 LangGraph 状态并调用 AI 代理对指定行进行识别。
+
+    Args:
+        lines: 待识别的标题子集，格式为 [[序号, 标题], ...]。
+        batch_index: 批次索引标识（可能是浮点表示的子块如 1.2）。
+
+    Returns:
+        List[List[Any]]: 大模型分析并完成严格校验后的行列表。
+    """
     state: State = {
         "data": lines,
         "ai_response": "",
@@ -518,14 +675,26 @@ def ask_ai_for_lines(lines: List[List[Any]], batch_index: Any):
 
 
 def process_batch(batch_index: int, lines: List[List[Any]], max_workers: int = 1):
+    """处理单批次数据：本地预分类 -> 提取疑难行 -> 并发调用 AI -> 合并结果并校验。
+
+    Args:
+        batch_index: 批次索引。
+        lines: 本批原始行数据。
+        max_workers: AI 并发并发数（即线程池最大工作线程数）。
+
+    Returns:
+        tuple[List[List[Any]], int]: 最终的判定数据列表，以及调用大模型的行数。
+    """
     local_rows, unresolved_lines = classify_locally(lines)
     ai_response = []
 
     if unresolved_lines:
         worker_count = max(1, min(int(max_workers or 1), len(unresolved_lines)))
         if worker_count == 1:
+            # 单线程调用，直接请求 AI
             ai_response = ask_ai_for_lines(unresolved_lines, batch_index)
         else:
+            # 多线程并发：将疑难行分割成多组，并发请求以提升接口响应效率
             chunks = split_evenly(unresolved_lines, worker_count)
             indexed_results: Dict[int, List[List[Any]]] = {}
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
@@ -535,12 +704,14 @@ def process_batch(batch_index: int, lines: List[List[Any]], max_workers: int = 1
                 }
                 for future in as_completed(futures):
                     try:
+                        # 限制单任务最大超时为 300 秒，防挂死
                         result = future.result(timeout=300)
                     except TimeoutError:
                         import logging
                         logging.getLogger(__name__).error("Batch chunk timed out after 300s")
                         result = None
                     indexed_results[futures[future]] = result
+            # 按切分顺序重新组装多线程结果
             for chunk_index in sorted(indexed_results):
                 chunk_result = indexed_results[chunk_index]
                 if chunk_result is not None:
@@ -564,6 +735,24 @@ def run_judge(
     stop_event=None,
     pause_event=None,
 ):
+    """运行 AIGC 判定与语种识别核心任务的主驱动函数。
+
+    分批读取文本，比对已处理结果实现增量断点续答，调度本地与并发 AI 计算，
+    定期刷盘保存到 Excel 文件中。
+
+    Args:
+        input_txt_path: 输入 TXT 路径，若空则使用配置默认值。
+        output_excel_path: 输出 Excel 路径，若空则使用配置默认值。
+        row_limit: 每批处理的标题条数。
+        max_workers: 并发调用大模型的最大并发线程数。
+        save_every_batches: 每处理多少批次执行一次文件保存，防断电丢失。
+        log_callback: 日志记录回调函数。
+        stop_event: 任务停止事件（线程安全）。
+        pause_event: 任务暂停事件（线程安全）。
+
+    Returns:
+        str: 最终保存的 Excel 物理路径。
+    """
     input_txt_path = input_txt_path or config.INPUT_TXT_PATH
     output_excel_path = output_excel_path or config.OUTPUT_EXCEL_PATH
     row_limit = max(1, int(row_limit or config.ROW_LIMIT))
@@ -579,6 +768,7 @@ def run_judge(
     log(f"保存频率：每 {save_every_batches} 批保存一次")
 
     wb, ws = create_or_load_excel(output_excel_path)
+    # 获取 Excel 中已存在的序号，用于增量断点续传跳过
     existing_numbers = get_existing_numbers(ws)
 
     total_count = 0
@@ -611,6 +801,7 @@ def run_judge(
 
             batch_count += 1
             total_count += len(lines)
+            # 过滤掉当前批次中已经在 Excel 中存在的数据行
             pending_lines = [line for line in lines if int(line[0]) not in existing_numbers]
 
             if not pending_lines:
@@ -632,6 +823,7 @@ def run_judge(
             batch_written = write_rows(result_rows)
             batches_since_save += 1
             saved_this_batch = False
+            # 定时定量写入磁盘，降低频繁 IO 损耗并保证安全性
             if batches_since_save >= save_every_batches:
                 wb.save(output_excel_path)
                 batches_since_save = 0
@@ -657,4 +849,5 @@ def run_judge(
 
 
 def run_judge_legacy():
+    """向后兼容的旧版运行接口。"""
     return run_judge()

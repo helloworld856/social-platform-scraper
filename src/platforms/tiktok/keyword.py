@@ -1,3 +1,11 @@
+"""
+TikTok 关键词视频及评论检索采集模块。
+该模块具备以下核心特性：
+1. 关键词并发检索：利用 ThreadPoolExecutor，在多关键词配置下，支持开启多达 max_parallel_tabs 个工作线程，独立控制各个词的搜索页面、页面滚动与数据拉取。
+2. 生产者-消费者双并发模型：对于单个关键词的抓取，主抓取线程作为生产者扫描搜索网格并异步提取视频交互详情，符合条件的视频任务会被推送入 comment_queue 队列。同时拉起 max_comment_tabs 个子线程作为消费者，异步且并发地对视频评论进行拉取与保存。
+3. 队列限制与限流悬挂：队列使用带 maxsize 的 queue.Queue 以保护内存不被暴涨的视频撑爆。消费者拉取在遇到网络限流时有随机冷却和阻塞挂起检测机制，以对抗 TikTok 严格的高频访问控制。
+"""
+
 from __future__ import annotations
 
 import html as html_lib
@@ -30,6 +38,7 @@ from src.core import (
 )
 from src.platforms.tiktok.comments import collect_video_comments
 
+# 导出的视频元数据 Excel 表格头部字段
 CSV_FIELDS = [
     "搜索词",
     "序号",
@@ -45,8 +54,10 @@ CSV_FIELDS = [
 ]
 
 def _tiktok_media_tag(item: dict, page=None) -> str:
-    """Classify TikTok post media type from JSON item data, with DOM fallback.
-    0=图片+视频, 1=图片, 2=视频, 3=纯文本, 4=其它
+    """
+    根据后端 JSON 数据对视频的媒体类型进行判定与分类：
+    '0'=图片+视频, '1'=图片(图集), '2'=视频, '3'=纯文本, '4'=其它
+    若接口数据缺失或结构更新，自动 fallback 到 DOM 元素匹配（检查 swiper、video 节点）。
     """
     has_image = bool(item.get("image_post_info") or item.get("imagePost"))
     has_video = bool(item.get("video") or item.get("videoInfo"))
@@ -56,7 +67,7 @@ def _tiktok_media_tag(item: dict, page=None) -> str:
         return "1"
     if has_video:
         return "2"
-    # JSON state empty or missing media keys — fall back to DOM
+    # JSON 结构返回为空，触发 DOM 降级判定
     if page is not None:
         try:
             dom_has_image = page.locator('[data-e2e="browse-image-item"], [class*="DivPhoto"], swiper, [class*="Swiper"]').count() > 0
@@ -71,14 +82,18 @@ def _tiktok_media_tag(item: dict, page=None) -> str:
             pass
     return "3"
 
+
 DEFAULT_START_DATE = "2025-05-06"
 DEFAULT_END_DATE = "2026-05-06"
-MIN_SEARCH_SCROLLS = 60
-MAX_SEARCH_SCROLLS = 360
-SEARCH_SCROLL_PAUSE = 0.7
-DEFAULT_CANDIDATE_MULTIPLIER = 3
+MIN_SEARCH_SCROLLS = 60            # 最少搜索页面滚动轮数
+MAX_SEARCH_SCROLLS = 360           # 最大搜索页面滚动轮数上限
+SEARCH_SCROLL_PAUSE = 0.7          # 两次滚动之间的稳定等待时间（秒）
+DEFAULT_CANDIDATE_MULTIPLIER = 3   # 默认候选乘数，控制扫描数量上限
 
 def parse_date_range(start_date: str, end_date: str) -> tuple[datetime, datetime]:
+    """
+    解析并检验开始和结束日期字符串。
+    """
     start_dt = datetime.strptime(start_date.strip(), "%Y-%m-%d")
     end_dt = datetime.strptime(end_date.strip(), "%Y-%m-%d")
     if start_dt > end_dt:
@@ -86,6 +101,9 @@ def parse_date_range(start_date: str, end_date: str) -> tuple[datetime, datetime
     return start_dt, end_dt
 
 def parse_publish_date(value: str) -> datetime | None:
+    """
+    正则提取文本中可能包含的发布日期（年-月-日）。
+    """
     text = (value or "").strip()
     match = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", text)
     if not match:
@@ -96,12 +114,18 @@ def parse_publish_date(value: str) -> datetime | None:
         return None
 
 def in_date_range(publish_time: str, start_dt: datetime, end_dt: datetime) -> bool:
+    """
+    判断发布时间是否包含在设定的日期过滤区间中。
+    """
     publish_dt = parse_publish_date(publish_time)
     if not publish_dt:
         return False
     return start_dt.date() <= publish_dt.date() <= end_dt.date()
 
 def clean_url(url: str) -> str:
+    """
+    去除 URL 的推荐参数等。
+    """
     value = (url or "").strip()
     if not value:
         return ""
@@ -114,19 +138,31 @@ def clean_url(url: str) -> str:
     return value.split("?")[0].split("#")[0]
 
 def safe_filename_part(value: str) -> str:
+    """
+    对文件名中的特殊符号进行过滤与安全编码。
+    """
     cleaned = re.sub(r'[\\/*?:"<>|]', "", value or "").strip()
     cleaned = re.sub(r"\s+", "_", cleaned)
     return cleaned[:80] or "keyword"
 
 def extract_author_url(video_url: str) -> str:
+    """
+    从视频 URL 中正则匹配作者句柄，并拼成主页 URL。
+    """
     match = re.search(r"tiktok\.com/(@[^/?#]+)/video/", video_url or "")
     return f"https://www.tiktok.com/{match.group(1)}" if match else ""
 
 def extract_tiktok_video_id(url: str) -> str:
+    """
+    提取纯数字视频 ID。
+    """
     match = re.search(r"/video/(\d+)", url or "")
     return match.group(1) if match else ""
 
 def format_plain_text(value) -> str:
+    """
+    过滤 None、NaN 类似空串。
+    """
     if value is None or isinstance(value, bool):
         return ""
     if isinstance(value, (dict, list, tuple)):
@@ -135,6 +171,9 @@ def format_plain_text(value) -> str:
     return "" if text.lower() in {"none", "null", "undefined", "nan"} else text
 
 def format_count(value) -> str:
+    """
+    规整数字。
+    """
     if value is None or isinstance(value, bool):
         return ""
     if isinstance(value, float) and value.is_integer():
@@ -147,6 +186,9 @@ def format_count(value) -> str:
     return expand_compact_number(text)
 
 def count_to_int(value) -> int:
+    """
+    统一数字指标强转整型以进行数值对比。
+    """
     text = format_count(value).replace(",", "").strip()
     if not text:
         return 0
@@ -156,6 +198,9 @@ def count_to_int(value) -> int:
         return 0
 
 def format_publish_time(value) -> str:
+    """
+    格式化发布时间戳。
+    """
     try:
         timestamp = int(value)
         if timestamp > 0:
@@ -164,7 +209,11 @@ def format_publish_time(value) -> str:
         pass
     return format_plain_text(value)
 
+
 def iter_dicts(value):
+    """
+    深度优先遍历任意嵌套字典或列表，生成其中所有的 dict 子节点。
+    """
     if isinstance(value, dict):
         yield value
         for child in value.values():
@@ -174,6 +223,9 @@ def iter_dicts(value):
             yield from iter_dicts(child)
 
 def parse_script_json(html: str, script_id: str):
+    """
+    匹配 HTML 中的特定 script 标签并反序列化 JSON。
+    """
     pattern = rf'<script[^>]+id=["\']{re.escape(script_id)}["\'][^>]*>(.*?)</script>'
     match = re.search(pattern, html, re.S)
     if not match:
@@ -184,6 +236,9 @@ def parse_script_json(html: str, script_id: str):
         return None
 
 def page_state_sources(page) -> list[dict]:
+    """
+    从页面中获取 SIGI_STATE 与 __UNIVERSAL_DATA_FOR_REHYDRATION__ 状态源。
+    """
     sources: list[dict] = []
     try:
         raw = page.evaluate(
@@ -210,6 +265,9 @@ def page_state_sources(page) -> list[dict]:
     return sources
 
 def find_item_in_state(sources: list[dict], video_id: str) -> dict:
+    """
+    从候选反序列化数据源中查找 video_id 对应的 Item 字典。
+    """
     if not video_id:
         return {}
     for source in sources:
@@ -228,6 +286,9 @@ def find_item_in_state(sources: list[dict], video_id: str) -> dict:
     return {}
 
 def item_metric(item: dict, *keys: str) -> str:
+    """
+    从 Item 字典的各个 stats 变体结构中提取指定属性的计数值。
+    """
     stats_sources = []
     for key in ("stats", "statsV2", "stats_v2", "statistics"):
         value = item.get(key)
@@ -243,6 +304,9 @@ def item_metric(item: dict, *keys: str) -> str:
     return ""
 
 def item_metrics(item: dict) -> dict[str, str]:
+    """
+    统一格式化获取 Item 里的标题、播放量、点赞量、收藏量、评论数及发布时间。
+    """
     if not item:
         return {}
     return {
@@ -255,6 +319,9 @@ def item_metrics(item: dict) -> dict[str, str]:
     }
 
 def extract_metric(page, data_e2e_candidates, removable_words=(), default=""):
+    """
+    UI 模式：通过 data-e2e 标记元素提取数值。
+    """
     candidates = data_e2e_candidates if isinstance(data_e2e_candidates, (list, tuple)) else [data_e2e_candidates]
     for data_e2e in candidates:
         try:
@@ -272,6 +339,9 @@ def extract_metric(page, data_e2e_candidates, removable_words=(), default=""):
     return default
 
 def extract_publish_time(page) -> str:
+    """
+    UI 模式：通过正则或选择器提取发布时间。
+    """
     try:
         html = page.content()
         match = re.search(r'"createTime":"?(\d{10})"?', html)
@@ -296,6 +366,9 @@ def extract_publish_time(page) -> str:
     return ""
 
 def extract_card_play_count(anchor) -> str:
+    """
+    从视频列表卡片 DOM 中抓取播放量指标（避免频繁进入详情页以防风控）。
+    """
     try:
         container = resolve_tiktok_card_container(anchor)
         for selector in [
@@ -319,6 +392,12 @@ def default_candidate_scan_limit(max_videos: int) -> int:
     return max(max_videos, min(max_videos * DEFAULT_CANDIDATE_MULTIPLIER, max_videos + 3000))
 
 def trigger_search_lazy_load(page):
+    """
+    触发搜索页面的下拉懒加载：
+    - 垂直滚动至底部；
+    - 对所有带有滚动条的 overflow 子元素派发 scroll 滚动事件，唤醒 TikTok 网格的懒加载监听器。
+    - 结合 mouse.wheel 与键盘 End 键做强力懒加载触发。
+    """
     try:
         page.evaluate(
             """() => {
@@ -350,6 +429,9 @@ def trigger_search_lazy_load(page):
         pass
 
 def collect_visible_video_items(page, seen_links: set[str]) -> list[dict[str, str]]:
+    """
+    抓取当前视口内所有已加载视频卡片的 URL 及对应的播放量。
+    """
     items: list[dict[str, str]] = []
     try:
         anchors = page.locator("a[href*='/video/'], a[href*='video/']").all()
@@ -411,28 +493,36 @@ def _make_keyword_log_callback(base_log_callback, keyword: str):
 def _tiktok_comment_consumer(keyword, queue_obj, cdp_port_or_url, writer, writer_lock,
                              log_callback, stop_event, pause_event, comment_top_limit,
                              consumers_ready=None):
-    """Consumer thread: creates its own Playwright connection and page, pops from queue."""
+    """
+    评论消费者线程函数：创建独立的 Playwright 连接与页面，从队列中消费视频任务并抓取评论。
+    """
     log = _make_keyword_log_callback(log_callback, keyword)
     comments_page = None
     try:
+        # 使用独立的 Playwright 实例防止多线程冲突
         with sync_playwright() as p:
             try:
+                # 连接至已有的 Chromium 浏览器实例
                 _, context = connect_existing_chromium(p, cdp_port_or_url)
                 comments_page = context.new_page()
             except Exception as exc:
                 log(f"    评论线程连接浏览器失败: {exc}")
                 return
+            # 浏览器初始化完毕，通知生产者可以开始推送任务
             if consumers_ready is not None:
                 consumers_ready.set()
             while True:
                 try:
+                    # 从任务队列获取待抓取的视频（包含序号、链接、最大扫描数）
                     item = queue_obj.get(timeout=3)
                 except Exception:
+                    # 队列超时后检查是否需要退出或暂停
                     if should_stop(stop_event):
                         break
                     if wait_if_paused(pause_event, stop_event):
                         break
                     continue
+                # None 作为哨兵值，表示结束信号
                 if item is None:
                     break
                 if should_stop(stop_event):
@@ -441,11 +531,13 @@ def _tiktok_comment_consumer(keyword, queue_obj, cdp_port_or_url, writer, writer
                     break
                 serial_number, video_url, max_scan = item
                 try:
+                    # 执行评论采集逻辑
                     comments = collect_video_comments(
                         comments_page, video_url, max_scan, log,
                         stop_event, pause_event=pause_event,
                         comment_top_limit=comment_top_limit,
                     )
+                    # 写文件时加锁以防止多线程并发写入冲突
                     with writer_lock:
                         comment_count = 0
                         for comment in comments:
@@ -458,6 +550,7 @@ def _tiktok_comment_consumer(keyword, queue_obj, cdp_port_or_url, writer, writer
                             }
                             writer.writerow("评论信息", sanitize_csv_row(comment_row))
                             comment_count += 1
+                            # 每写入 20 条保存一次，防止数据丢失
                             if comment_count % 20 == 0:
                                 writer.save()
                 except Exception as exc:
@@ -465,6 +558,7 @@ def _tiktok_comment_consumer(keyword, queue_obj, cdp_port_or_url, writer, writer
     except Exception as exc:
         log(f"评论线程异常: {exc}")
     finally:
+        # 关闭页面释放资源
         if comments_page is not None:
             try:
                 if not comments_page.is_closed():
@@ -480,7 +574,10 @@ def _scrape_single_tiktok_keyword(keyword, keyword_index, total_keywords,
                                   cdp_port_or_url, log_callback, stop_event, pause_event,
                                   search_scroll_pause, config_max_search_scrolls,
                                   no_new_scroll_limit, comment_top_limit, run_stamp):
-    """Scrape a single keyword in this thread. Spawns comment consumer threads if needed."""
+    """
+    抓取单个 TikTok 关键词的线程函数。
+    根据指定的限制参数，滚动搜索结果页面，提取视频元数据。如果开启了评论抓取，将启动多个消费者子线程并发抓取评论。
+    """
     log = _make_keyword_log_callback(log_callback, keyword)
     output_path = None
     writer = None
@@ -489,6 +586,7 @@ def _scrape_single_tiktok_keyword(keyword, keyword_index, total_keywords,
     comment_threads: list[threading.Thread] = []
     search_page = metrics_page = None
     try:
+        # 检查是否已请求停止或暂停
         if should_stop(stop_event):
             log("任务已停止。")
             return None
@@ -497,6 +595,7 @@ def _scrape_single_tiktok_keyword(keyword, keyword_index, total_keywords,
             return None
 
         log(f"[{keyword_index}/{total_keywords}] 搜索关键词：{keyword}")
+        # 构建输出文件路径
         output_path = build_output_path(
             "tiktok", f"tiktok_keyword_{safe_filename_part(keyword)}_{run_stamp}.xlsx",
         )
@@ -505,16 +604,20 @@ def _scrape_single_tiktok_keyword(keyword, keyword_index, total_keywords,
             log(f"  日期范围：{start_dt.strftime('%Y-%m-%d')} 至 {end_dt.strftime('%Y-%m-%d')}")
 
         with sync_playwright() as p:
+            # 连接现有的浏览器
             _, context = connect_existing_chromium(p, cdp_port_or_url)
+            # 创建专门用于搜索滚动和详情指标抓取的页面
             search_page = context.new_page()
             metrics_page = context.new_page()
 
+            # 如果需要采集评论，初始化多表 XLSX 写入器、写锁及线程安全的任务队列
             if get_comments_bool:
                 comment_fields = ["序号", "视频链接", "评论的点赞量", "评论内容", "发布时间"]
                 writer = MultiSheetXlsxWriter(output_path, {"视频信息": CSV_FIELDS, "评论信息": comment_fields}, autosave_every=10)
                 writer_lock = threading.Lock()
                 comment_queue = queue.Queue(maxsize=max_queue_size)
                 consumers_ready = threading.Event()
+                # 启动指定数量的评论抓取消费者线程
                 for _ in range(max_comment_tabs):
                     t = threading.Thread(
                         target=_tiktok_comment_consumer,
@@ -526,10 +629,13 @@ def _scrape_single_tiktok_keyword(keyword, keyword_index, total_keywords,
                     t.start()
                     comment_threads.append(t)
             else:
+                # 仅采集视频信息，使用普通的 XLSX 单表写入器
                 writer = XlsxRowWriter(output_path, CSV_FIELDS, autosave_every=10)
 
             serial_number = 1
+            # 打开 TikTok 搜索页面
             open_search_page(search_page, keyword, stop_event=stop_event)
+            # 计算动态搜索滚动次数上限，防止无限滚动
             scroll_limit = dynamic_search_scroll_limit(max_videos, config_max_search_scrolls)
             seen_links: set[str] = set()
             scanned_count = 0
@@ -543,6 +649,7 @@ def _scrape_single_tiktok_keyword(keyword, keyword_index, total_keywords,
                     break
                 if wait_if_paused(pause_event, stop_event):
                     break
+                # 收集当前视口中未见过的视频元素
                 new_items = collect_visible_video_items(search_page, seen_links)
                 if not new_items:
                     no_new_visible_rounds += 1
@@ -562,8 +669,10 @@ def _scrape_single_tiktok_keyword(keyword, keyword_index, total_keywords,
                     try:
                         video_url = video_item["视频链接"]
                         log(f"  [候选{scanned_count}/已写{written_count}] {video_url}")
+                        # 提取视频详细的播放、点赞、收藏、评论等指标
                         row = extract_video_row(metrics_page, keyword, video_url, video_item.get("播放量", ""), stop_event=stop_event)
 
+                        # 时间范围过滤
                         if start_dt is not None:
                             if not in_date_range(row["发布时间"], start_dt, end_dt):
                                 log(f"    跳过：发布时间不在范围内（{row['发布时间'] or '未解析'}）")
@@ -571,12 +680,16 @@ def _scrape_single_tiktok_keyword(keyword, keyword_index, total_keywords,
 
                         row["序号"] = str(serial_number)
 
+                        # 写入数据并视情况推送评论抓取任务
                         if get_comments_bool:
                             with writer_lock:
                                 writer.writerow("视频信息", sanitize_csv_row(row))
+                            # 仅对存在评论的视频任务推入消费队列
                             if count_to_int(row.get("评论数", "0")) > 0:
+                                # 等待消费者线程就绪，超时 0.5 秒
                                 if consumers_ready.wait(timeout=0.5):
                                     try:
+                                        # 阻塞式推入队列，设置 15 秒超时防止死锁悬挂
                                         comment_queue.put(
                                             (serial_number, video_url, max_comments),
                                             block=True,
@@ -593,10 +706,12 @@ def _scrape_single_tiktok_keyword(keyword, keyword_index, total_keywords,
                         written_count += 1
                     except Exception as exc:
                         log(f"    跳过：{exc}")
+                    # 每处理 20 个候选视频进行一次随机冷却，防止风控
                     if scanned_count and scanned_count % 20 == 0:
                         if random_cooldown(log, stop_event, 3.0, 8.0):
                             break
 
+                # 各种边界条件判断，是否跳出搜索滚动循环
                 if written_count >= max_videos:
                     break
                 if scanned_count >= max_candidates:
@@ -608,16 +723,20 @@ def _scrape_single_tiktok_keyword(keyword, keyword_index, total_keywords,
                 if scroll_index and scroll_index % 10 == 0:
                     log(f"  已滚动 {scroll_index}/{scroll_limit} 轮，已扫描 {scanned_count} 个候选，写入 {written_count} 条")
 
+                # 触发惰性滚动加载
                 trigger_search_lazy_load(search_page)
                 interruptible_sleep(search_scroll_pause, stop_event)
 
             log(f"  写入 {written_count} 条日期范围内的视频")
+            # 向所有消费者线程发送 None 哨兵值作为结束标记
             if comment_threads and comment_queue is not None:
                 for _ in comment_threads:
                     comment_queue.put(None)
+                # 等待所有消费者子线程结束回收，超时时间 120 秒
                 for t in comment_threads:
                     t.join(timeout=120)
 
+            # 保存并保存 Excel 文件
             writer.save()
             return output_path
 
@@ -630,6 +749,7 @@ def _scrape_single_tiktok_keyword(keyword, keyword_index, total_keywords,
                 pass
         return None
     finally:
+        # 双重保险：确保消费者线程安全退出，关闭 Playwright 页面
         if comment_threads and comment_queue is not None:
             try:
                 for _ in comment_threads:
@@ -648,6 +768,10 @@ def _scrape_single_tiktok_keyword(keyword, keyword_index, total_keywords,
 
 
 def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str, start_date, end_date, get_comments_str, max_comments, cdp_port_or_url, log_callback, finish_callback, stop_event=None, pause_event=None, config=None):
+    """
+    TikTok 关键词爬虫主入口函数。
+    解析全局配置参数，视关键词数量与 max_parallel_tabs 决定是采用单线程顺序执行，还是采用 ThreadPoolExecutor 进行多关键词并发调度抓取。
+    """
     if config is None:
         config = {}
     search_scroll_pause = float(config.get("scroll_interval", SEARCH_SCROLL_PAUSE))
@@ -668,10 +792,10 @@ def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str,
 
         run_stamp = time.strftime("%Y%m%d_%H%M%S")
 
-        # pre-launch Chrome once before fanning out to threads
+        # 启动多线程前，预先启动 Chrome，建立 CDP 调试端口连接
         ensure_chrome_for_cdp(cdp_port_or_url, log_callback=log_callback)
 
-        # --- sequential path (1 keyword or max_parallel_tabs == 1) ---
+        # --- 串行分支（仅一个关键词或并发页面数限制为 1） ---
         if max_parallel_tabs <= 1 or len(keywords_list) <= 1:
             for idx, keyword in enumerate(keywords_list, 1):
                 if should_stop(stop_event):
@@ -700,7 +824,7 @@ def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str,
             finish_callback(output_paths[-1] if output_paths else None)
             return
 
-        # --- parallel path ---
+        # --- 多线程并行分支 ---
         with ThreadPoolExecutor(max_workers=max_parallel_tabs) as executor:
             future_to_keyword = {}
             for idx, keyword in enumerate(keywords_list, 1):

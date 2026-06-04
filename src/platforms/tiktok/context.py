@@ -1,3 +1,11 @@
+"""
+TikTok 上下文作品采集模块。
+该模块用于获取指定“目标视频”在发布时间轴上相邻的前 N 条和后 N 条作品（即上下文视频）。
+支持两种运行模式：
+1. API 高速路线：在目标视频详情页中抽取 secUid 等元数据，通过调用 TikTok 后台 post/item_list 接口拉取用户投稿列表，在投稿列表中直接切片获取前后相邻的作品。
+2. 浏览器兜底路线：若 secUid 解析失败或接口被封，自动开启 Playwright 浏览器降级通道，跳转至博主主页进行滚动加载，在页面 DOM 网格中定位目标视频并采集其前后邻近的视频卡片。
+"""
+
 from __future__ import annotations
 
 import html as html_lib
@@ -21,13 +29,14 @@ from src.core import (
     wait_if_paused,
 )
 
+# 采集目标视频前后作品的数量（单边 N=5，即上下文共 10 条）
 CONTEXT_SIZE = 5
-API_PAGE_SIZE = 35
-MAX_API_PAGES = 10
-MAX_PROFILE_SCROLLS = 80
-MIN_PROFILE_SCROLLS_BEFORE_STABLE_STOP = 12
-PROFILE_SCROLL_DELTA = 1500
-PROFILE_SCROLL_PAUSE = 0.8
+API_PAGE_SIZE = 35                 # 接口单页请求的投稿数
+MAX_API_PAGES = 10                 # 接口最大翻页限制
+MAX_PROFILE_SCROLLS = 80           # 兜底主页最大滚动轮数
+MIN_PROFILE_SCROLLS_BEFORE_STABLE_STOP = 12 # 停止无增长判断的最小滚动次数
+PROFILE_SCROLL_DELTA = 1500        # 每次鼠标滚动像素增量
+PROFILE_SCROLL_PAUSE = 0.8         # 每次滚动后的休眠间隔（秒）
 
 CSV_FIELDS = [
     "博主链接",
@@ -43,6 +52,7 @@ CSV_FIELDS = [
     "评论数",
 ]
 
+# 在过滤 UI 点赞/分享等数字指标时需要排除的混淆文本列表
 METRIC_LABEL_WORDS = {
     "Like",
     "Likes",
@@ -63,6 +73,10 @@ METRIC_LABEL_WORDS = {
 }
 
 def parse_input_pairs(txt_path: str) -> list[tuple[str, str]]:
+    """
+    解析输入的 TXT 文本，提取“目标视频链接”与“博主主页链接”的多行映射对。
+    若未提供博主链接，则自动根据视频 URL 格式生成默认的 @博主 主页。
+    """
     pairs: list[tuple[str, str]] = []
     with open(txt_path, "r", encoding="utf-8") as f:
         for line in f:
@@ -80,6 +94,9 @@ def parse_input_pairs(txt_path: str) -> list[tuple[str, str]]:
     return pairs
 
 def clean_url(url: str) -> str:
+    """
+    清洗链接格式，补齐协议头并丢弃问号后的参数与哈希值。
+    """
     url = (url or "").strip()
     if not url:
         return ""
@@ -92,18 +109,30 @@ def clean_url(url: str) -> str:
     return url.split("?")[0].split("#")[0].rstrip("/")
 
 def extract_tiktok_video_id(url: str) -> str:
+    """
+    从视频跳转地址中截取纯数字视频 ID。
+    """
     match = re.search(r"/video/(\d+)", url or "")
     return match.group(1) if match else ""
 
 def extract_profile_url_from_video_url(url: str) -> str:
+    """
+    通过正则从视频地址中提取作者的 @句柄，拼装默认的主页 URL。
+    """
     match = re.search(r"tiktok\.com/(@[^/?#]+)/video/\d+", url or "")
     return f"https://www.tiktok.com/{match.group(1)}" if match else ""
 
 def handle_from_profile_url(profile_url: str) -> str:
+    """
+    正则截取主页链接中的 @账号句柄。
+    """
     match = re.search(r"tiktok\.com/@([^/?#]+)", profile_url or "")
     return match.group(1) if match else ""
 
 def unique_urls(urls: list[str]) -> list[str]:
+    """
+    对输入的候选主页 URL 列表进行有序去重。
+    """
     unique: list[str] = []
     seen = set()
     for url in urls:
@@ -114,11 +143,19 @@ def unique_urls(urls: list[str]) -> list[str]:
     return unique
 
 def relation_for_index(target_index: int, current_index: int) -> str:
+    """
+    根据数组索引偏差，推导出该视频相较于目标视频的时间轴关系。
+    - 索引越小，表示越新发布，即在目标视频之后发布。
+    - 索引越大，表示越旧发布，即在目标视频之前发布。
+    """
     if current_index < target_index:
         return f"目标后发布第{target_index - current_index}条"
     return f"目标前发布第{current_index - target_index}条"
 
 def format_count(value) -> str:
+    """
+    数据行指标统一格式化转换，使用 expand_compact_number 归一化缩写。
+    """
     if value is None:
         return ""
     if isinstance(value, bool):
@@ -133,6 +170,9 @@ def format_count(value) -> str:
     return expand_compact_number(text)
 
 def format_plain_text(value) -> str:
+    """
+    清理文本中的非空异常（如 NaN 等字符）。
+    """
     if value is None or isinstance(value, bool):
         return ""
     if isinstance(value, (dict, list, tuple)):
@@ -141,6 +181,9 @@ def format_plain_text(value) -> str:
     return "" if text.lower() in {"none", "null", "undefined", "nan"} else text
 
 def clean_metric_text(text: str, removable_words=()) -> str:
+    """
+    清除指标数字中包含的标签字词（如 Likes、Shares），返回纯整型或已转换的缩写指标。
+    """
     cleaned = format_count(text).replace("\r", "\n")
     if not cleaned:
         return ""
@@ -154,6 +197,9 @@ def clean_metric_text(text: str, removable_words=()) -> str:
     return expand_compact_number(cleaned) if re.search(r"\d", cleaned) else ""
 
 def format_publish_time(value) -> str:
+    """
+    将 10 位时间戳规整为 YYYY-MM-DD HH:MM:SS 日期时间。
+    """
     try:
         timestamp = int(value)
         if timestamp > 0:
@@ -162,7 +208,12 @@ def format_publish_time(value) -> str:
         pass
     return format_plain_text(value)
 
+
 def iter_dicts(value):
+    """
+    深度优先遍历任意嵌套字典或列表，生成其中所有的 dict 子节点。
+    用于在网页反序列化状态树中进行深度模糊查找。
+    """
     if isinstance(value, dict):
         yield value
         for child in value.values():
@@ -172,6 +223,9 @@ def iter_dicts(value):
             yield from iter_dicts(child)
 
 def parse_script_json(html: str, script_id: str):
+    """
+    正则匹配 HTML 中的指定 script 标签，提取并反序列化其中的 JSON 状态树数据（如 SIGI_STATE 树）。
+    """
     pattern = rf'<script[^>]+id=["\']{re.escape(script_id)}["\'][^>]*>(.*?)</script>'
     match = re.search(pattern, html, re.S)
     if not match:
@@ -182,6 +236,11 @@ def parse_script_json(html: str, script_id: str):
         return None
 
 def page_state_sources(page) -> list[dict]:
+    """
+    从页面中提取结构化元数据源。
+    - 优先尝试从 window 全局变量 window.SIGI_STATE / window.__UNIVERSAL_DATA_FOR_REHYDRATION__ 读取并强转。
+    - 若前置读取为空，则通过 page.content() 获取源码，正则匹配 script 标签获取。
+    """
     sources: list[dict] = []
     try:
         raw = page.evaluate(
@@ -209,6 +268,9 @@ def page_state_sources(page) -> list[dict]:
     return sources
 
 def find_item_in_state(sources: list[dict], target_video_id: str) -> dict:
+    """
+    从候选的多个结构化元数据源中模糊检索 target_video_id 所对应的视频项详情字典。
+    """
     for source in sources:
         for item_module_key in ("ItemModule", "itemModule"):
             item_module = source.get(item_module_key)
@@ -226,6 +288,9 @@ def find_item_in_state(sources: list[dict], target_video_id: str) -> dict:
     return {}
 
 def find_author_info(sources: list[dict], item: dict, fallback_profile_url: str) -> dict[str, str]:
+    """
+    从状态树中挖掘作者的关键属性（如 secUid、唯一标识 unique_id、以及 user_id），为后续发起 API 投稿列表请求提供凭证。
+    """
     author = item.get("author") if isinstance(item, dict) else None
     author_id = format_plain_text(item.get("authorId") or item.get("author_id")) if isinstance(item, dict) else ""
     unique_id = ""
@@ -282,6 +347,9 @@ def find_author_info(sources: list[dict], item: dict, fallback_profile_url: str)
     }
 
 def extract_target_metadata(page, target_video_id: str, fallback_profile_url: str) -> dict:
+    """
+    提取目标视频的详情与作者元数据。
+    """
     sources = page_state_sources(page)
     item = find_item_in_state(sources, target_video_id)
     author_info = find_author_info(sources, item, fallback_profile_url)
@@ -291,6 +359,13 @@ def extract_target_metadata(page, target_video_id: str, fallback_profile_url: st
     }
 
 def resolve_target_video_context(page, target_video_url: str) -> tuple[str, str, str]:
+    """
+    分析并定位目标视频页的真实 URL 状态与作者信息。
+    - 进入视频 URL 并等待核心脚本元素载入；
+    - 适配可能发生的目标重定向 URL；
+    - 从页面中解析出视频真实 ID 以及博主 profile_url；
+    - 若没有获得，兜底利用正则扫描页面内的博主 a 标签进行抽取。
+    """
     final_video_url = clean_url(target_video_url)
     final_video_id = extract_tiktok_video_id(final_video_url)
     profile_url = extract_profile_url_from_video_url(final_video_url)
@@ -329,6 +404,9 @@ def resolve_target_video_context(page, target_video_url: str) -> tuple[str, str,
     return final_video_url, final_video_id, profile_url
 
 def build_author_items_api_url(sec_uid: str, cursor: str, api_page_size: int = API_PAGE_SIZE) -> str:
+    """
+    生成拉取博主投稿视频列表的 API 拼接请求 URL，带上 secUid 参数以定位该用户的所有历史作品。
+    """
     params = {
         "WebIdLastTime": str(int(time.time())),
         "aid": "1988",
@@ -361,6 +439,9 @@ def build_author_items_api_url(sec_uid: str, cursor: str, api_page_size: int = A
     return "https://www.tiktok.com/api/post/item_list/?" + urllib.parse.urlencode(params)
 
 def fetch_json_via_page(page, url: str, timeout_ms: int = 12000) -> dict:
+    """
+    在 Playwright 页面上下文中，利用页面内的 fetch 运行并解析 JSON 数据。
+    """
     result = page.evaluate(
         """async ({url, timeoutMs}) => {
             const controller = new AbortController();
@@ -406,6 +487,9 @@ def item_video_url(item: dict, default_profile_url: str) -> str:
     return ""
 
 def item_metrics(item: dict) -> dict[str, str]:
+    """
+    统一的接口统计属性数据匹配器。
+    """
     stats = item.get("stats") if isinstance(item.get("stats"), dict) else {}
     stats_v2 = item.get("statsV2") if isinstance(item.get("statsV2"), dict) else {}
     stats_v2_alt = item.get("stats_v2") if isinstance(item.get("stats_v2"), dict) else {}
@@ -431,6 +515,12 @@ def item_metrics(item: dict) -> dict[str, str]:
     }
 
 def collect_author_items_via_api(page, sec_uid: str, target_video_id: str, log_callback, context_size: int = CONTEXT_SIZE, api_page_size: int = API_PAGE_SIZE, max_api_pages: int = MAX_API_PAGES) -> tuple[list[dict], int]:
+    """
+    使用 API 极速通道收集投稿。
+    - 循环翻页请求博主视频列表；
+    - 当发现投稿列表中已包含目标视频 ID，并且后续已读完 context_size 规定的视频数时，提前终止翻页以节省带宽和降低风控几率。
+    - 返回收集到的投稿列表及目标视频在该列表中的索引 index。
+    """
     items: list[dict] = []
     seen_ids: set[str] = set()
     cursor = "0"
@@ -470,7 +560,12 @@ def collect_author_items_via_api(page, sec_uid: str, target_video_id: str, log_c
 
     return items, target_index
 
+
 def rows_from_api_items(items: list[dict], target_index: int, profile_url: str, target_video_url: str, context_size: int = CONTEXT_SIZE) -> list[dict[str, str]]:
+    """
+    根据投稿列表和目标视频索引，计算并切片提取出目标前 N 和目标后 N 的视频，
+    并把它们组装成符合表格输出定义的列表字典。
+    """
     selected_indices = list(range(max(0, target_index - context_size), target_index))
     selected_indices += list(range(target_index + 1, min(len(items), target_index + context_size + 1)))
 
@@ -490,6 +585,9 @@ def rows_from_api_items(items: list[dict], target_index: int, profile_url: str, 
     return rows
 
 def extract_card_play_count(card_element) -> str:
+    """
+    DOM 模式：从主页视频网格的单张卡片节点中，利用 querySelector 解析播放量。
+    """
     try:
         container = resolve_tiktok_card_container(card_element)
         for selector in ("[data-e2e='video-views']", "strong[data-e2e='video-views']"):
@@ -503,6 +601,9 @@ def extract_card_play_count(card_element) -> str:
     return ""
 
 def collect_visible_profile_video_links(page) -> list[str]:
+    """
+    DOM 模式：获取当前博主主页网格中所有已渲染的视频卡片跳转超链接。
+    """
     try:
         hrefs = page.evaluate(
             """() => Array.from(document.querySelectorAll("a[href*='/video/'], a[href*='video/']"))
@@ -522,6 +623,12 @@ def collect_visible_profile_video_links(page) -> list[str]:
     return links
 
 def collect_profile_video_links(page, profile_url: str, target_video_id: str, log_callback, stop_event=None, pause_event=None, context_size: int = CONTEXT_SIZE, max_profile_scrolls: int = MAX_PROFILE_SCROLLS, profile_scroll_pause: float = PROFILE_SCROLL_PAUSE) -> tuple[list[str], int]:
+    """
+    DOM 模式主页网格滚动逻辑。
+    - 用 Playwright 打开博主主页，检测人机验证码；
+    - 模拟鼠标中键不断向下滑动页面；
+    - 不断读取 DOM 中的视频链接，当目标视频 ID 出现并且后续网格卡片加载数量大于 context_size 时，表明上下文的 DOM 节点均已渲染完毕，此时立刻主动退出滚动，避免多余的资源消耗与防范反爬虫风控。
+    """
     try:
         page.goto(profile_url, wait_until="domcontentloaded", timeout=60000)
     except Exception as exc:
@@ -535,6 +642,7 @@ def collect_profile_video_links(page, profile_url: str, target_video_id: str, lo
         page.goto(profile_url, wait_until="domcontentloaded", timeout=60000)
 
     time.sleep(2.0)
+    # 人机验证码拦截等待
     try:
         if "captcha" in page.url or page.locator("div[id^='captcha']").count() > 0:
             log_callback("  发现 TikTok 验证页，等待 15 秒给你手动处理。")
@@ -575,6 +683,7 @@ def collect_profile_video_links(page, profile_url: str, target_video_id: str, lo
                 break
         target_index = current_target_index
 
+        # 网格卡片渲染已完整覆盖上下文，提前停止滚动
         if target_index >= 0 and len(all_links) > target_index + context_size:
             log_callback(f"  主页网格命中目标视频，已加载 {len(all_links)} 个视频链接。")
             break
@@ -600,6 +709,9 @@ def collect_profile_video_links(page, profile_url: str, target_video_id: str, lo
     return all_links, target_index
 
 def extract_selected_play_counts(page, selected_links: list[str]) -> dict[str, str]:
+    """
+    DOM 模式：针对已经筛选出来的上下文视频链接，从主页网格 DOM 中提取其可见卡片上呈现的播放量。
+    """
     selected_set = set(selected_links)
     play_counts: dict[str, str] = {}
     if not selected_set:
@@ -618,6 +730,9 @@ def extract_selected_play_counts(page, selected_links: list[str]) -> dict[str, s
     return play_counts
 
 def extract_metric(page, data_e2e_candidates, removable_words=(), default=""):
+    """
+    DOM 模式：从视频详细页面中读取特定指标数据。
+    """
     candidates = data_e2e_candidates if isinstance(data_e2e_candidates, (list, tuple)) else [data_e2e_candidates]
     for data_e2e in candidates:
         try:
@@ -632,6 +747,9 @@ def extract_metric(page, data_e2e_candidates, removable_words=(), default=""):
     return default
 
 def extract_publish_time(page) -> str:
+    """
+    DOM 模式：从视频详情页面中利用正则或选择器提取视频的发布时间。
+    """
     try:
         html = page.content()
         match = re.search(r'"createTime":"?(\d{10})"?', html)
@@ -651,6 +769,9 @@ def extract_publish_time(page) -> str:
     return ""
 
 def extract_video_metrics(page, video_url: str) -> dict:
+    """
+    DOM 模式：进入某个视频详情 URL 并提取其标题、发布时间与各项互动数据指标。
+    """
     page.goto(video_url, wait_until="domcontentloaded", timeout=30000)
     try:
         page.wait_for_selector("[data-e2e='like-count'], [data-e2e='comment-count']", timeout=5000)
@@ -684,6 +805,13 @@ def extract_video_metrics(page, video_url: str) -> dict:
     return metrics
 
 def fallback_rows_from_profile(profile_page, detail_page, profile_candidates: list[str], target_video_id: str, target_video_url: str, log_callback, stop_event=None, pause_event=None, context_size: int = CONTEXT_SIZE, max_profile_scrolls: int = MAX_PROFILE_SCROLLS, profile_scroll_pause: float = PROFILE_SCROLL_PAUSE) -> list[dict[str, str]]:
+    """
+    兜底的博主主页网格滚动与卡片跳转指标拉取控制流程。
+    - 遍历候选的博主主页，在博主主页进行滚动定位，捕获视频链接网络。
+    - 确定目标视频所在主页网络的位置。
+    - 提取目标前后共 2*context_size 条视频链接。
+    - 依次用详情页面对象 detail_page 导航进入这 2*context_size 个视频，提取详细属性。
+    """
     links, target_index = [], -1
     matched_profile_url = profile_candidates[0] if profile_candidates else ""
 
@@ -734,6 +862,17 @@ def write_rows(writer: XlsxRowWriter, rows: list[dict[str, str]]):
     writer.writerows(sanitize_csv_rows(rows))
 
 def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callback, stop_event=None, pause_event=None, config=None):
+    """
+    TikTok 上下文作品采集任务的主入口调度器。
+    - 处理配置参数（单边上下文数量、翻页大小与页数限制、滚动距离与休眠时间）。
+    - 连接或接管已登录的本地 Chrome CDP 浏览器。
+    - 遍历输入的视频 URL：
+      1. 通过 `resolve_target_video_context` 跳转目标视频并定位其 secUid；
+      2. 若 secUid 解析成功，优先走 API 极速提取模式（通过 fetch_json_via_page）；
+      3. 若没有获取到 secUid，或接口因校验风控等问题抛出错误，则自动捕获异常并降级无缝走 `fallback_rows_from_profile` 主页滚动网格匹配兜底模式；
+      4. 提取到上下文行之后清洗并写入 Excel。
+      5. 执行分段强制休眠（`random_cooldown`），保护账号安全。
+    """
     if config is None:
         config = {}
     context_size = int(config.get("context_size", CONTEXT_SIZE))
@@ -807,6 +946,7 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
                     else:
                         log_callback("  未从目标视频页解析到 secUid，切换到主页兜底。")
 
+                    # 极速 API 路线不可用或未命中时，无缝切换至主页滚动兜底路线
                     if not rows:
                         if profile_page is None:
                             profile_page = context.new_page()
@@ -835,3 +975,4 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
         completed_path = output_path
     finally:
         finish_callback(completed_path)
+

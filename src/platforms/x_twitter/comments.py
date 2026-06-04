@@ -371,3 +371,131 @@ def extract_comments(page, tweet_url: str, max_count: int = DEFAULT_SCAN_LIMIT, 
 
     log_line(log_callback, f"  评论抓取完成：{len(comments)} 条。")
     return comments
+
+
+def run_x_top_comments_spider(
+    txt_path: str,
+    cdp_port_or_url: str,
+    max_scan_comments: int,
+    log_callback,
+    finish_callback,
+    stop_event=None,
+    pause_event=None,
+    config=None,
+):
+    """运行 X/Twitter 热门评论爬取任务的驱动函数。
+
+    读取 txt_path 中的推文链接，连接 Chrome 浏览器并逐个抓取首层评论，
+    按点赞数降序排序，最终将前 N 条评论保存至 Excel 文件中。
+    """
+    if config is None:
+        config = {}
+    comment_top_limit = int(config.get("comment_top_limit", 100))
+    page_load_timeout_val = int(config.get("page_load_timeout", 30000))
+    scroll_pause = float(config.get("scroll_interval", 4.0))
+    no_new_scroll_limit = int(config.get("no_new_scroll_limit", 5))
+
+    completed_path = None
+    page = None
+    try:
+        from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+        from src.core import (
+            XlsxRowWriter,
+            connect_existing_chromium,
+            build_output_path,
+            random_cooldown,
+        )
+        from src.platforms.x_twitter.tweet_metrics import parse_tweet_urls, clean_tweet_url
+
+        tweet_urls = parse_tweet_urls(txt_path)
+        if not tweet_urls:
+            log_line(log_callback, "TXT 中没有有效的推文链接。")
+            return
+
+        scan_limit = max(int(max_scan_comments), comment_top_limit)
+        output_path = build_output_path("x", f"x_top_comments_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
+        
+        comment_fields = ["序号", "推文链接", "评论的点赞量", "评论内容", "评论发布时间"]
+        writer = XlsxRowWriter(output_path, comment_fields)
+        log_line(log_callback, f"输出文件位置：{output_path}")
+
+        with sync_playwright() as playwright:
+            log_line(log_callback, "正在连接本地 Chrome 浏览器...")
+            try:
+                _, context = connect_existing_chromium(playwright, cdp_port_or_url)
+            except Exception as exc:
+                log_line(log_callback, f"无法连接 Chrome 浏览器：{exc}")
+                log_line(log_callback, "连接失败：请确认 Chrome 已自动打开并已成功登录 X/Twitter 账号。")
+                return
+
+            page = context.new_page()
+            for index, tweet_url in enumerate(tweet_urls, 1):
+                if should_stop(stop_event):
+                    log_line(log_callback, "任务已由用户手动停止。")
+                    break
+                if wait_if_paused(pause_event, stop_event):
+                    break
+
+                normalized_url = clean_tweet_url(tweet_url)
+                log_line(log_callback, f"[{index}/{len(tweet_urls)}] 开始读取推文链接：{normalized_url}")
+                try:
+                    page.goto(normalized_url, wait_until="domcontentloaded", timeout=page_load_timeout_val)
+                    interruptible_sleep(2.5, stop_event)
+
+                    comments = extract_comments(
+                        page,
+                        normalized_url,
+                        scan_limit,
+                        log_callback,
+                        stop_event,
+                        scroll_pause=scroll_pause,
+                        no_new_scroll_limit=no_new_scroll_limit,
+                        pause_event=pause_event,
+                    )
+                    comments.sort(key=lambda item: int(item.get("likes", "0") or 0), reverse=True)
+                    
+                    if not comments:
+                        row = {
+                            "序号": str(index),
+                            "推文链接": normalized_url,
+                            "评论的点赞量": "",
+                            "评论内容": "该推文无评论",
+                            "评论发布时间": ""
+                        }
+                        writer.writerow(row)
+                    else:
+                        for comment in comments[:comment_top_limit]:
+                            row = {
+                                "序号": str(index),
+                                "推文链接": normalized_url,
+                                "评论的点赞量": comment.get("likes", "0"),
+                                "评论内容": comment.get("content", ""),
+                                "评论发布时间": comment.get("time", "")
+                            }
+                            writer.writerow(row)
+                    
+                    writer.save()
+                    log_line(log_callback, f"  完成：成功扫描评论 {len(comments)} 条，已写入数据并保存。")
+                except PlaywrightTimeoutError:
+                    log_line(log_callback, "  错误：页面加载超时。")
+                except Exception as exc:
+                    log_line(log_callback, f"  错误：处理失败，{exc}")
+
+                if index < len(tweet_urls) and index % 3 == 0:
+                    if random_cooldown(log_callback, stop_event, 3.0, 8.0):
+                        break
+
+            if page and not page.is_closed():
+                page.close()
+
+        completed_path = output_path
+        writer.save()
+        log_line(log_callback, f"任务全部完成，数据已妥善保存至：{output_path}")
+    finally:
+        try:
+            if page and not page.is_closed():
+                page.close()
+        except Exception:
+            pass
+        if finish_callback:
+            finish_callback(completed_path)

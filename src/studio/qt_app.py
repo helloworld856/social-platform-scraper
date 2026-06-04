@@ -1,3 +1,8 @@
+"""
+工作台 GUI 主窗口实现模块。
+使用 PyQt5 构建，负责爬虫插件文件的动态发现、列表分类与搜索、子进程双向管道通信管理、以及配置文件系统监听重载。
+"""
+
 from __future__ import annotations
 
 import sys
@@ -32,21 +37,28 @@ from src.studio.discovery import SCAN_DIRS, discover_tools
 logger = get_logger(__name__)
 
 
+# 全部分类常量，用于指示侧边栏拉取全部列表
 ALL_CATEGORY = "全部"
+# 分类在侧边栏显示时的固定排序权重
 CATEGORY_ORDER = [ALL_CATEGORY, "YouTube", "TikTok", "X/Twitter", "Instagram", "Facebook", "数据处理"]
 
 
 class ThreePlatformCrawlerQtApp(QMainWindow):
+    """
+    爬虫工作台主 GUI 窗口类。
+    """
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("多平台数据爬取工具")
         self.resize(1040, 640)
         self.setMinimumSize(860, 560)
 
+        # 扫描并分类发现爬虫工具
         self.tools, _ = discover_tools()
         extra_categories = sorted({tool.category for tool in self.tools} - set(CATEGORY_ORDER))
         self.category_order = [*CATEGORY_ORDER, *extra_categories]
         self.filtered_tools = []
+        # 用字典记录所有处于运行状态的 QProcess 子进程，键为 tool_id
         self.processes: dict[str, QProcess] = {}
         self.current_category = ALL_CATEGORY
 
@@ -56,11 +68,13 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         self._setup_watcher()
 
     def _build_ui(self) -> None:
+        """主界面布局初始化。"""
         root = QWidget()
         root_layout = QVBoxLayout(root)
         root_layout.setContentsMargins(18, 16, 18, 14)
         root_layout.setSpacing(12)
 
+        # 顶部标题栏 + 搜索重载操作栏
         header = QHBoxLayout()
         title_box = QVBoxLayout()
         self.title_label = QLabel("多平台数据爬取工具")
@@ -86,9 +100,11 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         header.addWidget(self.reload_btn)
         root_layout.addLayout(header)
 
+        # 水平分割器，左侧分类导航，中间工具表格，右侧详情简介
         splitter = QSplitter(Qt.Horizontal)
         root_layout.addWidget(splitter, 1)
 
+        # 1. 左侧导航分类列表
         self.nav = QListWidget()
         self.nav.setObjectName("navList")
         for category in self.category_order:
@@ -98,6 +114,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         self.nav.currentItemChanged.connect(self._on_category_changed)
         splitter.addWidget(self.nav)
 
+        # 2. 中间工具数据表格
         center = QFrame()
         center.setObjectName("panel")
         center_layout = QVBoxLayout(center)
@@ -121,6 +138,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         center_layout.addWidget(self.table, 1)
         splitter.addWidget(center)
 
+        # 3. 右侧属性详情面板
         detail = QFrame()
         detail.setObjectName("panel")
         detail_layout = QVBoxLayout(detail)
@@ -157,6 +175,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         detail_layout.addWidget(self.open_btn)
         splitter.addWidget(detail)
 
+        # 界面初始化尺寸比例配额
         splitter.setSizes([180, 520, 320])
         self.setCentralWidget(root)
         self.nav.setCurrentRow(0)
@@ -166,6 +185,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         self.addAction(exit_action)
 
     def _apply_style(self) -> None:
+        """全局样式设定表（采用现代化扁平风 CSS 主题）。"""
         self.setStyleSheet(
             """
             QMainWindow, QWidget {
@@ -278,18 +298,26 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         self.table.setFont(QFont("Microsoft YaHei UI", 9))
 
     def _category_label(self, category: str) -> str:
+        """获取分类按钮的数字统计标签文本，形如 'TikTok 4'。"""
         if category == ALL_CATEGORY:
             return f"全部  {len(self.tools)}"
         count = sum(1 for tool in self.tools if tool.category == category)
         return f"{category}  {count}"
 
     def _on_category_changed(self, current: QListWidgetItem | None) -> None:
+        """侧边分类栏选定槽：记录分类键并触发右侧表格项过滤。"""
         self.current_category = current.data(Qt.UserRole) if current else ALL_CATEGORY
         self.refresh_tools()
 
     def _setup_watcher(self) -> None:
+        """
+        初始化文件系统监听服务。
+        当开发过程中在 platforms 目录下添加、修改 manifest 配置文件时，主界面会感知并自动静默刷新，简化开发测试流程。
+        """
         self.watcher = QFileSystemWatcher(self)
         project_root = Path(__file__).resolve().parents[2]
+        
+        # 深度扫描并向监视器注册文件夹节点
         for scan_dir in SCAN_DIRS:
             base = project_root / scan_dir
             if base.is_dir():
@@ -298,6 +326,8 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
                     if p.is_dir():
                         self.watcher.addPath(str(p))
 
+        # 定时器防抖设计。当执行 git pull 等大批量文件覆盖操作时，QFileSystemWatcher
+        # 会频繁抛出几百次变化信号。设定 500ms 计时器能确保所有写磁盘操作落地稳定后，只执行一次 Manifest 文件解析。
         self.reload_timer = QTimer(self)
         self.reload_timer.setSingleShot(True)
         self.reload_timer.setInterval(500)
@@ -307,14 +337,17 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         self.watcher.directoryChanged.connect(self._on_fs_changed)
 
     def _on_fs_changed(self, path: str) -> None:
-        # 仅对 .manifest.json 或目录变化做响应防抖
+        # 只在清单发生改写或者文件夹出现增删节点时重置防抖重载
         if path.endswith(".manifest.json") or Path(path).is_dir():
             self.reload_timer.start()
 
     def reload_tools(self) -> None:
+        """
+        重新扫描工作目录。保存重载前的 UI 交互状态（选中的行和分类），重新加载完 manifest 后精准恢复原选中态。
+        """
         logger.info("Reloading tools from manifests")
         
-        # 保存状态
+        # 备份历史聚焦项
         old_category = self.current_category
         old_tool = self.selected_tool()
         old_tool_id = old_tool.tool_id if old_tool else None
@@ -323,6 +356,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         extra_categories = sorted({tool.category for tool in self.tools} - set(CATEGORY_ORDER))
         self.category_order = [*CATEGORY_ORDER, *extra_categories]
 
+        # 刷新侧边分类树
         self.nav.clear()
         found_category = False
         for i, category in enumerate(self.category_order):
@@ -338,7 +372,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
 
         self.refresh_tools()
         
-        # 恢复选中工具
+        # 恢复表格的高亮聚焦选定行
         if old_tool_id:
             for row in range(self.table.rowCount()):
                 item = self.table.item(row, 0)
@@ -352,9 +386,13 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
             QMessageBox.warning(self, "工具加载部分失败", f"部分工具配置加载失败：\n\n{err_msg}")
         else:
             self.reload_btn.setText("✓ 重载成功")
+            # 1.5 秒后清除成功复位状态按钮文本
             QTimer.singleShot(1500, lambda: self.reload_btn.setText("重载工具"))
 
     def refresh_tools(self) -> None:
+        """
+        核心刷新动作：提取检索过滤文本与分类标签，比对 ToolSpec 信息，清空并重新填装 QTableWidget 节点。
+        """
         query = self.search_entry.text().strip().lower()
         category = self.current_category
 
@@ -374,6 +412,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
                 item.setData(Qt.UserRole, tool.tool_id)
                 self.table.setItem(row, column, item)
 
+        # 默认高亮选择刷新出的首行数据
         if self.filtered_tools:
             self.table.selectRow(0)
             self.update_detail()
@@ -381,6 +420,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
             self.clear_detail()
 
     def selected_tool(self):
+        """获取当前表格中选中的 ToolSpec 工具对象，如无选中则返回 None。"""
         selected_rows = self.table.selectionModel().selectedRows()
         if not selected_rows:
             return None
@@ -390,6 +430,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         return self.filtered_tools[row]
 
     def update_detail(self) -> None:
+        """在右侧详情卡片区域渲染显示当前高亮工具的详细说明与文件路径。"""
         tool = self.selected_tool()
         if tool is None:
             self.clear_detail()
@@ -403,6 +444,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         self.open_btn.setText("打开工具")
 
     def clear_detail(self) -> None:
+        """清空详情展示。"""
         self.detail_name.setText("未选择工具")
         self.detail_meta.setText("")
         self.detail_script.setText("")
@@ -410,6 +452,12 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         self.open_btn.setEnabled(False)
 
     def open_selected_tool(self) -> None:
+        """
+        调起选定的爬虫子工具。
+        为了防范某些平台爬虫异常崩溃导致主控面板一并闪退挂起，所有子工具窗口均以
+        独立的 QProcess 后台子进程方式拉起（拉起 python -m src.studio.tool_runner ），
+        从而实现了进程间的沙箱式隔离，保证了主应用的健壮性。
+        """
         tool = self.selected_tool()
         if tool is None:
             return
@@ -420,18 +468,24 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
 
         logger.info("Launching tool process: %s (%s)", tool.name, tool.tool_id)
         process = QProcess(self)
+        # 用当前相同的 python 解释器执行 tool_runner 模块
         process.setProgram(sys.executable)
         process.setArguments(["-m", "src.studio.tool_runner", "--tool-id", tool.tool_id])
         process.setWorkingDirectory(str(Path(__file__).resolve().parents[2]))
+        # 开启输出合并管道，将子进程的标准错误和标准输出流合并归纳，方便主应用接收打印
         process.setProcessChannelMode(QProcess.MergedChannels)
+        
+        # 绑定进程状态销毁监测槽
         process.finished.connect(lambda exit_code, exit_status, tool_id=tool.tool_id: self._tool_finished(tool_id, exit_code, exit_status))
         process.errorOccurred.connect(lambda error, tool_id=tool.tool_id: self._tool_error(tool_id, error))
         process.readyReadStandardOutput.connect(lambda tool_id=tool.tool_id: self._read_tool_output(tool_id))
+        
         self.processes[tool.tool_id] = process
         process.start()
         self.refresh_tools()
 
     def _read_tool_output(self, tool_id: str) -> None:
+        """子进程管道输出捕获槽，负责将子窗口的控制台输出转印输出至主进程终端。"""
         process = self.processes.get(tool_id)
         if process is not None:
             text = bytes(process.readAllStandardOutput()).decode(errors="replace")
@@ -440,34 +494,46 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
                 sys.stdout.flush()
 
     def _tool_finished(self, tool_id: str, exit_code: int, exit_status) -> None:
+        """子进程完美（或非完美）终结后的清理回调。"""
         logger.info("Tool process finished: %s exit_code=%s exit_status=%s", tool_id, exit_code, exit_status)
         if tool_id in self.processes:
             self.processes.pop(tool_id, None)
             self.refresh_tools()
 
     def _tool_error(self, tool_id: str, error) -> None:
+        """子进程启动失败或异常断开后的错误捕获。"""
         logger.error("Tool process error: %s error=%s", tool_id, error)
         if tool_id in self.processes:
             self.processes.pop(tool_id, None)
             self.refresh_tools()
 
     def _is_tool_running(self, tool_id: str) -> bool:
+        """检查指定子窗口进程是否存活。"""
         process = self.processes.get(tool_id)
         return bool(process and process.state() != QProcess.NotRunning)
 
     def closeEvent(self, event) -> None:
+        """
+        拦截主窗口退出行为。
+        在退出时实施进程级联终结机制：优雅地发出 terminate 退出信号，
+        轮询等待子进程处理完善后工作并退出（最长 1.5 秒），对超时进程实施硬杀 kill 动作，防子窗口进程失控遗留在系统后台。
+        """
         running = [tool_id for tool_id in self.processes if self._is_tool_running(tool_id)]
         if running:
             message = "关闭主窗口会关闭已打开的工具窗口，确定关闭吗？"
         else:
-            message = "确定关闭三平台数据爬取工具吗？"
+            message = "确定关闭多平台数据爬取工具吗？"
         reply = QMessageBox.question(self, "确认关闭", message, QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if reply != QMessageBox.Yes:
             event.ignore()
             return
+            
+        # 1. 尝试优雅发出退出信号
         for process in list(self.processes.values()):
             if process.state() != QProcess.NotRunning:
                 process.terminate()
+                
+        # 2. 循环等待退出以完成磁盘写入等工作，如果超时未退出则执行硬杀
         for process in list(self.processes.values()):
             if process.state() != QProcess.NotRunning:
                 process.waitForFinished(1500)
@@ -477,6 +543,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
 
 
 def main() -> None:
+    """GUI 应用主入口函数。"""
     setup_console_logging()
     from src.core.config_store import generate_all_defaults
     try:

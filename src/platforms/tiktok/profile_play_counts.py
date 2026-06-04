@@ -43,6 +43,11 @@ def run_tiktok_profile_play_counts_spider(
     pause_event=None,
     config=None,
 ):
+    """
+    仅抓取 TikTok 博主主页视频播放量的轻量爬虫入口。
+    不需要请求单个视频的详情页，直接通过网络请求拦截 /api/post/item_list 接口的数据，
+    快速提取主页滚动展示的所有视频链接与其播放量。
+    """
     if config is None:
         config = {}
     page_load_timeout = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
@@ -98,6 +103,7 @@ def run_tiktok_profile_play_counts_spider(
                 api_data = {"items": []}
                 seen_video_ids = set()
 
+                # 定义 Playwright 响应拦截监听器，拦截 itemList 获取视频 ID 与播放量
                 def handle_response(response):
                     if "/api/post/item_list" in response.url and "secUid" in response.url:
                         try:
@@ -116,6 +122,7 @@ def run_tiktok_profile_play_counts_spider(
                         except Exception:
                             pass
 
+                # 挂载网络流量监听
                 profile_page.on("response", handle_response)
                 
                 try:
@@ -141,6 +148,7 @@ def run_tiktok_profile_play_counts_spider(
                         no_new_count = 0
                         log_line(log_callback, f"  滚动 {scroll_index + 1}/{max_scrolls}：拦截到 {len(new_items)} 条视频数据。")
                         
+                        # 解析视频数据并写入 Excel
                         for item in new_items:
                             video_link = f"https://www.tiktok.com/{username}/video/{item['video_id']}"
                             play_count = item["play_count"]
@@ -156,6 +164,7 @@ def run_tiktok_profile_play_counts_spider(
                     else:
                         no_new_count += 1
 
+                    # 连续多次没有抓到新视频（或网络接口没有返回新页数据），结束当前主页
                     if no_new_count >= no_new_scroll_limit:
                         log_line(log_callback, "  连续多次未拦截到新数据，结束当前主页。")
                         break
@@ -164,6 +173,7 @@ def run_tiktok_profile_play_counts_spider(
                     if interruptible_sleep(scroll_interval, stop_event):
                         break
 
+                # 取消该主页的监听，避免干扰下一个博主主页
                 profile_page.remove_listener("response", handle_response)
 
             if not profile_page.is_closed():

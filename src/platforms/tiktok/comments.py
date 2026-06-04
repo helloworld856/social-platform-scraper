@@ -1,4 +1,13 @@
-﻿from __future__ import annotations
+"""
+TikTok 视频评论采集模块。
+该模块包含以下核心功能：
+1. 拦截与主动模拟 API 请求：通过浏览器运行时抓取本地 msToken 等安全 Cookie 状态，并调用 JavaScript 加密库 `window.byted_acrawler.frontierSign` 对拼接的 TikTok 接口请求进行动态签名（生成合法的 X-Bogus），实现无验证码绕过的主动评论 API 分页抓取。
+2. 备用 DOM 滚动提取：在 API 受到风控或不可用时，降级为模拟鼠标滚动并提取可见 DOM 元素中的评论数据，支持灵活解析频繁变更的类名与点赞数字段。
+3. 人机验证与风控阻断检测：在页面跳转后，自动扫描 URL 和特定卡片元素以捕获人机交互阻断页，提示风控。
+4. 队列冷却：批处理中设置随机间隔时间与休眠，防止请求过频触发封禁。
+"""
+
+from __future__ import annotations
 
 import json
 import re
@@ -6,6 +15,7 @@ import time
 from typing import Any
 from urllib.parse import urlencode, urlparse
 
+# 尝试导入 Playwright 同步库
 try:
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
     from playwright.sync_api import sync_playwright
@@ -28,19 +38,23 @@ from src.core import (
 
 
 CSV_FIELDS = ["编号", "视频链接", "评论的点赞量", "评论内容", "发布时间"]
-TOP_COMMENT_LIMIT = 100
-DEFAULT_SCAN_LIMIT = 500
-PAGE_LOAD_TIMEOUT = 45000
-COMMENT_WAIT_TIMEOUT = 12000
-SCROLL_PAUSE = 1.4
-NO_NEW_SCROLL_LIMIT = 8
-MAX_SCROLL_ROUNDS = 80
-VIDEO_BATCH_COOLDOWN_EVERY = 3
-VIDEO_BATCH_COOLDOWN_MIN = 4.0
-VIDEO_BATCH_COOLDOWN_MAX = 9.0
+TOP_COMMENT_LIMIT = 100            # 每个视频默认导出的高点赞评论行数上限
+DEFAULT_SCAN_LIMIT = 500           # 每个视频默认扫描的评论最大行数（包括风控丢弃的评论）
+PAGE_LOAD_TIMEOUT = 45000          # 视频页面最大加载超时（毫秒）
+COMMENT_WAIT_TIMEOUT = 12000       # 评论 DOM 元素渲染最大超时
+SCROLL_PAUSE = 1.4                 # DOM 滚动模式下，两次滚动的间隔缓冲时长（秒）
+NO_NEW_SCROLL_LIMIT = 8            # 连续多少次滚动没有新评论则判定到底部并终止
+MAX_SCROLL_ROUNDS = 80             # 单个视频的最大滚动轮数
+VIDEO_BATCH_COOLDOWN_EVERY = 3     # 每处理 N 个视频进行一次强制冷却，防止风控
+VIDEO_BATCH_COOLDOWN_MIN = 4.0     # 随机强制冷却的最小秒数
+VIDEO_BATCH_COOLDOWN_MAX = 9.0     # 随机强制冷却的最大秒数
+
 
 
 def clean_url(url: str) -> str:
+    """
+    清洗 TikTok 视频 URL，确保前缀规范并剔除 URL hash 片段。
+    """
     value = (url or "").strip()
     if not value:
         return ""
@@ -54,11 +68,18 @@ def clean_url(url: str) -> str:
 
 
 def extract_video_id(url: str) -> str:
+    """
+    从 TikTok 视频 URL 中，正则提取纯数字组成的视频 ID (video_id)。
+    """
     match = re.search(r"/video/(\d+)", url or "")
     return match.group(1) if match else ""
 
 
 def parse_video_entries(txt_path: str) -> list[dict[str, str]]:
+    """
+    解析存储视频 URL 的 TXT 文件。
+    过滤掉以 # 开头的注释行与空白行，对视频 ID 进行唯一去重，返回有序的实体字典列表。
+    """
     entries: list[dict[str, str]] = []
     seen_video_ids: set[str] = set()
     with open(txt_path, "r", encoding="utf-8-sig") as file:
@@ -76,6 +97,10 @@ def parse_video_entries(txt_path: str) -> list[dict[str, str]]:
 
 
 def count_to_int(value: Any) -> int:
+    """
+    强转与解析统计数据（点赞、播放）为整型。
+    支持处理缩写形式（如 1.2M -> 1200000），使用 expand_compact_number 辅助函数进行处理。
+    """
     if value is None or isinstance(value, bool):
         return 0
     if isinstance(value, (int, float)):
@@ -86,6 +111,9 @@ def count_to_int(value: Any) -> int:
 
 
 def detect_non_text_type(comment: dict[str, Any]) -> str:
+    """
+    通过扫描 JSON 字段，识别非纯文本评论的媒体类型（如贴纸、GIF、图片或视频回复）。
+    """
     try:
         blob = json.dumps(comment, ensure_ascii=False).lower()
     except Exception:
@@ -102,6 +130,10 @@ def detect_non_text_type(comment: dict[str, Any]) -> str:
 
 
 def normalize_comment_text(comment: dict[str, Any]) -> str:
+    """
+    规范化提取到的评论文本内容，过滤掉回车换行。
+    若该评论不包含文本（例如纯贴纸、GIF），则使用 [类型描述] 作为占位文本。
+    """
     text = str(comment.get("text") or comment.get("comment") or comment.get("content") or "").replace("\r", " ").replace("\n", " ").strip()
     if text:
         return text
@@ -109,6 +141,10 @@ def normalize_comment_text(comment: dict[str, Any]) -> str:
 
 
 def _format_timestamp(value) -> str:
+    """
+    将时间戳转换为格式化的日期时间字符串。
+    支持处理 13 位毫秒级时间戳以及各种非标准空值。
+    """
     if value is None:
         return ""
     try:
@@ -126,6 +162,9 @@ def _format_timestamp(value) -> str:
 
 
 def comment_like_count(comment: dict[str, Any]) -> int:
+    """
+    适配多种可能出现的键名以安全读取评论点赞数（如 digg_count, likeCount 等）。
+    """
     for key in ("digg_count", "diggCount", "like_count", "likeCount"):
         if key in comment:
             return count_to_int(comment.get(key))
@@ -133,6 +172,10 @@ def comment_like_count(comment: dict[str, Any]) -> int:
 
 
 def is_comment_list_response(url: str) -> bool:
+    """
+    检查拦截到的网络请求 URL 是否为 TikTok 的主楼评论列表接口（/api/comment/list），
+    排除二级回复请求（包含 reply 的 URL）。
+    """
     url_lower = url.lower()
     if "reply" in url_lower:
         return False
@@ -142,24 +185,39 @@ def is_comment_list_response(url: str) -> bool:
 
 
 def has_more_comments(value: Any) -> bool:
+    """
+    判断接口中是否还有更多未拉取的评论数据。
+    """
     return str(value).strip().lower() in {"1", "true"}
 
 
+
 class CommentCollector:
+    """
+    评论收集与去重管理器。
+    - 针对 API 响应数据和 页面 DOM 爬取的文本进行统一去重与清洗。
+    - 仅保留顶级评论（主楼评论），自动识别并剔除二级回复评论。
+    """
     def __init__(self, max_scan_comments: int, log_callback, comment_top_limit: int | None = None) -> None:
         self.comment_top_limit = comment_top_limit if comment_top_limit is not None else TOP_COMMENT_LIMIT
         self.max_scan_comments = max(self.comment_top_limit, int(max_scan_comments or DEFAULT_SCAN_LIMIT))
         self.log_callback = log_callback
-        self.comments: list[dict[str, Any]] = []
-        self.seen_ids: set[str] = set()
-        self.seen_dom_fingerprints: set[str] = set()
-        self.last_has_more: int | None = None
-        self.response_count = 0
+        self.comments: list[dict[str, Any]] = []          # 最终的评论列表存储
+        self.seen_ids: set[str] = set()                   # API 评论 ID 去重集合
+        self.seen_dom_fingerprints: set[str] = set()       # DOM 评论特征去重集合
+        self.last_has_more: int | None = None             # 记录最近一次 API 的 has_more 状态
+        self.response_count = 0                           # 成功处理的 API 响应次数
 
     def _text_fingerprint(self, text: str) -> str:
+        """
+        生成文本内容特征指纹（去除空白差异）。
+        """
         return re.sub(r"\s+", " ", str(text or "")).strip()
 
     def _has_existing_non_dom_text(self, text: str) -> bool:
+        """
+        验证是否存在已被 API 收集过的同文本内容的顶级评论。
+        """
         fingerprint = self._text_fingerprint(text)
         return any(
             item.get("source") != "dom"
@@ -168,6 +226,9 @@ class CommentCollector:
         )
 
     def _dom_fingerprint(self, comment_id: str, text: str, like_count: Any) -> str:
+        """
+        针对 DOM 渲染的无 ID 评论，根据 [作者名称 + 文本内容] 生成复合去重指纹。
+        """
         parts = str(comment_id or "").split("|", 3)
         if len(parts) >= 4 and parts[0] == "dom":
             author_key = parts[1].strip()
@@ -176,11 +237,16 @@ class CommentCollector:
         return ""
 
     def add_comment(self, comment_id: str, like_count: Any, text: str, source: str, create_time: str = "") -> bool:
+        """
+        向管理器增量添加单条评论记录。
+        - 针对 comment_id 存在的一级去重：若 ID 相同但本次获取的点赞数更高，则更新点赞数和文本。
+        - 针对 DOM 模式的二级去重：若 DOM 评论与已有的 API 评论内容发生碰撞，或与已保存的 DOM 指纹碰撞，则丢弃。
+        """
         comment_id = str(comment_id or "").strip()
         text = str(text or "").strip()
         like_val = count_to_int(like_count)
 
-        # Tier 1: Primary dedup by ID
+        # 一级去重
         if comment_id and comment_id in self.seen_ids:
             for c in self.comments:
                 if c["id"] == comment_id and like_val > c["like_count"]:
@@ -191,6 +257,7 @@ class CommentCollector:
         if not comment_id:
             comment_id = f"{source}|{text[:120]}|{like_val}"
 
+        # DOM 特征去重过滤
         is_dom_comment = source == "dom" or comment_id.startswith("dom|")
         if is_dom_comment:
             fingerprint = self._dom_fingerprint(comment_id, text, like_val)
@@ -214,9 +281,13 @@ class CommentCollector:
 
     @staticmethod
     def _is_reply_comment(comment: dict[str, Any]) -> bool:
-        """Detect if a comment is a reply to another comment (not top-level)."""
-        # Direct reply indicators in TikTok API — broad coverage of possible field names.
-        # root_comment_id can be present on top-level comments, so handle it below.
+        """
+        通过字段分析，甄别单条评论是否为非顶级的“楼中楼二级回复评论”。
+        - 检测 reply_comment_id 等回复 ID 标识；
+        - 对比 root_comment_id 与自身 cid 是否一致；
+        - 检测 comment_type 等角色标示符；
+        - 正则匹配是否以 @作者 或 '回复' 文本作为开头。
+        """
         for key in ("reply_comment_id", "parent_comment_id", "reply_to_comment_cid",
                      "reply_to_comment_id", "reply_id",
                      "reply_to_user_id", "reply_to_username", "reply_to_user_name",
@@ -228,11 +299,11 @@ class CommentCollector:
         own_comment_id = str(comment.get("cid") or comment.get("id") or "").strip()
         if root_comment_id and root_comment_id not in ("0", "false", "False") and root_comment_id != own_comment_id:
             return True
-        # comment_type / comment_role / comment_source: 1 = top-level, 2+ = reply
+        
         ctype = comment.get("comment_type") or comment.get("comment_role") or comment.get("comment_source")
         if ctype is not None and str(ctype) not in ("", "0", "1"):
             return True
-        # Text-based fallback: replies often start with @mention or 回复
+        
         text = str(comment.get("text") or comment.get("comment") or "")
         if text.strip():
             stripped = text.strip()
@@ -241,6 +312,9 @@ class CommentCollector:
         return False
 
     def add_comments_from_payload(self, data: dict[str, Any], source: str) -> int:
+        """
+        解析 API 响应的 JSON 对象，将其中的 comments 列表遍历并添加。
+        """
         if len(self.comments) >= self.max_scan_comments or not isinstance(data, dict):
             return 0
         self.response_count += 1
@@ -271,6 +345,10 @@ class CommentCollector:
         return added
 
     def handle_response(self, response) -> None:
+        """
+        事件监听器：在 Playwright 页面网络请求响应时触发。
+        自动匹配 URL，捕获后台自动触发或被动滑动的 `/api/comment/list` 响应并提取评论。
+        """
         if len(self.comments) >= self.max_scan_comments:
             return
         try:
@@ -288,7 +366,11 @@ class CommentCollector:
             return
 
 
+
 def looks_blocked_or_captcha(page) -> bool:
+    """
+    检查页面当前是否处于风控验证码页面、登录拦截，或检测到验证滑块 iframe。
+    """
     try:
         current_url = page.url.lower()
         if "captcha" in current_url or "verify" in current_url:
@@ -301,6 +383,11 @@ def looks_blocked_or_captcha(page) -> bool:
 
 
 def open_comment_panel(page) -> bool:
+    """
+    备用 DOM 提取的前置条件：点击视频页面上的评论图标，展开右侧评论抽屉面板。
+    - 遍历多种已知的图标/文本元素选择器并尝试点击；
+    - 若没有匹配到选择器，则执行内置 JavaScript 评估算法，根据特征及坐标位置在页面内评分排序定位最可能是评论按钮的节点并触发点击。
+    """
     selectors = [
         "[data-e2e='comment-icon']",
         "[data-e2e='comment-count']",
@@ -319,6 +406,7 @@ def open_comment_panel(page) -> bool:
         except Exception:
             continue
     try:
+        # 使用自定义 JS 在 DOM 中扫描符合条件且最接近右侧评论位置的交互按钮
         clicked = page.evaluate(
             """() => {
                 const visible = el => {
@@ -356,6 +444,10 @@ def open_comment_panel(page) -> bool:
 
 
 def scroll_comments(page) -> None:
+    """
+    DOM 滚动辅助函数：在右侧评论列表中模拟向下滚动，以触发更多 DOM 渲染与分页加载。
+    通过 JavaScript 自动定位当前具有 overflow-y 滚动属性且尺寸最大的右侧容器节点，并修改 scrollTop 距离以派发 scroll 事件。
+    """
     try:
         page.evaluate(
             """() => {
@@ -398,6 +490,14 @@ def scroll_comments(page) -> None:
 
 
 def collect_visible_dom_comments(page, collector: CommentCollector, log_callback) -> int:
+    """
+    降级使用的 DOM 评论提取方法。
+    执行复杂 JS，获取当前浏览器视口内渲染的所有主楼评论：
+    - 精确过滤二级回复（如 replySelector 及以 '回复 @' 等开头的文本节点）；
+    - 处理各种非纯文本表情媒体；
+    - 从不断混淆变更的 DOM 中遍历与模糊提取点赞数字段；
+    - 抓取评论发布时间及作者唯一 key 并生成 cid，回传至 python 端进行去重存储。
+    """
     try:
         items = page.evaluate(
             """() => {
@@ -430,12 +530,12 @@ def collect_visible_dom_comments(page, collector: CommentCollector, log_callback
 	                ].join(', ');
 	                const result = [];
 	                for (const rawNode of rawNodes) {
-	                    // Skip reply comments — check multiple indicators
+	                    // 跳过回复列表等非顶级元素
 	                    if (!rawNode) continue;
 	                    if (rawNode.matches(replySelector) || rawNode.closest(replySelector)) {
 	                        continue;
 	                    }
-                    // Skip nodes whose text starts with reply pattern (e.g. "回复 @user")
+                    // 过滤以回复开头的残留元素
                     const quickText = normalize(rawNode.innerText || rawNode.textContent || '').substring(0, 30);
                     if (/^(回复\\s*@|Reply\\s*@|Replying to)/i.test(quickText)) {
                         continue;
@@ -584,6 +684,9 @@ def collect_visible_dom_comments(page, collector: CommentCollector, log_callback
 
 
 def build_comment_api_url(video_id: str, cursor: Any, count: int) -> str:
+    """
+    拼接标准的 TikTok 评论 API 获取 URL，包含必要的分页游标 cursor 与页大小 count 以及各种 aid, device_platform 等元参数。
+    """
     params = {
         "aweme_id": video_id,
         "item_id": video_id,
@@ -604,6 +707,10 @@ def build_comment_api_url(video_id: str, cursor: Any, count: int) -> str:
 
 
 def build_comment_api_candidates(video_id: str, cursor: Any, count: int) -> list[str]:
+    """
+    构造多套候选 API 路径结构（包括精简参数版、全参数版、以及相对路径版），
+    以防 TikTok 升级后单一接口 URL 被屏蔽或参数校验失败。
+    """
     compact_params = {
         "aweme_id": video_id,
         "count": str(min(20, count)),
@@ -650,6 +757,9 @@ def build_comment_api_candidates(video_id: str, cursor: Any, count: int) -> list
 
 
 def wait_for_tiktok_runtime(page) -> None:
+    """
+    等待 TikTok 页面内置的 JS 签名运行库 `byted_acrawler` 加载就绪。
+    """
     try:
         page.wait_for_function(
             "() => window.byted_acrawler && (typeof window.byted_acrawler.frontierSign === 'function' || typeof window.byted_acrawler.sign === 'function')",
@@ -660,6 +770,14 @@ def wait_for_tiktok_runtime(page) -> None:
 
 
 def fetch_comments_via_page_api(page, video_id: str, collector: CommentCollector, log_callback, stop_event=None, pause_event=None, max_scroll_rounds: int | None = None) -> int:
+    """
+    核心 API 模拟请求函数（拦截代理与 X-Bogus/msToken 动态签名）。
+    - 运行在 Playwright 页面上下文中，利用页面上的 JS 环境与当前登录态 Cookie 权限发起异步 fetch 请求。
+    - 从 Cookie 中提取 `msToken`，从页面的数据源节点 `__UNIVERSAL_DATA_FOR_REHYDRATION__` 中提取 `web_id (wid)`、`region`、`appId`。
+    - 核心风控绕过：调用 `window.byted_acrawler.frontierSign`（或老的 `window.byted_acrawler.sign`），将待发送的 API 链接进行动态加密签名，得到必需的安全凭证 `X-Bogus` (和 `X-Gnarly`)，拼接入请求参数。
+    - 发送 fetch 异步请求，带上 Cookie 并伪造 Sec-SDK 的 CSRF 头信息。
+    - 对抓取的响应 JSON 进行解析，并直接交由 `collector` 管理器存入 Python 数据区。
+    """
     if not video_id:
         return 0
 
@@ -678,6 +796,7 @@ def fetch_comments_via_page_api(page, video_id: str, collector: CommentCollector
         last_error = ""
         for url in build_comment_api_candidates(video_id, cursor, count):
             try:
+                # 在浏览器上下文中异步调用 fetch，防止跨域并自动继承当前登录态 Cookie
                 result = page.evaluate(
                     """async (url) => {
                         const absoluteUrl = url.startsWith('/') ? `${location.origin}${url}` : url;
@@ -703,6 +822,7 @@ def fetch_comments_via_page_api(page, video_id: str, collector: CommentCollector
                         const urlToSign = urlObj.toString();
                         let requestUrl = urlToSign;
                         try {
+                            // 动态签名生成 X-Bogus 凭证，绕过后端签名校验
                             if (window.byted_acrawler && typeof window.byted_acrawler.frontierSign === 'function') {
                                 const signResult = await window.byted_acrawler.frontierSign(urlToSign);
                                 if (signResult && signResult['X-Bogus']) {
@@ -788,6 +908,16 @@ def fetch_comments_via_page_api(page, video_id: str, collector: CommentCollector
 
 
 def collect_video_comments(page, video_url: str, max_scan_comments: int, log_callback, stop_event=None, pause_event=None, comment_top_limit: int | None = None, page_load_timeout: int | None = None, scroll_pause: float | None = None, max_scroll_rounds: int | None = None) -> list[dict[str, Any]]:
+    """
+    单个视频评论收集主调度程序。
+    1. 页面监听：给 Playwright 页面注册 'response' 事件处理器，拦截页面自加载或滚动的 API 请求。
+    2. 跳转至视频，检查是否被风控/登录验证码阻断。
+    3. 运行主动签名接口模式 fetch_comments_via_page_api。
+    4. 若主动接口无返回，则降级为 DOM 模拟滚动模式：
+       - 调用 open_comment_panel 打开右侧抽屉；
+       - 若没打开或接口为空，尝试在抽屉中利用 `scroll_comments` 滚动并利用 `collect_visible_dom_comments` 抓取 DOM。
+    5. 返回最终去重收集并排序的评论列表。
+    """
     collector = CommentCollector(max_scan_comments, log_callback, comment_top_limit=comment_top_limit)
     video_id = extract_video_id(video_url)
     _page_timeout = page_load_timeout if page_load_timeout is not None else PAGE_LOAD_TIMEOUT
@@ -865,6 +995,9 @@ def collect_video_comments(page, video_url: str, max_scan_comments: int, log_cal
 
 
 def build_top_rows(video_index: str, video_url: str, comments: list[dict[str, Any]], comment_top_limit: int | None = None) -> list[dict[str, str]]:
+    """
+    根据点赞数降序对收集到的顶级评论进行排序，并截取前 top_limit 条转换成 Excel 行字典。
+    """
     top_limit = comment_top_limit if comment_top_limit is not None else TOP_COMMENT_LIMIT
     top_comments = sorted(comments, key=lambda item: (-int(item.get("like_count", 0) or 0), int(item.get("order", 0) or 0)))
     return [
@@ -880,6 +1013,9 @@ def build_top_rows(video_index: str, video_url: str, comments: list[dict[str, An
 
 
 def empty_video_row(video_index: str, video_url: str) -> dict[str, str]:
+    """
+    无评论或超时跳过的视频占位行生成。
+    """
     return {"编号": video_index, "视频链接": video_url, "评论的点赞量": "", "评论内容": "该视频无评论", "发布时间": ""}
 
 
@@ -893,6 +1029,13 @@ def run_tiktok_top_comments_spider(
     pause_event=None,
     config=None,
 ):
+    """
+    TikTok 视频高点赞评论爬虫主任务入口。
+    1. 从 TXT 中读取并解析去重后的视频链接列表。
+    2. 新建或接管本地已登录 Chrome 的 CDP 会话。
+    3. 依次对视频调用 `collect_video_comments` 采集主楼评论并根据点赞降序保存至 Excel。
+    4. 实现分批强制休眠机制（`VIDEO_BATCH_COOLDOWN_EVERY`），有效对抗 TikTok 全局速率限制（风控阈值），降低被封风险。
+    """
     if config is None:
         config = {}
     comment_top_limit = int(config.get("comment_top_limit", TOP_COMMENT_LIMIT))
@@ -982,3 +1125,4 @@ def run_tiktok_top_comments_spider(
         except Exception:
             pass
         finish_callback(completed_path)
+

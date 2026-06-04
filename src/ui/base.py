@@ -1,3 +1,7 @@
+"""
+UI 基础窗口定义模块，提供通用的多媒体爬虫任务配置界面基类 SimpleToolWindow，支持多线程控制及自动参数校验。
+"""
+
 from __future__ import annotations
 
 import threading
@@ -29,24 +33,36 @@ from PyQt5.QtWidgets import (
 
 @dataclass(frozen=True)
 class FieldSpec:
-    name: str
-    label: str
-    kind: str = "text"
-    default: str | int = ""
-    required: bool = False
-    minimum: int = 1
-    maximum: int = 999999
-    options: tuple[str, ...] = ()
-    placeholder: str = ""
+    """
+    表单字段描述规范，用于动态生成工具配置界面对应的输入组件。
+    """
+    name: str                   # 字段键名
+    label: str                  # 界面显示的标签名称
+    kind: str = "text"          # 字段类型：text, multiline, int, combo, file, folder, text_or_file
+    default: str | int = ""     # 默认初值
+    required: bool = False      # 是否为必填项
+    minimum: int = 1            # 数字类型最小值上限
+    maximum: int = 999999       # 数字类型最大值上限
+    options: tuple[str, ...] = ()  # combo 下拉框的选项列表
+    placeholder: str = ""       # 输入框占位符提示
 
 
 class WorkerSignals(QObject):
-    log = pyqtSignal(str)
-    finished = pyqtSignal(object)
-    failed = pyqtSignal(str)
+    """
+    多线程工作信号器。
+    由于 PyQt 不允许在子线程直接操作 GUI 组件，子线程需要通过 emit 信号的方式
+    通知主进程刷新界面、追加日志或结束任务。
+    """
+    log = pyqtSignal(str)          # 子线程发出日志消息
+    finished = pyqtSignal(object)   # 子线程顺利结束（回传文件导出路径）
+    failed = pyqtSignal(str)       # 子线程运行异常（回传错误消息）
 
 
 class SimpleToolWindow(QWidget):
+    """
+    通用爬虫工具窗口基类。
+    支持自动渲染表单、方案选择、输入校验、后台线程运行（避免界面假死）、日志显示及暂停/停止状态控制。
+    """
     tool_id: str = ""
     current_profile: str | None = None
 
@@ -56,20 +72,27 @@ class SimpleToolWindow(QWidget):
         self.resize(width, height)
         self.fields = fields
         self.widgets: dict[str, Any] = {}
-        self.stop_event = threading.Event()
-        self.pause_event = threading.Event()
+        
+        # 线程同步与状态机通信事件
+        self.stop_event = threading.Event()    # 标记用户是否按下了停止按钮
+        self.pause_event = threading.Event()   # 标记任务是否处于暂停挂起状态
         self.worker_thread: threading.Thread | None = None
+
         self.logger = get_logger(self.__class__.__name__)
+        
+        # 实例化信号接收绑定
         self.signals = WorkerSignals(self)
         self.signals.log.connect(self.append_log)
         self.signals.finished.connect(self._finish_success)
         self.signals.failed.connect(self._finish_error)
+        
         self.form_layout: QFormLayout | None = None
         self.config_values: dict[str, Any] = {}
         self._build_ui()
         self._load_persisted_config()
 
     def _build_ui(self) -> None:
+        """构建基础布局、动态字段表单、控制按钮以及只读日志文本框。"""
         root = QVBoxLayout(self)
         root.setContentsMargins(12, 10, 12, 8)
         root.setSpacing(6)
@@ -82,29 +105,37 @@ class SimpleToolWindow(QWidget):
         root.addLayout(form)
         self.form_layout = form
 
+        # 根据配置动态组装表单行
         for field in self.fields:
             widget = self._create_field_widget(field)
             form.addRow(QLabel(field.label), widget)
 
+        # 操作按钮区
         buttons = QHBoxLayout()
         self.config_button = QPushButton("参数配置")
         self.config_button.clicked.connect(self._open_config)
         buttons.addWidget(self.config_button)
         buttons.addStretch(1)
+        
         self.action_button = QPushButton("开始")
         self.action_button.clicked.connect(self._on_action_button)
         buttons.addWidget(self.action_button)
+        
         self.stop_button = QPushButton("停止")
         self.stop_button.setEnabled(False)
         self.stop_button.clicked.connect(self.stop)
         buttons.addWidget(self.stop_button)
         root.addLayout(buttons)
 
+        # 日志文本输出区
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
         self.log_text.setPlaceholderText("运行日志")
+        # 限制最大保存 5000 行，防长时间抓取日志量过大撑爆内存
         self.log_text.document().setMaximumBlockCount(5000)
         root.addWidget(self.log_text, 1)
+        
+        # 统一全局 UI 样式表
         self.setStyleSheet(
             """
             QWidget {
@@ -137,6 +168,9 @@ class SimpleToolWindow(QWidget):
         )
 
     def _create_field_widget(self, field: FieldSpec):
+        """
+        工厂方法：根据 FieldSpec.kind 类型实例化对应的 PyQt 组件并完成事件监听绑定。
+        """
         if field.kind == "multiline":
             widget = QPlainTextEdit()
             widget.setPlainText(str(field.default or ""))
@@ -164,6 +198,7 @@ class SimpleToolWindow(QWidget):
             widget = container
             widget.path_edit = edit
         elif field.kind == "text_or_file":
+            # 复合组件：支持下拉切换输入来源（直接在框里写，或从外部 txt 读）
             widget = QWidget()
             vbox = QVBoxLayout(widget)
             vbox.setContentsMargins(0, 0, 0, 0)
@@ -187,29 +222,38 @@ class SimpleToolWindow(QWidget):
             fl.addWidget(file_btn)
             vbox.addWidget(file_row)
             file_row.hide()
-            mode_combo.currentTextChanged.connect(lambda t: (text_edit.show(), file_row.hide()) if t == "直接输入" else (text_edit.hide(), file_row.show()))
+            # 切换下拉框时，显隐切换对应的输入控件
+            mode_combo.currentTextChanged.connect(
+                lambda t: (text_edit.show(), file_row.hide()) if t == "直接输入" else (text_edit.hide(), file_row.show())
+            )
             widget.mode_combo = mode_combo
             widget.text_edit = text_edit
             widget.file_edit = file_edit
         else:
             widget = QLineEdit(str(field.default or ""))
             widget.setPlaceholderText(field.placeholder)
+            
         self.widgets[field.name] = widget
+        # 对数字微调框和下拉框安装轮播拦截器，禁止在此类组件上误触鼠标滚轮切换选项
         if isinstance(widget, (QSpinBox, QComboBox)):
             widget.installEventFilter(self)
         return widget
 
     def _select_path(self, field: FieldSpec, edit: QLineEdit) -> None:
+        """调用系统文件对话框选择保存文件或文件夹目录。"""
         if field.kind == "folder":
             path = QFileDialog.getExistingDirectory(self, "选择文件夹")
         else:
-            path, _ = QFileDialog.getOpenFileName(self, "选择文件", str(Path.cwd()), "Text Files (*.txt);;Excel Files (*.xlsx);;All Files (*.*)")
+            path, _ = QFileDialog.getOpenFileName(
+                self, "选择文件", str(Path.cwd()), "Text Files (*.txt);;Excel Files (*.xlsx);;All Files (*.*)"
+            )
         if path:
             edit.setText(path)
             self.raise_()
             self.activateWindow()
 
     def _select_text_file(self, edit: QLineEdit) -> None:
+        """特定于文本源字段的文件选择。"""
         path, _ = QFileDialog.getOpenFileName(self, "选择 TXT 文件", str(Path.cwd()), "Text Files (*.txt);;All Files (*.*)")
         if path:
             edit.setText(path)
@@ -217,6 +261,12 @@ class SimpleToolWindow(QWidget):
             self.activateWindow()
 
     def collect_values(self) -> dict[str, Any] | None:
+        """
+        收集当前界面表单中所有的用户输入值，做必填项检查，并在此处自动加载文件模式下的内容。
+
+        Returns:
+            dict[str, Any] | None: 各个参数的名称和实际输入值的字典映射，如遇校验失败则弹出警告并返回 None。
+        """
         values: dict[str, Any] = {}
         for field in self.fields:
             widget = self.widgets[field.name]
@@ -236,6 +286,7 @@ class SimpleToolWindow(QWidget):
                         QMessageBox.warning(self, "提示", f"请选择或输入：{field.label}")
                         return None
                     try:
+                        # 自动解析加载 TXT 文件数据
                         value = Path(file_path).read_text(encoding="utf-8").strip()
                     except Exception as exc:
                         QMessageBox.warning(self, "提示", f"无法读取文件：{exc}")
@@ -244,6 +295,7 @@ class SimpleToolWindow(QWidget):
                     value = widget.text_edit.toPlainText().strip()
             else:
                 value = widget.text().strip()
+                
             if field.required and not value and widget.isVisible():
                 QMessageBox.warning(self, "提示", f"请填写：{field.label}")
                 return None
@@ -251,6 +303,7 @@ class SimpleToolWindow(QWidget):
         return values
 
     def set_field_visible(self, field_name: str, visible: bool) -> None:
+        """设定某个字段的可见性，联动隐藏其 Label 标签。"""
         widget = self.widgets.get(field_name)
         if not widget:
             return
@@ -263,6 +316,9 @@ class SimpleToolWindow(QWidget):
             label.setVisible(visible)
 
     def bind_field_visibility(self, trigger_field: str, trigger_value: str, target_fields: list[str]) -> None:
+        """
+        联动逻辑绑定：当 trigger_field 下拉框的值等于 trigger_value 时，显示 target_fields 列表中的字段，否则隐藏它们。
+        """
         combo = self.widgets.get(trigger_field)
         if not isinstance(combo, QComboBox):
             self.logger.warning("bind_field_visibility expects a QComboBox for %s", trigger_field)
@@ -274,9 +330,11 @@ class SimpleToolWindow(QWidget):
                 self.set_field_visible(target, visible)
 
         combo.currentTextChanged.connect(on_changed)
+        # 初始化调用，确保初始显隐状态正确
         on_changed(combo.currentText())
 
     def _on_action_button(self) -> None:
+        """按钮文本驱动状态机。利用按钮文本的显隐控制状态转化。"""
         text = self.action_button.text()
         if text == "开始":
             self._do_start()
@@ -286,6 +344,7 @@ class SimpleToolWindow(QWidget):
             self._toggle_pause()
 
     def _do_start(self) -> None:
+        """从主线程采集参数，执行定制验证，随后启动后台子线程执行真正的业务逻辑，保证 GUI 窗口流畅响应。"""
         values = self.collect_values()
         if values is None:
             return
@@ -294,15 +353,20 @@ class SimpleToolWindow(QWidget):
         except Exception as exc:
             QMessageBox.warning(self, "参数错误", str(exc))
             return
+        
         self.log_text.clear()
         self.stop_event.clear()
         self.pause_event.clear()
+        
         self._set_state("running")
         self.logger.info("Task starting: %s", self.windowTitle())
+        
+        # 启动后台守护工作线程
         self.worker_thread = threading.Thread(target=self._run_worker, args=(values,), daemon=False)
         self.worker_thread.start()
 
     def _toggle_pause(self) -> None:
+        """切换暂停状态。通过控制 pause_event 阻塞或唤醒子线程。"""
         if self.pause_event.is_set():
             self.pause_event.clear()
             self._set_state("running")
@@ -313,12 +377,14 @@ class SimpleToolWindow(QWidget):
             self.append_log("已暂停，点击「继续」恢复运行。")
 
     def stop(self) -> None:
+        """发出停止事件。在子线程循环内部会检查 stop_event 决定是否快速终止退出。"""
         self.stop_event.set()
-        self.pause_event.clear()
+        self.pause_event.clear()  # 防止因处于暂停导致线程死锁无法退出
         self.logger.info("Stop requested: %s", self.windowTitle())
         self.append_log("正在停止，请稍候...")
 
     def _text_to_tempfile(self, text: str, prefix: str = "input") -> str:
+        """工具方法：将大输入框中粘贴的内容临时保存为 txt 文本，以便后续流式读取。"""
         from src.core import build_output_path
 
         path = build_output_path("temp", f"{prefix}_{time.strftime('%Y%m%d_%H%M%S')}.txt")
@@ -327,12 +393,15 @@ class SimpleToolWindow(QWidget):
         return path
 
     def validate_values(self, values: dict[str, Any]) -> None:
+        """子类窗口重写该方法，用于在执行任务前对输入合法性进行二次拦截校验（如判断文件是否存在、数值限制）。"""
         return None
 
     def tool_config_params(self) -> list[Any]:
+        """子类窗口提供配置方案的字段定义列表（如延迟、次数限制等底层策略值）。"""
         return []
 
     def _load_persisted_config(self) -> None:
+        """自动从磁盘上加载配置参数值。"""
         from src.core.config_store import load_config
 
         defaults = {p.key: p.default for p in self.tool_config_params()}
@@ -340,6 +409,7 @@ class SimpleToolWindow(QWidget):
             self.config_values = load_config(self.tool_id, defaults, self.current_profile)
 
     def _open_config(self) -> None:
+        """打开方案及配置参数弹窗，保存用户新调整的参数到配置类并落盘。"""
         from src.ui.config_dialog import ConfigDialog
         from src.core.config_store import save_config
 
@@ -359,10 +429,15 @@ class SimpleToolWindow(QWidget):
                 save_config(self.tool_id, self.config_values, defaults, self.current_profile)
 
     def run_task(self, values: dict[str, Any], log_callback, finish_callback, stop_event, pause_event) -> Any:
+        """
+        子类窗口核心任务入口，在子线程中执行。具体业务代码实现此接口。
+        """
         raise NotImplementedError
 
     def _run_worker(self, values: dict[str, Any]) -> None:
+        """运行在子线程的包装器，处理异常捕获并通过 PyQt 信号向主线程汇报。"""
         result = {"path": None}
+        # 将参数配置值追加合并到主输入字典中
         for key, val in self.config_values.items():
             values[key] = val
 
@@ -383,10 +458,12 @@ class SimpleToolWindow(QWidget):
             self.signals.failed.emit(str(exc))
 
     def append_log(self, message: str) -> None:
+        """主线程槽：向日志界面追加一行最新消息，并强制滚动条下移到底部。"""
         self.log_text.append(str(message))
         self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
 
     def _set_state(self, state: str) -> None:
+        """状态变化时，切换“开始/暂停/继续/停止”按钮的置灰可用状态。"""
         if state == "running":
             self.action_button.setText("暂停")
             self.action_button.setEnabled(True)
@@ -401,6 +478,7 @@ class SimpleToolWindow(QWidget):
             self.stop_button.setEnabled(False)
 
     def _finish_success(self, output_path) -> None:
+        """主线程槽：处理线程完美退出，恢复按钮状态并弹窗通告。"""
         self._set_state("idle")
         if self.stop_event.is_set():
             self.append_log("任务已停止。")
@@ -411,16 +489,22 @@ class SimpleToolWindow(QWidget):
             self.append_log("任务完成。")
 
     def _finish_error(self, message: str) -> None:
+        """主线程槽：处理任务崩溃，恢复按钮状态，追加日志并弹出报错详情。"""
         self._set_state("idle")
         self.append_log(f"运行失败：{message}")
         QMessageBox.critical(self, "运行失败", message)
 
     def eventFilter(self, obj, event):
+        """轮播过滤器，阻止下拉列表/数字组件响应滚轮滚动，防止操作界面发生意外滚动。"""
         if event.type() == QEvent.Wheel:
             return True
         return super().eventFilter(obj, event)
 
     def closeEvent(self, event) -> None:
+        """
+        拦截窗口关闭行为。
+        如果子线程还在运行，则弹窗挽留并触发优雅的停止和 join 机制，防止子线程变成僵尸线程在后台死锁挂起。
+        """
         if self.worker_thread and self.worker_thread.is_alive():
             reply = QMessageBox.question(
                 self,
@@ -432,10 +516,13 @@ class SimpleToolWindow(QWidget):
             if reply != QMessageBox.Yes:
                 event.ignore()
                 return
+            # 立即触发中断信号
             self.stop_event.set()
             self.pause_event.clear()
+            # 最多等待子线程退出 5.0 秒，如果 5 秒内未退出也强制断开 PyQt 关联并直接放行关闭（保护主应用生命周期）
             self.worker_thread.join(timeout=5)
             try:
+                # 注销信号关联防止内存泄漏或回调空指针错误
                 self.signals.log.disconnect()
                 self.signals.finished.disconnect()
                 self.signals.failed.disconnect()
@@ -453,3 +540,4 @@ class SimpleToolWindow(QWidget):
                 event.ignore()
                 return
         event.accept()
+
