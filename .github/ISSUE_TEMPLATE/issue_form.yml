@@ -2,6 +2,15 @@ name: 提交 Issue
 description: 反馈问题、建议功能或报告平台爬取异常
 labels: ["triage"]
 body:
+  - type: input
+    id: version
+    attributes:
+      label: 版本号
+      description: 你使用的程序版本（git commit hash、tag 或下载来源）
+      placeholder: 例如 de6f076、v1.2.0、main 分支最新
+    validations:
+      required: true
+
   - type: checkboxes
     id: preflight
     attributes:
@@ -43,14 +52,7 @@ body:
         - 浏览器及版本：
         - 运行方式（python main.py / 命令行 / IDE）：
 
-  - type: input
-    id: version
-    attributes:
-      label: 版本号
-      description: 你使用的程序版本（git commit hash、tag 或下载来源）
-      placeholder: 例如 de6f076、v1.2.0、main 分支最新
-    validations:
-      required: true
+
 
   - type: markdown
     attributes:
