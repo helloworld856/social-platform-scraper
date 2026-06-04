@@ -199,7 +199,11 @@ def extract_followers_count(page, profile_url: str, page_timeout=None, stop_even
         page_timeout = PAGE_LOAD_TIMEOUT
     try:
         page.goto(profile_url, wait_until="domcontentloaded", timeout=page_timeout)
-        interruptible_sleep(3, stop_event)
+        try:
+            page.wait_for_selector('a[href*="/followers"]', state="attached", timeout=10000)
+        except Exception:
+            pass
+        interruptible_sleep(2, stop_event)
     except Exception:
         return ""
 
