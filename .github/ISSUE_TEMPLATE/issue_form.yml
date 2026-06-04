@@ -49,6 +49,8 @@ body:
       label: 版本号
       description: 你使用的程序版本（git commit hash、tag 或下载来源）
       placeholder: 例如 de6f076、v1.2.0、main 分支最新
+    validations:
+      required: true
 
   - type: markdown
     attributes:
