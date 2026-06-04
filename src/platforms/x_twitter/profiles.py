@@ -199,11 +199,6 @@ def extract_followers_count(page, profile_url: str, page_timeout=None, stop_even
         page_timeout = PAGE_LOAD_TIMEOUT
     try:
         page.goto(profile_url, wait_until="domcontentloaded", timeout=page_timeout)
-        try:
-            page.wait_for_selector('a[href*="/followers"]', state="attached", timeout=10000)
-        except Exception:
-            pass
-        interruptible_sleep(2, stop_event)
     except Exception:
         return ""
 
@@ -212,18 +207,29 @@ def extract_followers_count(page, profile_url: str, page_timeout=None, stop_even
         'a[href*="/followers"]',
         'a[href*="/verified_followers"]',
     ]
-    for selector in selectors:
-        try:
-            for node in page.locator(selector).all():
-                text = node.inner_text(timeout=1500).strip()
-                aria = node.get_attribute("aria-label", timeout=1500) or ""
-                raw = text or aria
-                if raw and re.search(r"follower|粉丝|フォロワー|followers", raw, re.IGNORECASE):
-                    match = re.search(r"([\d,.]+(?:\.\d+)?\s*(?:[KkMmBb]|千|万|萬|亿|億)?)", raw)
-                    if match:
-                        return expand_compact_number(match.group(1).strip())
-        except Exception:
-            continue
+
+    start_time = time.time()
+    max_poll_time = 15  # 最多轮询15秒等待网络数据返回
+    
+    while time.time() - start_time < max_poll_time:
+        if stop_event and stop_event.is_set():
+            break
+            
+        for selector in selectors:
+            try:
+                for node in page.locator(selector).all():
+                    text = node.inner_text(timeout=500).strip()
+                    aria = node.get_attribute("aria-label", timeout=500) or ""
+                    raw = text or aria
+                    if raw and re.search(r"follower|粉丝|フォロワー|followers", raw, re.IGNORECASE):
+                        match = re.search(r"([\d,.]+(?:\.\d+)?\s*(?:[KkMmBb]|千|万|萬|亿|億)?)", raw)
+                        if match:
+                            return expand_compact_number(match.group(1).strip())
+            except Exception:
+                continue
+                
+        interruptible_sleep(1.0, stop_event)
+
     return ""
 
 def extract_tweet_author_record(tweet_page, profile_page, tweet_url: str, log_callback, page_timeout=None, tweet_ready_timeout=None, stop_event=None) -> dict | None:
