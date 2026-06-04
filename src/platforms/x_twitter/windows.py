@@ -102,6 +102,8 @@ class XProfilesWindow(SimpleToolWindow):
         return [
             ConfigParam("page_load_timeout", "页面加载超时(毫秒)", kind="int", default=45000, minimum=10000, maximum=120000, step=1000),
             ConfigParam("tweet_ready_timeout", "推文渲染等待(毫秒)", kind="int", default=12000, minimum=3000, maximum=60000, step=1000),
+            ConfigParam("cooldown_min", "每个主页冷却等待最小(秒)", kind="float", default=2.0, minimum=0.0, maximum=30.0, step=0.5, decimals=1),
+            ConfigParam("cooldown_max", "每个主页冷却等待最大(秒)", kind="float", default=5.0, minimum=0.0, maximum=30.0, step=0.5, decimals=1),
         ]
 
     def __init__(self) -> None:
@@ -122,7 +124,7 @@ class XProfilesWindow(SimpleToolWindow):
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
         from src.platforms.x_twitter.profiles import run_scraper
 
-        config = {k: v for k, v in values.items() if k in ("page_load_timeout", "tweet_ready_timeout")}
+        config = {k: v for k, v in values.items() if k in ("page_load_timeout", "tweet_ready_timeout", "cooldown_min", "cooldown_max")}
         return run_scraper(
             self._text_to_tempfile(values["txt_path"]),
             values["input_mode"],
