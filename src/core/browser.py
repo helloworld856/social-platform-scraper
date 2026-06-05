@@ -26,21 +26,22 @@ DEFAULT_CHROME_PATHS = (
 )
 
 # 保存自动拉起的 Chrome 子进程实例，以便在退出时进行清理
-_chrome_process: subprocess.Popen | None = None
+_chrome_processes: list[subprocess.Popen] = []
 
 
 def _cleanup_chrome():
     """
     进程退出时的清理勾子，确保自动启动的 Chrome 进程被正确终止，避免后台残留。
     """
-    global _chrome_process
-    if _chrome_process is not None and _chrome_process.poll() is None:
-        _chrome_process.terminate()
-        try:
-            _chrome_process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            _chrome_process.kill()
-        _chrome_process = None
+    global _chrome_processes
+    for p in _chrome_processes:
+        if p.poll() is None:
+            p.terminate()
+            try:
+                p.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                p.kill()
+    _chrome_processes.clear()
 
 
 # 注册 Python 退出钩子
@@ -167,11 +168,11 @@ def launch_chrome_for_cdp(port_or_url: str | int) -> subprocess.Popen:
     Returns:
         subprocess.Popen: 启动的子进程实例
     """
-    global _chrome_process
+    global _chrome_processes
     chrome_path = find_chrome_executable()
     port = debug_port_from_cdp_url(port_or_url)
     user_data_dir = get_chrome_user_data_dir()
-    _chrome_process = subprocess.Popen(
+    p = subprocess.Popen(
         [
             chrome_path,
             f"--remote-debugging-port={port}",
@@ -186,7 +187,8 @@ def launch_chrome_for_cdp(port_or_url: str | int) -> subprocess.Popen:
         # CREATE_NO_WINDOW 避免在 Windows GUI 界面下弹出黑色控制台闪窗
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
-    return _chrome_process
+    _chrome_processes.append(p)
+    return p
 
 
 def ensure_chrome_for_cdp(port_or_url: str | int, log_callback=None, wait_seconds: float = 12.0) -> None:
