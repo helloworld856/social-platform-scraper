@@ -1,57 +1,509 @@
-# 项目贡献规范 (Contributing Guidelines)
+# 贡献指南
 
-感谢你对本项目的关注并愿意贡献代码！为了保证代码库的质量与一致性，请在提交代码前仔细阅读以下规范。
+本文档覆盖从提 Issue 到合并 PR 的完整协作流程，并包含项目的编码规范。
 
-## 1. 分支管理与 PR 提交
+---
 
-- 请从 `main` 分支拉取最新的代码，并基于最新代码创建独立的 feature 或是 bugfix 分支。
-- **需求与 Issue 拆解**：在着手解决 Issue 时，需先针对 Issue 描述进行合理的任务拆解。在创建 PR 时，必须基于拆解出的清单，明确标示本次 PR 已经修复/实现的部分，以及哪些细分子项尚未修复（或留待后续 PR 解决）。
-- 提交 PR (Pull Request) 时，请务必使用项目内置的 Pull Request 模板，详细填写变更说明、关联 Issue 以及测试情况。
-- 提交信息 (Commit Message) 需保持清晰客观，建议使用规范的格式 `<type>: <description>`。如果是修复或逻辑变更，建议注明「原逻辑」和「新逻辑」。
+## 目录
 
-## 2. 代码风格与规范
+- [1. 环境搭建](#1-环境搭建)
+- [2. 提 Issue](#2-提-issue)
+- [3. Issue 拆解](#3-issue-拆解)
+- [4. 认领任务](#4-认领任务)
+- [5. 创建分支](#5-创建分支)
+- [6. 本地开发](#6-本地开发)
+- [7. 本地验证](#7-本地验证)
+- [8. Commit 规范](#8-commit-规范)
+- [9. 提交 PR](#9-提交-pr)
+- [10. Code Review](#10-code-review)
+- [11. 合并](#11-合并)
+- [附录 A：编码规范](#附录-a编码规范)
+- [附录 B：架构约定](#附录-b架构约定)
+- [快速参考卡片](#快速参考卡片)
 
-本项目主要使用 Python 语言开发，强制使用 `ruff` 进行静态代码分析。
+---
 
-- **静态检查**：提交前必须在项目根目录运行 `ruff check .` 并确保所有检查通过。
-- **注释与文档**：
-  - 核心逻辑、复杂的正则表达式、多线程通信机制等，**必须**配备清晰的中文注释说明。
-  - 所有核心模块的函数与类，必须包含中文 Docstring 说明其用途。
-- **命名规范**：遵循 Python 的 PEP 8 规范，变量与函数名必须使用能够清晰表达意图的英文，严禁使用拼音或无意义缩写。
+## 1. 环境搭建
 
-## 3. 爬虫核心 API 使用原则
+```bash
+# 克隆仓库
+git clone https://github.com/helloworld856/social-platform-scraper.git
+cd social-platform-scraper
 
-在新增或修改 `src/platforms/` 下的爬虫脚本时，必须使用 `src.core` 中提供的核心组件：
+# 创建虚拟环境（推荐）
+python -m venv venv
+venv\Scripts\activate       # Windows
+# source venv/bin/activate  # macOS / Linux
 
-- **任务状态控制 (必须)**：
-  - 在循环或耗时操作中，**必须**使用 `should_stop(stop_event)` 定期检查用户是否请求了终止任务。
-  - 在每一次核心操作（如翻页、提取元素）前，建议使用 `wait_if_paused(pause_event, stop_event)` 来响应用户界面的“暂停/恢复”操作。
-- **延时与防风控**：
-  - **严禁**使用原生的 `time.sleep`（会导致多线程阻塞且无法响应终止指令）。必须使用 `interruptible_sleep(duration, stop_event)`。
-  - 在请求间隙请使用 `random_cooldown(log_callback, stop_event, min_sec, max_sec)` 来模拟人类随机停顿。
-- **文件保存**：
-  - 采集结果或其他本地文件的路径构建，**必须**统一调用 `build_output_path(platform, filename)`，禁止硬编码绝对路径。
-- **敏感信息**：
-  - 绝对禁止在代码库中硬编码账户密码、Cookie、Token 或任何个人隐私信息。
+# 安装依赖
+pip install -r requirements.txt
+python -m playwright install chromium
 
-## 4. 工具注册规范
+# 验证启动
+python main.py
+```
 
-当新增一款数据采集工具时：
-- 必须在该平台目录下（如 `src/platforms/tiktok/`）为新脚本创建配套的 `*.manifest.json` 文件。
-- 该 JSON 文件应包含工具的 `id`、`name`、`description` 及其所需的输入 `config` 定义，以保证程序启动时主界面 UI 能自动生成对应表单。
+AIGC 功能需要额外配置 `.env`：
 
-## 5. 本地测试标准
+```env
+DEEPSEEK_API_KEY=你的API Key
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL_NAME=deepseek-chat
+```
 
-发起 PR 前，请自行在本地完成以下验证工作：
+---
 
-1. **语法规范检测**：
-   ```bash
-   ruff check .
-   ```
-2. **单元测试与 UI 测试**：
-   ```bash
-   python test/test_visibility.py
-   pytest
-   ```
-3. **冒烟测试**：
-   在带界面的模式下手动运行 `python main.py`，选中你修改的工具，完成一次基础工作流，确保日志输出正常，并且能够成功生成最终数据表文件。
+## 2. 提 Issue
+
+所有工作从 Issue 开始。无论是 bug、功能建议还是平台爬取问题，都通过统一的 Issue 模板提交。
+
+### 操作步骤
+
+1. 打开 [Issues 页面](https://github.com/helloworld856/social-platform-scraper/issues)
+2. 点击 **New Issue** → 选择 **「提交 Issue」**
+3. 按模板填写（见下方说明）
+4. 提交后等待维护者拆解和打标签
+
+### 表单填写要点
+
+| 字段 | 说明 |
+|------|------|
+| **提交前确认** | 三项 checkbox **必须全部勾选**才能提交 |
+| **版本号** | 你使用的 git commit hash / tag / 分支名称 |
+| **一句话概括** | 用一到两句话说清楚问题或建议 |
+| **涉及工具** | 例如 `youtube_keyword_mining`；功能建议可不填 |
+| **运行环境** | OS、Python 版本、浏览器版本、运行方式 |
+| 🐛 问题反馈区 | 复现步骤、输入内容 |
+| ✨ 功能建议区 | 使用场景、期望行为、替代方案 |
+| 🌐 平台爬取区 | 涉及平台、目标链接、登录状态、账号类型、参数配置 |
+| 📎 日志与截图 | 报错日志、截图、补充信息 |
+
+> 不需要填写所有区域——根据你选的类型填写对应区域即可。
+
+### 标题建议
+
+- Bug：直接描述现象 — 「YouTube 关键词搜索输入 50 个关键词后闪退」
+- Feature：描述期望 — 「希望 TikTok 评论支持按点赞数排序导出」
+- 平台问题：标注平台 — 「X/Twitter 帖子采集无法获取浏览量」
+
+---
+
+## 3. Issue 拆解
+
+> 这一步通常由**维护者**执行。如果你是来认领任务的贡献者，请跳到第 4 节。
+
+维护者收到 Issue 后，在评论区将问题拆解为可独立交付的开发项。
+
+### 拆解原则
+
+- 一个 Issue 尽量对应一条干净的 commit。涉及多个独立改动时，拆分为多个子 Issue。
+- 用 **checklist** 列出所有子项，让认领者清楚工作边界。
+
+### 拆解示例
+
+**Issue**：「YouTube 关键词搜索在输入 50 个关键词后程序闪退」
+
+**评论区回复**：
+
+```markdown
+## 需求拆解
+
+- [ ] 1. 排查崩溃根因：检查 `keyword_search.py` 中关键词循环是否有未捕获异常
+- [ ] 2. 修复根因，确保 50+ 关键词稳定运行
+- [ ] 3. 添加批量输入保护：单次关键词超过合理数量时给出警告但不阻断
+```
+
+### 标签参考
+
+| 标签 | 用途 |
+|------|------|
+| `bug` | 确认为程序缺陷 |
+| `enhancement` | 功能建议或改进 |
+| `platform` | 特定平台的爬取/风控问题 |
+| `good first issue` | 适合新贡献者入门 |
+| `help wanted` | 需要社区协助 |
+| `wontfix` | 不予修复，说明原因后关闭 |
+
+---
+
+## 4. 认领任务
+
+在 Issue 评论区留言表明意愿，维护者会将 Issue 指派（assign）给你。
+
+> 认领前先确认 Issue 的拆解清单已经明确，且没有被其他人认领。
+
+---
+
+## 5. 创建分支
+
+```bash
+git checkout main
+git pull origin main
+git checkout -b <分支名>
+```
+
+**分支命名规范**（小写英文 + 连字符）：
+
+```
+feat/<描述>       # 新功能    feat/tiktok-comment-sort
+fix/<描述>        # Bug 修复   fix/youtube-crash-50-keywords
+docs/<描述>       # 文档      docs/add-contributing-guide
+refactor/<描述>   # 重构      refactor/extract-cdp-connection
+```
+
+---
+
+## 6. 本地开发
+
+### 必须遵守的规则
+
+开发前请通读[附录 A：编码规范](#附录-a编码规范)。以下是**硬性要求**，违反会导致 PR 被要求修改：
+
+| 规则 | 说明 |
+|------|------|
+| ✅ 中文注释 | 核心逻辑、复杂正则、多线程通信必须有中文注释 |
+| ✅ 中文 Docstring | 所有核心模块的函数和类必须有中文 Docstring |
+| ✅ `should_stop` | 每个采集循环迭代开头检查用户是否请求停止 |
+| ✅ `wait_if_paused` | 每次核心操作前检查暂停状态 |
+| ✅ `interruptible_sleep` | 用可中断等待代替 `time.sleep` |
+| ✅ `random_cooldown` | 请求间隙用随机冷却模拟人类行为 |
+| ✅ `build_output_path` | 输出路径统一用此函数构建 |
+| ✅ manifest.json | 新增工具必须创建配套 manifest 文件 |
+| ❌ 禁止 `time.sleep` | 会阻塞停止/暂停信号 |
+| ❌ 禁止硬编码密钥 | API Key、密码、Cookie、Token 等绝不写入代码 |
+| ❌ 禁止拼音命名 | 变量/函数名必须用表意清晰的英文 |
+
+### 新工具注册
+
+新增采集工具需要三个文件：
+
+1. **实现文件** — `src/platforms/<平台>/<工具名>.py`，包含爬虫逻辑
+2. **窗口类** — 在对应平台的 `windows.py` 中注册 UI 类
+3. **Manifest** — `src/platforms/<平台>/<工具名>.manifest.json`：
+
+```json
+{
+  "tool_id": "youtube_keyword_mining",
+  "name": "YouTube 关键词搜索",
+  "category": "YouTube",
+  "summary": "按关键词和日期范围搜索...",
+  "entrypoint": "src.platforms.youtube.windows.YouTubeKeywordWindow",
+  "implementation_path": "platforms/youtube/keyword.py",
+  "tags": ["YouTube", "search", "keyword"]
+}
+```
+
+---
+
+## 7. 本地验证
+
+提交前必须全部通过：
+
+```bash
+# 1. 静态检查（必须零 error）
+ruff check .
+
+# 2. 自动化测试
+python test/test_visibility.py
+python -m pytest test/test_pause_state_machine.py -v
+
+# 3. 冒烟测试 —— 启动 GUI 手动跑一遍你的工具
+python main.py
+```
+
+冒烟测试检查项：
+
+- [ ] 工具窗口能正常打开，字段可见
+- [ ] 参数配置对话框能正常修改和保存
+- [ ] 启动 → 采集 → 输出 xlsx，全流程无报错
+- [ ] 暂停 / 继续按钮功能正常
+- [ ] 停止按钮能及时终止任务
+- [ ] 输出文件字段完整，序号连续
+- [ ] 异常输入（空输入、格式错误）不会崩溃
+
+---
+
+## 8. Commit 规范
+
+```bash
+git add <文件>
+git commit -m "<type>: <简短描述>"
+```
+
+### 格式
+
+```
+<type>: <中文简述>
+
+原逻辑：<改之前的行为>
+新逻辑：<改之后的行为>
+```
+
+如果改动不是修复/重构，正文可省略。Commit 类型：
+
+| 类型 | 用途 |
+|------|------|
+| `feat` | 新功能 |
+| `fix` | Bug 修复 |
+| `docs` | 文档更新 |
+| `refactor` | 重构（不改变功能） |
+| `chore` | 构建、CI、依赖等杂务 |
+
+### 示例
+
+```
+feat: 添加 TikTok 评论按点赞数排序导出
+
+原逻辑：评论按抓取顺序导出，不排序。
+新逻辑：增加 sort_by_likes 参数，开启后按点赞数降序排列，默认关闭保持兼容。
+```
+
+```
+fix: 修复 YouTube 关键词搜索超过 50 个时崩溃
+
+原逻辑：search_all_keywords 中未捕获单关键词失败，Queue.get 超时后直接 raise。
+新逻辑：单关键词异常时 log 错误并 continue，Queue.get 加 try/except 兜底。
+```
+
+---
+
+## 9. 提交 PR
+
+### 操作
+
+```bash
+git push origin <分支名>
+```
+
+在 GitHub 上点击 **Compare & pull request**，确认 base 为 `main`，按 PR 模板填写。
+
+### PR 模板各项说明
+
+| 区域 | 要求 |
+|------|------|
+| **变更说明** | 简述这个 PR 做了什么、为什么要做 |
+| **关联 Issue 与需求拆解** | 用 `Closes #12` 链接 Issue；列出「已修复/实现」和「未修复/计划后续」的拆解项 |
+| **测试** | 勾选 lint、自动化测试、手动测试（注明平台和工具） |
+| **检查清单** | 全部勾选后才请求 review |
+| **截图** | UI 改动附前后对比，非 UI 改动可省略 |
+| **注意事项** | 破坏性变更、迁移步骤等 reviewer 需要注意的点 |
+
+### PR 标题
+
+保持与 Issue 的关联：
+
+```
+fix: 修复 YouTube 关键词搜索崩溃 (fixes #12)
+feat: TikTok 评论按点赞数排序导出 (closes #34)
+```
+
+---
+
+## 10. Code Review
+
+### 提交者侧
+
+1. PR 创建后，在右侧 **Reviewers** 添加维护者
+2. 收到 review 意见后，在本地修改 → `git push`，PR 自动更新
+3. **逐条回复每个 comment**：已修改的说明修改方式，不修改的说明理由
+4. 所有 conversation 解决后，请求重新 review
+
+### 审查者侧
+
+审查时关注以下维度：
+
+| 维度 | 检查点 |
+|------|--------|
+| **正确性** | 逻辑是否正确？边界条件（空输入、网络超时、风控拦截）是否处理？ |
+| **安全性** | 是否有密钥泄露？输入是否有注入风险？ |
+| **协作机制** | 循环中是否调用 `should_stop` / `wait_if_paused`？是否用 `interruptible_sleep` 代替 `time.sleep`？ |
+| **一致性** | 命名、注释密度、代码风格是否与项目一致？是否用 `build_output_path` 构建路径？ |
+| **可维护性** | 核心逻辑是否有中文注释？新增工具是否创建 manifest.json？ |
+| **变更范围** | 是否存在不相关的格式化改动？diff 是否聚焦？ |
+
+审查通过后点击 **Approve**。
+
+---
+
+## 11. 合并
+
+合并条件：
+
+- [ ] 所有 CI 检查通过（ruff + test_visibility）
+- [ ] 至少一位维护者 Approve
+- [ ] 所有 review conversation 已解决
+
+合并方式：**Squash and merge**，将分支上的多个 commit 压缩为一条干净的 commit。
+
+合并后删除远程分支（GitHub 会自动提示）。
+
+合并 commit 格式参考：
+
+```
+feat: TikTok 评论按点赞数排序导出 (#34)
+
+- 增加 sort_by_likes 配置项，默认关闭保持兼容
+- 按点赞数降序排列输出行
+- 更新参数配置对话框增加对应开关
+```
+
+---
+
+## 附录 A：编码规范
+
+### 通用规范
+
+- **语言**：Python 3.10+
+- **Lint**：`ruff`，配置在 `pyproject.toml`
+  - `line-length = 150`
+  - 忽略 `E402`（模块级导入不在文件顶）、`F841`（未使用的局部变量）
+- **命名**：遵循 PEP 8，变量和函数名用表意清晰的英文，**禁止拼音或无意义缩写**
+- **注释**：
+  - 核心逻辑、复杂正则、多线程通信机制 → **必须**有清晰中文注释
+  - 所有核心模块的函数和类 → **必须**有中文 Docstring
+- **Commit**：格式 `<type>: <中文简述>`，修复类建议注明「原逻辑」和「新逻辑」
+
+### 爬虫核心 API
+
+在 `src/platforms/` 下新增或修改爬虫脚本时，必须使用 `src.core` 中的公共组件：
+
+```python
+from src.core.timing import should_stop, wait_if_paused, interruptible_sleep, random_cooldown
+from src.core.output import build_output_path
+```
+
+**任务状态控制（必须）**：
+
+```python
+def run_task(values, log_callback, finish_callback, stop_event, pause_event=None):
+    for item in items:
+        # 每个循环迭代开头检查停止信号
+        if should_stop(stop_event):
+            break
+
+        # 每次核心操作前检查暂停状态
+        wait_if_paused(pause_event, stop_event)
+
+        # 采集逻辑 ...
+
+        # 可中断等待（代替 time.sleep）
+        interruptible_sleep(2.0, stop_event, pause_event)
+
+        # 随机冷却（模拟人类行为，防止风控）
+        random_cooldown(3.0, 8.0, stop_event, pause_event)
+```
+
+- **严禁** `time.sleep` — 会阻塞线程导致无法响应停止/暂停
+- **必须** 使用 `interruptible_sleep(duration, stop_event)` 做可中断延时
+- **建议** 使用 `random_cooldown(min_sec, max_sec, stop_event, pause_event)` 在请求间隙模拟随机停顿
+
+**输出路径（必须）**：
+
+```python
+path = build_output_path("youtube", "keyword_search_20260604.xlsx")
+# → output/youtube/keyword_search_20260604.xlsx
+```
+
+禁止硬编码绝对路径或手动拼接路径。
+
+**敏感信息（绝对禁止）**：
+
+- 不得在代码中硬编码 API Key、密码、Cookie、Token
+- `.env` 文件不得提交到仓库（已在 `.gitignore` 中）
+
+### 输入文件规范
+
+```
+# 注释行，会跳过
+# 空行也会跳过
+
+https://www.youtube.com/@example1
+https://www.youtube.com/@example2
+```
+
+- 每行一条记录
+- `#` 开头 → 注释，跳过
+- 空行 → 跳过
+- 多字段 → 空格或制表符分隔
+
+---
+
+## 附录 B：架构约定
+
+### 工具窗口结构
+
+每个工具是一个 `SimpleToolWindow` 子类：
+
+```python
+class YouTubeKeywordWindow(SimpleToolWindow):
+    tool_id = "youtube_keyword_mining"
+
+    def field_specs(self):
+        return [
+            FieldSpec("api_key", "Google API Key", "text"),
+            FieldSpec("keywords_file", "关键词文件", "text_or_file"),
+            # ...
+        ]
+
+    def run_task(self, values, log_callback, finish_callback, stop_event, pause_event=None):
+        # values: 来自 UI 字段 + 参数配置的合并字典
+        config = {k: v for k, v in values.items() if k in RELEVANT_CONFIG_KEYS}
+        run_keyword_spider(values, config, log_callback, finish_callback, stop_event, pause_event)
+```
+
+### 配置系统
+
+```python
+def tool_config_params(self):
+    return [
+        ConfigParam("max_videos_per_keyword", "每个关键词最多视频数", "int", default=5000),
+        ConfigParam("scroll_interval", "滚动间隔(秒)", "range_float", default=(1.0, 3.0)),
+        # range_int/range_float 生成 {key}_min 和 {key}_max
+    ]
+```
+
+- `ConfigParam` 定义的参数自动渲染为配置对话框表单
+- 用户修改后自动持久化到 `self.config_values`
+- `_run_worker` 自动将 `config_values` 合并到 `values` 再传给 `run_task`
+
+### 线程模型
+
+- `run_task` 在 `threading.Thread`（非 daemon）中执行
+- UI 更新通过 `WorkerSignals` 的 pyqtSignal 实现线程安全
+- 采集循环通过 `stop_event` / `pause_event` 与 UI 按钮协作
+
+---
+
+## 快速参考卡片
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 完整流程
+
+ 提 Issue → 拆解 → 认领 → 切分支 → 开发 → 验证 → 提 PR → Review → 合并
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ 分支：feat/xxx   fix/xxx   docs/xxx   refactor/xxx
+ Commit：feat: 中文简述
+ PR 标题：fix: 中文简述 (fixes #12)
+ 合并：Squash and merge
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 提交前必过
+
+ ruff check .           ← 零 error
+ python test/test_visibility.py
+ pytest -v
+ python main.py         ← 冒烟测试
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ 爬虫铁律
+
+ ❌ 禁用 time.sleep
+ ❌ 禁用硬编码密钥
+ ✅ 用 should_stop / wait_if_paused
+ ✅ 用 interruptible_sleep / random_cooldown
+ ✅ 用 build_output_path
+ ✅ 写中文注释
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
