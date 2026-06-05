@@ -49,16 +49,13 @@ class TikTokKeywordWindow(SimpleToolWindow):
                         tooltip="待爬评论链接的缓冲上限。满了则暂停采集新视频。"),
             ConfigParam("max_videos", "最多搜索结果数", kind="int", default=1000, minimum=1, maximum=5000),
             ConfigParam("max_candidates", "最多检查数", kind="int", default=3000, minimum=1, maximum=20000),
-            ConfigParam("scroll_interval", "搜索滚动间隔(秒)", kind="float", default=0.7, minimum=0.1, maximum=5.0, step=0.1, decimals=1),
             ConfigParam("max_search_scrolls", "最大滚动次数", kind="int", default=360, minimum=30, maximum=2000, step=10),
-            ConfigParam("no_new_scroll_limit", "无新内容停止阈值", kind="int", default=12, minimum=3, maximum=50),
-            ConfigParam("comment_top_limit", "最多输出评论数", kind="int", default=100, minimum=1, maximum=500),
         ]
 
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
         from src.platforms.tiktok.keyword import run_tiktok_spider
 
-        config = {k: v for k, v in values.items() if k.startswith("tiktok_") or k in ("max_videos", "max_candidates", "scroll_interval", "max_search_scrolls", "no_new_scroll_limit", "comment_top_limit", "max_parallel_tabs", "max_comment_tabs", "max_queue_size")}
+        config = {k: v for k, v in values.items() if k.startswith("tiktok_") or k in ("max_videos", "max_candidates", "scroll_interval", "max_search_scrolls", "no_new_scroll_limit", "comment_top_limit", "max_parallel_tabs", "max_comment_tabs", "max_queue_size", "cooldown_min", "cooldown_max")}
         return run_tiktok_spider(
             _lines(values["keywords"]),
             int(values.get("max_videos", 1000)),
@@ -88,14 +85,14 @@ class TikTokProfilesWindow(SimpleToolWindow):
 
     def tool_config_params(self):
         return [
-            ConfigParam("page_load_timeout", "页面加载超时(毫秒)", kind="int", default=35000, minimum=10000, maximum=120000, step=1000),
             ConfigParam("captcha_wait", "验证码等待时间(秒)", kind="int", default=12, minimum=5, maximum=120),
+            ConfigParam("cooldown_every", "冷却间隔(个)", kind="int", default=5, minimum=1, maximum=50),
         ]
 
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
         from src.platforms.tiktok.profiles import run_tiktok_profile_spider
 
-        config = {k: v for k, v in values.items() if k in ("page_load_timeout", "captcha_wait")}
+        config = {k: v for k, v in values.items() if k in ("page_load_timeout", "captcha_wait", "cooldown_every", "cooldown_min", "cooldown_max")}
         return run_tiktok_profile_spider(self._text_to_tempfile(values["txt_path"]), DEFAULT_TIKTOK_CDP_URL, log_callback, finish_callback, stop_event, pause_event=pause_event, config=config)
 
 
@@ -127,20 +124,16 @@ class TikTokProfileVideosWindow(SimpleToolWindow):
 
     def tool_config_params(self):
         return [
-            ConfigParam("page_load_timeout", "页面加载超时(毫秒)", kind="int", default=45000, minimum=10000, maximum=120000, step=1000),
-            ConfigParam("scroll_interval", "滚动间隔(秒)", kind="float", default=2.5, minimum=0.5, maximum=10.0, step=0.1, decimals=1),
-            ConfigParam("no_new_scroll_limit", "无新内容停止阈值", kind="int", default=10, minimum=2, maximum=50),
-            ConfigParam("max_scrolls", "最大滚动次数", kind="int", default=200, minimum=1, maximum=999999),
             ConfigParam("link_batch_size", "每批处理视频数", kind="int", default=50, minimum=5, maximum=200),
-            ConfigParam("save_batch_size", "每批保存条数", kind="int", default=10, minimum=1, maximum=100),
-            ConfigParam("cooldown_min", "冷却等待最小(秒)", kind="float", default=10.0, minimum=0.0, maximum=60.0, step=1.0, decimals=1),
-            ConfigParam("cooldown_max", "冷却等待最大(秒)", kind="float", default=20.0, minimum=0.0, maximum=120.0, step=1.0, decimals=1),
+            ConfigParam("detail_load_timeout", "详情页加载超时(毫秒)", kind="int", default=30000, minimum=10000, maximum=120000, step=1000),
+            ConfigParam("detail_delay_min", "详情页间隔最小(秒)", kind="float", default=2.0, minimum=0.0, maximum=30.0, step=0.5, decimals=1),
+            ConfigParam("detail_delay_max", "详情页间隔最大(秒)", kind="float", default=5.0, minimum=0.0, maximum=60.0, step=0.5, decimals=1),
         ]
 
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
         from src.platforms.tiktok.profile_videos import run_tiktok_profile_videos_spider
 
-        config = {k: v for k, v in values.items() if k in ("page_load_timeout", "scroll_interval", "no_new_scroll_limit", "max_scrolls", "link_batch_size", "save_batch_size", "cooldown_min", "cooldown_max")}
+        config = {k: v for k, v in values.items() if k in ("page_load_timeout", "scroll_interval", "no_new_scroll_limit", "max_scrolls", "link_batch_size", "save_batch_size", "cooldown_min", "cooldown_max", "detail_load_timeout", "detail_delay_min", "detail_delay_max", "scroll_px")}
         return run_tiktok_profile_videos_spider(
             self._text_to_tempfile(values["txt_path"]),
             values["start_date"],
@@ -172,12 +165,7 @@ class TikTokProfilePlayCountsWindow(SimpleToolWindow):
         )
 
     def tool_config_params(self):
-        return [
-            ConfigParam("page_load_timeout", "页面加载超时(毫秒)", kind="int", default=45000, minimum=10000, maximum=120000, step=1000),
-            ConfigParam("scroll_interval", "滚动间隔(秒)", kind="float", default=2.5, minimum=0.5, maximum=10.0, step=0.1, decimals=1),
-            ConfigParam("no_new_scroll_limit", "无新内容停止阈值", kind="int", default=10, minimum=2, maximum=50),
-            ConfigParam("max_scrolls", "最大滚动次数", kind="int", default=200, minimum=1, maximum=999999),
-        ]
+        return []
 
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
         from src.platforms.tiktok.profile_play_counts import run_tiktok_profile_play_counts_spider
@@ -210,7 +198,6 @@ class TikTokContextWindow(SimpleToolWindow):
             ConfigParam("api_page_size", "每页条数", kind="int", default=35, minimum=10, maximum=100),
             ConfigParam("max_api_pages", "最多翻页数", kind="int", default=10, minimum=1, maximum=100),
             ConfigParam("max_profile_scrolls", "主页最大滚动次数", kind="int", default=80, minimum=10, maximum=500),
-            ConfigParam("scroll_interval", "主页滚动间隔(秒)", kind="float", default=0.8, minimum=0.1, maximum=5.0, step=0.1, decimals=1),
         ]
 
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
@@ -234,16 +221,17 @@ class TikTokCommentsWindow(SimpleToolWindow):
 
     def tool_config_params(self):
         return [
-            ConfigParam("comment_top_limit", "最多输出评论数", kind="int", default=100, minimum=1, maximum=500),
-            ConfigParam("page_load_timeout", "页面加载超时(毫秒)", kind="int", default=45000, minimum=10000, maximum=120000, step=1000),
-            ConfigParam("scroll_interval", "评论滚动间隔(秒)", kind="float", default=1.4, minimum=0.1, maximum=5.0, step=0.1, decimals=1),
             ConfigParam("max_scroll_rounds", "最大滚动次数", kind="int", default=80, minimum=5, maximum=500),
+            ConfigParam("comment_wait_timeout", "评论等待超时(毫秒)", kind="int", default=12000, minimum=5000, maximum=60000, step=1000),
+            ConfigParam("video_batch_cooldown_every", "视频批量冷却间隔(个)", kind="int", default=3, minimum=1, maximum=50),
+            ConfigParam("video_batch_cooldown_min", "视频批量冷却最小(秒)", kind="float", default=4.0, minimum=0.0, maximum=60.0, step=0.5, decimals=1),
+            ConfigParam("video_batch_cooldown_max", "视频批量冷却最大(秒)", kind="float", default=9.0, minimum=0.0, maximum=120.0, step=0.5, decimals=1),
         ]
 
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
         from src.platforms.tiktok.comments import run_tiktok_top_comments_spider
 
-        config = {k: v for k, v in values.items() if k.startswith("tiktok_") or k in ("page_load_timeout", "scroll_interval", "max_scroll_rounds", "comment_top_limit")}
+        config = {k: v for k, v in values.items() if k.startswith("tiktok_") or k in ("page_load_timeout", "scroll_interval", "max_scroll_rounds", "comment_top_limit", "comment_wait_timeout", "no_new_scroll_limit", "video_batch_cooldown_every", "video_batch_cooldown_min", "video_batch_cooldown_max")}
         return run_tiktok_top_comments_spider(
             self._text_to_tempfile(values["txt_path"]),
             DEFAULT_TIKTOK_CDP_URL,

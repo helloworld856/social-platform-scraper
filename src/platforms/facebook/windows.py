@@ -41,10 +41,6 @@ class FacebookProfileWorksWindow(SimpleToolWindow):
             ConfigParam("max_scrolls", "最大滚动次数", kind="int", default=200, minimum=1, maximum=999999),
             ConfigParam("page_load_timeout", "页面加载超时(毫秒)", kind="int", default=60000, minimum=10000, maximum=120000, step=1000),
             ConfigParam("scroll_delay", "滚动延迟(毫秒)", kind="int", default=2000, minimum=500, maximum=10000, step=100),
-            ConfigParam("no_new_scroll_limit", "无新内容停止阈值", kind="int", default=5, minimum=2, maximum=50),
-            ConfigParam("scroll_px", "每次滚动像素", kind="int", default=800, minimum=100, maximum=5000, step=100),
-            ConfigParam("save_batch_size", "每批保存条数", kind="int", default=10, minimum=1, maximum=100),
-            ConfigParam("comment_top_limit", "最多评论采集数", kind="int", default=100, minimum=1, maximum=500),
         ]
 
     def run_task(self, values: dict, log_callback, finish_callback, stop_event, pause_event):
@@ -60,6 +56,8 @@ class FacebookProfileWorksWindow(SimpleToolWindow):
                 "max_posts",
                 "collect_comments",
                 "comment_top_limit",
+                "cooldown_min",
+                "cooldown_max",
             )
         }
         return run_facebook_profile_works_spider(
@@ -103,9 +101,6 @@ class FacebookKeywordSearchWindow(SimpleToolWindow):
             ConfigParam("max_scrolls", "最大滚动次数", kind="int", default=200, minimum=1, maximum=999999),
             ConfigParam("page_load_timeout", "页面加载超时(毫秒)", kind="int", default=60000, minimum=10000, maximum=120000, step=1000),
             ConfigParam("scroll_delay", "滚动延迟(毫秒)", kind="int", default=2000, minimum=500, maximum=10000, step=100),
-            ConfigParam("no_new_scroll_limit", "无新内容停止阈值", kind="int", default=5, minimum=2, maximum=50),
-            ConfigParam("scroll_px", "每次滚动像素", kind="int", default=800, minimum=100, maximum=5000, step=100),
-            ConfigParam("save_batch_size", "每批保存条数", kind="int", default=10, minimum=1, maximum=100),
         ]
 
     def run_task(self, values: dict, log_callback, finish_callback, stop_event, pause_event):
@@ -120,6 +115,8 @@ class FacebookKeywordSearchWindow(SimpleToolWindow):
                 "save_batch_size",
                 "max_posts",
                 "collect_comments",
+                "cooldown_min",
+                "cooldown_max",
             )
         }
         return run_facebook_keyword_search_spider(

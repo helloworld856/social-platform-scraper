@@ -375,6 +375,7 @@ def run_scraper(txt_path: str, input_mode: str, cdp_port_or_url: str, log_callba
     tweet_ready_timeout = int(config.get("tweet_ready_timeout", TWEET_READY_TIMEOUT))
     cooldown_min = float(config.get("cooldown_min", 2.0))
     cooldown_max = float(config.get("cooldown_max", 5.0))
+    cooldown_every_val = int(config.get("cooldown_every", 5))
 
     output_path = None
     try:
@@ -449,9 +450,10 @@ def run_scraper(txt_path: str, input_mode: str, cdp_port_or_url: str, log_callba
                     else:
                         log_callback(f"  跳过：作者 {record['账号ID']} 已有更高浏览量推文。")
                 
-                # 每条采集完毕后应用配置的随机休眠
-                if random_cooldown(log_callback, stop_event, cooldown_min, cooldown_max):
-                    break
+                # 按配置的冷却间隔应用随机休眠
+                if index % cooldown_every_val == 0:
+                    if random_cooldown(log_callback, stop_event, cooldown_min, cooldown_max):
+                        break
 
             for opened_page in (tweet_page, profile_page):
                 if opened_page is not None and not opened_page.is_closed():

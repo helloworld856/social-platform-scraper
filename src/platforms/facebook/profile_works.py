@@ -14,6 +14,7 @@ from typing import Any
 from src.core import (
     MultiSheetXlsxWriter,
     connect_existing_chromium,
+    interruptible_sleep,
     should_stop,
     wait_if_paused,
     DEFAULT_X_CDP_URL,
@@ -730,6 +731,8 @@ def run_facebook_profile_works_spider(
     max_posts = int(config.get("max_posts", 100))
     collect_comments_bool = (config.get("collect_comments", "否") == "是")
     comment_top_limit = int(config.get("comment_top_limit", 100))
+    cooldown_min_val = float(config.get("cooldown_min", 1.0))
+    cooldown_max_val = float(config.get("cooldown_max", 3.0))
     force_exact = (force_exact_time_str == "是")
 
     try:
@@ -805,7 +808,8 @@ def run_facebook_profile_works_spider(
                                 log_line(log_callback, f"  评论: {len(comments)} 条 → {post_data['url'][:60]}")
                         except Exception as e:
                             log_line(log_callback, f"  评论提取失败: {e}")
-                        page.wait_for_timeout(random.uniform(500, 1500))
+                        delay = random.uniform(cooldown_min_val, cooldown_max_val)
+                        interruptible_sleep(delay, stop_event)
 
                 writer.save()
                 msg = f"完成 {profile_url}：帖子 {total_written} 条"

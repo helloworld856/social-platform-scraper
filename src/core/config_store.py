@@ -6,9 +6,43 @@ import os
 from pathlib import Path
 
 from src.core.output import get_workspace_root
+from src.ui.config_dialog import ConfigParam
 
 # 配置文件存放目录名称
 _CONFIG_DIR_NAME = "config"
+
+# ---------------------------------------------------------------------------
+# 全局配置（跨工具共享参数）
+# ---------------------------------------------------------------------------
+
+GLOBAL_TOOL_ID = "__global__"
+
+GLOBAL_CONFIG_PARAMS: list[ConfigParam] = [
+    ConfigParam("page_load_timeout", "页面加载超时(毫秒)", kind="int", default=45000, minimum=10000, maximum=120000, step=1000),
+    ConfigParam("scroll_interval", "滚动间隔(秒)", kind="float", default=2.0, minimum=0.1, maximum=10.0, step=0.1, decimals=1),
+    ConfigParam("no_new_scroll_limit", "无新内容停止阈值", kind="int", default=8, minimum=2, maximum=50),
+    ConfigParam("max_scrolls", "最大滚动次数", kind="int", default=200, minimum=1, maximum=999999),
+    ConfigParam("scroll_px", "每次滚动像素(px)", kind="int", default=2000, minimum=100, maximum=10000, step=100),
+    ConfigParam("cooldown_min", "冷却等待最小(秒)", kind="float", default=5.0, minimum=0.0, maximum=60.0, step=0.5, decimals=1),
+    ConfigParam("cooldown_max", "冷却等待最大(秒)", kind="float", default=10.0, minimum=0.0, maximum=120.0, step=0.5, decimals=1),
+    ConfigParam("save_batch_size", "每批保存条数", kind="int", default=10, minimum=1, maximum=100),
+    ConfigParam("comment_top_limit", "最多输出评论数", kind="int", default=100, minimum=1, maximum=500),
+]
+
+GLOBAL_CONFIG_DEFAULTS: dict[str, object] = {p.key: p.default for p in GLOBAL_CONFIG_PARAMS}
+
+# 参数名别名映射：全局标准名 → [工具中使用的别名列表]
+# 仅包含语义和类型完全兼容的映射
+GLOBAL_ALIAS_MAP: dict[str, list[str]] = {
+    "page_load_timeout": ["search_page_timeout", "youtube_browser_page_timeout"],
+    "scroll_interval": ["youtube_browser_scroll_delay"],
+    "max_scrolls": ["max_search_scrolls", "max_post_scrolls", "youtube_browser_max_scrolls", "max_scroll_rounds", "max_profile_scrolls"],
+    "no_new_scroll_limit": ["youtube_browser_no_new_limit", "comment_no_new_scroll_limit"],
+}
+
+# ---------------------------------------------------------------------------
+# 各工具默认配置
+# ---------------------------------------------------------------------------
 
 # 系统所有工具的默认配置项字典。这些值作为配置缺省或校验时的基准
 DEFAULT_CONFIGS: dict[str, dict] = {
@@ -16,7 +50,7 @@ DEFAULT_CONFIGS: dict[str, dict] = {
         "max_results": 5000,                  # 搜索结果最大爬取数
         "youtube_search_batch_size": 50,       # 搜索 API 批量请求大小
         "youtube_video_batch_size": 50,        # 视频详情 API 批量请求大小
-        "comment_top_limit": 100,              # 每个视频提取的热门评论数上限
+        "comment_top_limit": 100,              # 每个视频提取的热门评论数上限（保留：全局同名参数也生效）
     },
     "youtube_paired_context_metrics": {
         "context_size": 5,                     # 上下文选取大小（目标视频前后各取 N 个）
@@ -24,70 +58,53 @@ DEFAULT_CONFIGS: dict[str, dict] = {
     },
     "youtube_channel_works": {
         "max_video_items": 5000,               # 频道作品提取上限
-        "page_load_timeout": 45000,            # 页面加载超时（毫秒）
-        "scroll_delay": 0.8,                   # 滚动间隔延迟（秒）
-        "no_new_scroll_limit": 6,              # 连续无新作品产出则停止滚动的极限次数
-        "scroll_px": 2800,                     # 单次滚动的像素距离
-        "max_post_scrolls": 200,               # 帖子/社区内容滚动的最大次数
-        "save_batch_size": 10,                 # 数据批量落盘的条数
+        "max_post_scrolls": 200,               # 帖子/社区内容滚动的最大次数（别名保留）
+        "initial_load_delay": 1.8,
     },
     "youtube_top_comments": {
         "max_scan_comments": 500,              # 扫描评论最大上限
-        "comment_top_limit": 100,
         "youtube_api_page_size": 100,          # API 每页请求数量
     },
     "tiktok_keyword_metrics": {
         "max_videos": 1000,
         "max_candidates": 3000,                # 候选视频扫描上限（去重过滤前的上限）
-        "scroll_interval": 0.7,
-        "max_search_scrolls": 360,
-        "no_new_scroll_limit": 12,
-        "comment_top_limit": 100,
+        "max_search_scrolls": 360,             # 别名保留
         "max_parallel_tabs": 1,                # 并发执行的标签页数
         "max_comment_tabs": 1,
         "max_queue_size": 5000,                # 缓冲队列最大容量
+        "cooldown_min": 3.0,
+        "cooldown_max": 8.0,
     },
     "tiktok_profile_directory": {
-        "page_load_timeout": 35000,
         "captcha_wait": 12,                    # 遇到验证码时手动滑块的等待时间（秒）
+        "cooldown_every": 5,
     },
     "tiktok_profile_videos": {
-        "page_load_timeout": 45000,
-        "scroll_interval": 2.5,
-        "no_new_scroll_limit": 10,
-        "max_scrolls": 200,
         "link_batch_size": 50,
-        "save_batch_size": 10,
-        "cooldown_min": 10.0,                  # 视频抓取最小冷却延迟（秒）
-        "cooldown_max": 20.0,                  # 视频抓取最大冷却延迟（秒）
+        "detail_load_timeout": 30000,
+        "detail_delay_min": 2.0,
+        "detail_delay_max": 5.0,
     },
     "tiktok_profile_play_counts": {
-        "page_load_timeout": 45000,
-        "scroll_interval": 2.5,
-        "no_new_scroll_limit": 10,
-        "max_scrolls": 200,
     },
     "tiktok_paired_context_metrics": {
         "context_size": 5,
         "api_page_size": 35,
         "max_api_pages": 10,
-        "max_profile_scrolls": 80,
-        "scroll_interval": 0.8,
+        "max_profile_scrolls": 80,             # 别名保留
     },
     "tiktok_top_comments": {
-        "comment_top_limit": 100,
-        "page_load_timeout": 45000,
-        "scroll_interval": 1.4,
-        "max_scroll_rounds": 80,
+        "max_scroll_rounds": 80,               # 别名保留
+        "comment_wait_timeout": 12000,
+        "video_batch_cooldown_every": 3,
+        "video_batch_cooldown_min": 4.0,
+        "video_batch_cooldown_max": 9.0,
     },
     "x_keyword_video_search": {
         "slice_days": 7,                       # 时间跨度切分天数，用于按区间精准爬取
-        "search_page_timeout": 40000,
-        "cooldown_min": 5.0,
-        "cooldown_max": 7.0,
-        "no_new_scroll_limit": 5,
+        "search_page_timeout": 40000,          # 别名保留
+        "no_new_scroll_limit": 5,              # 保留（还有 comment_no_new_scroll_limit 需独立配置）
         "comment_no_new_scroll_limit": 5,
-        "max_scrolls": 200,
         "max_parallel_tabs": 1,
         "max_comment_tabs": 1,
         "max_queue_size": 5000,
@@ -97,40 +114,46 @@ DEFAULT_CONFIGS: dict[str, dict] = {
         "comment_refresh_interval": 5.0,
     },
     "x_tweet_author_profiles": {
-        "page_load_timeout": 45000,
         "tweet_ready_timeout": 12000,
+        "cooldown_every": 5,
     },
     "x_paired_context_metrics": {
         "context_size": 5,
-        "max_profile_scrolls": 45,
-        "scroll_interval": 3.8,
-        "page_load_timeout": 45000,
+        "max_profile_scrolls": 45,             # 别名保留
     },
     "x_tweet_metrics": {
-        "page_load_timeout": 30000,
-        "comment_top_limit": 100,
+        "page_ready_wait": 2.5,
+        "cooldown_every": 3,
     },
     "x_profile_tweets": {
-        "page_load_timeout": 30000,
-        "scroll_interval": 3.2,
-        "no_new_scroll_limit": 10,
-        "max_scrolls": 200,
-        "save_batch_size": 10,
-        "cooldown_min": 6.0,
-        "cooldown_max": 15.0,
+        "initial_load_delay": 2.0,
+    },
+    "x_top_comments": {
     },
     "instagram_profile_works": {
         "max_works": 5000,
-        "page_load_timeout": 45000,
-        "scroll_interval": 3.0,
-        "scroll_px": 2600,
-        "no_new_scroll_limit": 8,
-        "max_scrolls": 200,
-        "save_batch_size": 10,
-        "cooldown_min": 10.0,
-        "cooldown_max": 25.0,
         "detail_delay_min": 3.0,
         "detail_delay_max": 7.0,
+        "initial_load_delay": 3.5,
+        "before_detail_delay_min": 6.0,
+        "before_detail_delay_max": 12.0,
+    },
+    "facebook_profile_works": {
+        "max_posts": 100,
+        "max_scrolls": 200,                    # 保留（使用标准名）
+        "page_load_timeout": 60000,            # 保留（Facebook 需要更长默认值）
+        "scroll_delay": 2000,                  # 保留（int 毫秒，与全局 scroll_interval 不兼容）
+        "collect_comments": "否",
+        "cooldown_min": 1.0,
+        "cooldown_max": 3.0,
+    },
+    "facebook_keyword_search": {
+        "max_posts": 100,
+        "max_scrolls": 200,                    # 保留（使用标准名）
+        "page_load_timeout": 60000,            # 保留（Facebook 需要更长默认值）
+        "scroll_delay": 2000,                  # 保留（int 毫秒，与全局 scroll_interval 不兼容）
+        "cooldown_min": 1.0,
+        "cooldown_max": 3.0,
     },
     "judge_aigc": {
         "temperature": 0.1,

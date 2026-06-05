@@ -401,12 +401,35 @@ class SimpleToolWindow(QWidget):
         return []
 
     def _load_persisted_config(self) -> None:
-        """自动从磁盘上加载配置参数值。"""
-        from src.core.config_store import load_config
+        """自动从磁盘上加载配置参数值，优先合并全局配置。"""
+        from src.core.config_store import (
+            GLOBAL_ALIAS_MAP,
+            GLOBAL_CONFIG_DEFAULTS,
+            GLOBAL_TOOL_ID,
+            load_config,
+        )
 
         defaults = {p.key: p.default for p in self.tool_config_params()}
-        if self.tool_id and defaults:
-            self.config_values = load_config(self.tool_id, defaults, self.current_profile)
+        merged = dict(defaults)
+
+        if self.tool_id:
+            # 第一步：注入全局参数（无条件，覆盖工具默认值）
+            global_values = load_config(GLOBAL_TOOL_ID, GLOBAL_CONFIG_DEFAULTS, None)
+            for gk, gv in global_values.items():
+                merged[gk] = gv
+
+            # 第二步：别名映射 —— 若工具使用别名，将全局标准名值复制到别名 key
+            for std_name, alias_names in GLOBAL_ALIAS_MAP.items():
+                if std_name in global_values:
+                    for alias in alias_names:
+                        if alias in defaults:
+                            merged[alias] = global_values[std_name]
+
+            # 第三步：加载工具自身 JSON 配置（最高优先级，覆盖全局值）
+            tool_values = load_config(self.tool_id, defaults, self.current_profile)
+            merged.update(tool_values)
+
+        self.config_values = merged
 
     def _open_config(self) -> None:
         """打开方案及配置参数弹窗，保存用户新调整的参数到配置类并落盘。"""
@@ -422,7 +445,8 @@ class SimpleToolWindow(QWidget):
             tool_id=self.tool_id, current_profile=self.current_profile,
         )
         if dialog.exec_() == ConfigDialog.Accepted:
-            self.config_values = dialog.get_values()
+            # 用 .update() 而非 = 赋值，保留 config_values 中的全局注入参数
+            self.config_values.update(dialog.get_values())
             self.current_profile = dialog.get_selected_profile()
             if self.tool_id:
                 defaults = {p.key: p.default for p in params}
