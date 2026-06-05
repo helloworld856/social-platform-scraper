@@ -86,3 +86,29 @@ class XlsxMergeWindow(SimpleToolWindow):
         log_callback(f"输出文件：{output_path}")
         finish_callback(output_path)
         return output_path
+
+class AnomalyDetectionWindow(SimpleToolWindow):
+    tool_id = "processing_anomaly_detection"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "数据异常分析检测",
+            [
+                FieldSpec("input_xlsx", "输入 Excel 文件", kind="file", required=True, placeholder="选择需检测的 .xlsx 文件"),
+            ],
+            height=600,
+        )
+
+    def tool_config_params(self):
+        return [
+            ConfigParam("high_view_threshold", "高浏览量阈值", kind="int", default=1000, minimum=1, maximum=100000000),
+            ConfigParam("high_like_threshold", "高点赞阈值", kind="int", default=50, minimum=1, maximum=100000000),
+            ConfigParam("abnormal_ratio_multiplier", "失调倍数", kind="float", default=2.0, minimum=1.0, maximum=100.0, step=0.1, decimals=1),
+            ConfigParam("abnormal_ratio_min_trigger", "失调最小转发触发数", kind="int", default=5, minimum=1, maximum=10000),
+            ConfigParam("strict_zero_check", "严格 0 值矛盾检测", kind="bool", default=True),
+        ]
+
+    def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
+        from src.processing.anomaly_detection import run_anomaly_detection
+
+        return run_anomaly_detection(values, self.config_values, log_callback, finish_callback, stop_event, pause_event)
