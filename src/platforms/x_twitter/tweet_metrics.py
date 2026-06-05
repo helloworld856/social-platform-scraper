@@ -23,9 +23,10 @@ from src.core import (
     wait_if_paused,
 )
 from src.platforms.x_twitter.comments import extract_comments
+from src.platforms.x_twitter.keyword import _x_media_tag, get_media_label
 
 
-CSV_FIELDS = ["序号", "推文链接", "推文的内容", "浏览量", "评论数", "点赞量", "转发量"]
+CSV_FIELDS = ["序号", "推文链接", "推文的内容", "浏览量", "评论数", "点赞量", "转发量", "标签"]
 PAGE_LOAD_TIMEOUT = 30000
 COOLDOWN_EVERY = 3
 COOLDOWN_MIN_SECONDS = 3.0
@@ -198,7 +199,7 @@ def extract_article_payload(article) -> dict[str, str]:
     )
 
 
-def collect_tweet_metrics(page, tweet_url: str, page_timeout=None, stop_event=None) -> dict[str, str]:
+def collect_tweet_metrics(page, tweet_url: str, page_timeout=None, page_ready_wait=2.5, stop_event=None, log_callback=None) -> dict[str, str]:
     if page_timeout is None:
         page_timeout = PAGE_LOAD_TIMEOUT
     normalized_url = clean_tweet_url(tweet_url)
@@ -206,14 +207,21 @@ def collect_tweet_metrics(page, tweet_url: str, page_timeout=None, stop_event=No
     if not status_id:
         raise ValueError("无法解析推文 ID")
 
-    page.goto(normalized_url, wait_until="domcontentloaded", timeout=page_timeout)
-    interruptible_sleep(2.5, stop_event)
+    page.goto(normalized_url, wait_until="load", timeout=page_timeout)
+    interruptible_sleep(page_ready_wait, stop_event)
+
+    current_url = page.url
+    if "login" in current_url.lower() or "account" in current_url.lower():
+        log_line(log_callback, f"  警告：当前页面疑似登录页：{current_url}")
+        raise RuntimeError("页面跳转到登录页，请确认 Chrome 已登录 X/Twitter")
 
     article = find_target_article(page, status_id, page_timeout=page_timeout)
     if article is None:
-        raise RuntimeError("未找到目标推文 DOM")
+        log_line(log_callback, f"  当前页面 URL：{current_url}")
+        raise RuntimeError("未找到目标推文 DOM（页面可能未完全加载、被限流或推文不存在）")
 
     payload = extract_article_payload(article)
+    media_label = get_media_label(article)
     return {
         "推文链接": normalized_url,
         "推文的内容": payload.get("content", ""),
@@ -221,6 +229,7 @@ def collect_tweet_metrics(page, tweet_url: str, page_timeout=None, stop_event=No
         "评论数": normalize_interaction_metric(payload.get("replies", "")),
         "点赞量": normalize_interaction_metric(payload.get("likes", "")),
         "转发量": normalize_interaction_metric(payload.get("reposts", "")),
+        "标签": _x_media_tag(media_label),
     }
 
 
@@ -238,7 +247,11 @@ def run_x_tweet_metrics_spider(
     if config is None:
         config = {}
     page_load_timeout_val = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
+    page_ready_wait_val = float(config.get("page_ready_wait", 2.5))
     tweet_comment_top_limit = int(config.get("comment_top_limit", 100))
+    cooldown_every_val = int(config.get("cooldown_every", COOLDOWN_EVERY))
+    cooldown_min_val = float(config.get("cooldown_min", COOLDOWN_MIN_SECONDS))
+    cooldown_max_val = float(config.get("cooldown_max", COOLDOWN_MAX_SECONDS))
 
     completed_path = None
     page = None
@@ -258,9 +271,9 @@ def run_x_tweet_metrics_spider(
         output_path = build_output_path("x", f"x_tweet_metrics_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
         if get_comments_bool:
             comment_fields = ["序号", "推文链接", "评论的点赞量", "评论内容", "评论发布时间"]
-            writer = MultiSheetXlsxWriter(output_path, {"推文信息": CSV_FIELDS, "评论信息": comment_fields})
+            writer = MultiSheetXlsxWriter(output_path, {"推文信息": CSV_FIELDS, "评论信息": comment_fields}, autosave_every=20)
         else:
-            writer = XlsxRowWriter(output_path, CSV_FIELDS)
+            writer = XlsxRowWriter(output_path, CSV_FIELDS, autosave_every=20)
 
         with sync_playwright() as playwright:
             log_line(log_callback, "正在连接本地 Chrome...")
@@ -288,10 +301,11 @@ def run_x_tweet_metrics_spider(
                     "评论数": "",
                     "点赞量": "",
                     "转发量": "",
+                    "标签": "",
                 }
                 log_line(log_callback, f"[{index}/{len(tweet_urls)}] 读取推文：{normalized_url}")
                 try:
-                    row.update(collect_tweet_metrics(page, normalized_url, page_timeout=page_load_timeout_val, stop_event=stop_event))
+                    row.update(collect_tweet_metrics(page, normalized_url, page_timeout=page_load_timeout_val, page_ready_wait=page_ready_wait_val, stop_event=stop_event, log_callback=log_callback))
                     
                     if get_comments_bool:
                         try:
@@ -318,10 +332,9 @@ def run_x_tweet_metrics_spider(
                     writer.writerow("推文信息", row)
                 else:
                     writer.writerow(row)
-                writer.save()
-                log_line(log_callback, "  完成：已写入并保存。")
-                if index < len(tweet_urls) and index % COOLDOWN_EVERY == 0:
-                    if random_cooldown(log_callback, stop_event, COOLDOWN_MIN_SECONDS, COOLDOWN_MAX_SECONDS):
+                log_line(log_callback, "  完成：已写入。")
+                if index < len(tweet_urls) and index % cooldown_every_val == 0:
+                    if random_cooldown(log_callback, stop_event, cooldown_min_val, cooldown_max_val):
                         break
 
             if page and not page.is_closed():

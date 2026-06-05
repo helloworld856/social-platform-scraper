@@ -137,6 +137,9 @@ def run_tiktok_profile_spider(txt_path: str, cdp_port_or_url: str, log_callback,
         config = {}
     page_load_timeout = int(config.get("page_load_timeout", 35000))
     captcha_wait = int(config.get("captcha_wait", 12))
+    cooldown_every_val = int(config.get("cooldown_every", 5))
+    cooldown_min_val = float(config.get("cooldown_min", 3.0))
+    cooldown_max_val = float(config.get("cooldown_max", 8.0))
 
     output_path = None
     completed_path = None
@@ -180,8 +183,8 @@ def run_tiktok_profile_spider(txt_path: str, cdp_port_or_url: str, log_callback,
 
                 writer.writerow(sanitize_csv_row(row))
                 # 每抓取 5 个博主主页进行随机冷却，以避免触发高频风控限制
-                if index % 5 == 0:
-                    if random_cooldown(log_callback, stop_event, 3.0, 8.0):
+                if index % cooldown_every_val == 0:
+                    if random_cooldown(log_callback, stop_event, cooldown_min_val, cooldown_max_val):
                         break
 
             if not page.is_closed():

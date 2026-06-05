@@ -319,18 +319,20 @@ def normalize_video_url(url: str) -> str:
     return value
 
 
-def trigger_profile_lazy_load(page) -> None:
+def trigger_profile_lazy_load(page, scroll_px=None) -> None:
     """
     触发博主主页视频列表的下拉懒加载：
     - 垂直滚动指定高度；
     - 对所有带有滚动条的 overflow 容器派发滚动事件，唤醒 TikTok 的列表渲染机制；
     - 结合 mouse.wheel 进行平滑向下滚动兜底。
     """
+    if scroll_px is None:
+        scroll_px = SCROLL_PX
     try:
         page.evaluate(
             f"""() => {{
                 const scrolling = document.scrollingElement || document.documentElement || document.body;
-                scrolling.scrollBy(0, {SCROLL_PX});
+                scrolling.scrollBy(0, {scroll_px});
                 const scrollable = Array.from(document.querySelectorAll('body, main, section, div'))
                     .filter(el => {{
                         const style = getComputedStyle(el);
@@ -339,7 +341,7 @@ def trigger_profile_lazy_load(page) -> None:
                     }})
                     .sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight));
                 for (const el of scrollable.slice(0, 6)) {{
-                    el.scrollBy(0, {SCROLL_PX});
+                    el.scrollBy(0, {scroll_px});
                     el.dispatchEvent(new Event('scroll', {{ bubbles: true }}));
                 }}
                 window.dispatchEvent(new Event('scroll'));
@@ -348,7 +350,7 @@ def trigger_profile_lazy_load(page) -> None:
     except Exception:
         pass
     try:
-        page.mouse.wheel(0, SCROLL_PX)
+        page.mouse.wheel(0, scroll_px)
     except Exception:
         pass
 
@@ -382,12 +384,14 @@ def item_detail_from_state(page, video_url: str) -> dict:
     return find_item_in_state(page_state_sources(page), video_id)
 
 
-def extract_video_detail(page, video_url: str) -> dict[str, str]:
+def extract_video_detail(page, video_url: str, detail_load_timeout=None) -> dict[str, str]:
     """
     打开视频详情页，提取并清洗视频关键指标（点赞量、评论量、收藏量、分享量、发布时间、视频描述描述等）。
     支持重试加载 JSON Rehydration 状态，并对 DOM 进行兜底解析以规避 JS 反爬风控带来的数据缺失。
     """
-    page.goto(video_url, wait_until="domcontentloaded", timeout=DETAIL_LOAD_TIMEOUT)
+    if detail_load_timeout is None:
+        detail_load_timeout = DETAIL_LOAD_TIMEOUT
+    page.goto(video_url, wait_until="domcontentloaded", timeout=detail_load_timeout)
     try:
         page.wait_for_selector(
             "script#__UNIVERSAL_DATA_FOR_REHYDRATION__, script#SIGI_STATE, script#RENDER_DATA, [data-e2e='like-count'], [data-e2e='browser-nickname']",
@@ -487,13 +491,18 @@ def row_from_detail(index: int, detail: dict[str, str], play_count: str = "") ->
     return row
 
 
-def wait_after_detail(log_callback, stop_event=None, pause_event=None) -> bool:
+def wait_after_detail(log_callback, stop_event=None, pause_event=None,
+                      detail_delay_min=None, detail_delay_max=None) -> bool:
     """
     爬取每条视频后的冷却时间，以防短时间内频繁请求被 TikTok 拦截。
     """
+    if detail_delay_min is None:
+        detail_delay_min = DETAIL_DELAY_MIN_SECONDS
+    if detail_delay_max is None:
+        detail_delay_max = DETAIL_DELAY_MAX_SECONDS
     if wait_if_paused(pause_event, stop_event):
         return True
-    seconds = random.uniform(DETAIL_DELAY_MIN_SECONDS, DETAIL_DELAY_MAX_SECONDS)
+    seconds = random.uniform(detail_delay_min, detail_delay_max)
     return interruptible_sleep(seconds, stop_event)
 
 
@@ -518,6 +527,9 @@ def process_video_batch(
     processed_count: int = 0,
     play_counts_map: dict[str, int] = None,
     fetch_play_counts_bool: bool = False,
+    detail_load_timeout=None,
+    detail_delay_min=None,
+    detail_delay_max=None,
 ) -> tuple[int, int, bool, int]:
     """
     批量爬取当前收集的视频链接：
@@ -539,7 +551,7 @@ def process_video_batch(
 
             detail = {"video_url": video_url}
             if get_video_info_bool or get_comments_bool or limit_time_bool:
-                detail = extract_video_detail(detail_page, video_url)
+                detail = extract_video_detail(detail_page, video_url, detail_load_timeout=detail_load_timeout)
                 published_at = detail.get("published_at", "")
 
                 # 发布日期范围校验
@@ -550,12 +562,12 @@ def process_video_batch(
                         if processed_count >= MIN_GUARANTEED_VIDEOS:
                             log_line(log_callback, f"      停止当前主页：视频发布时间早于开始日期（{published_at}）。")
                             stop_profile = True
-                            wait_after_detail(log_callback, stop_event, pause_event=pause_event)
+                            wait_after_detail(log_callback, stop_event, pause_event=pause_event, detail_delay_min=detail_delay_min, detail_delay_max=detail_delay_max)
                             break
                         else:
                             log_line(log_callback, f"      跳过：发布时间超出范围（{published_at}），当前在保底前 {MIN_GUARANTEED_VIDEOS} 条内，不终止。")
                             processed_count += 1
-                            if wait_after_detail(log_callback, stop_event, pause_event=pause_event):
+                            if wait_after_detail(log_callback, stop_event, pause_event=pause_event, detail_delay_min=detail_delay_min, detail_delay_max=detail_delay_max):
                                 break
                             continue
 
@@ -564,7 +576,7 @@ def process_video_batch(
                     elif not in_date_range(published_at, start_dt, end_dt):
                         log_line(log_callback, f"      跳过：发布时间不在范围内（{published_at}）。")
                         processed_count += 1
-                        if wait_after_detail(log_callback, stop_event, pause_event=pause_event):
+                        if wait_after_detail(log_callback, stop_event, pause_event=pause_event, detail_delay_min=detail_delay_min, detail_delay_max=detail_delay_max):
                             break
                         continue
 
@@ -624,7 +636,7 @@ def process_video_batch(
         except Exception as exc:
             log_line(log_callback, f"      跳过：{exc}")
 
-        if wait_after_detail(log_callback, stop_event, pause_event=pause_event):
+        if wait_after_detail(log_callback, stop_event, pause_event=pause_event, detail_delay_min=detail_delay_min, detail_delay_max=detail_delay_max):
             break
 
     return serial_number, written_count, stop_profile, processed_count
@@ -664,6 +676,10 @@ def run_tiktok_profile_videos_spider(
     save_batch_size = int(config.get("save_batch_size", SAVE_BATCH_SIZE))
     batch_wait_min = float(config.get("cooldown_min", BATCH_WAIT_MIN_SECONDS))
     batch_wait_max = float(config.get("cooldown_max", BATCH_WAIT_MAX_SECONDS))
+    detail_load_timeout_val = int(config.get("detail_load_timeout", DETAIL_LOAD_TIMEOUT))
+    detail_delay_min_val = float(config.get("detail_delay_min", DETAIL_DELAY_MIN_SECONDS))
+    detail_delay_max_val = float(config.get("detail_delay_max", DETAIL_DELAY_MAX_SECONDS))
+    scroll_px_val = int(config.get("scroll_px", SCROLL_PX))
 
     output_path = None
     completed_path = None
@@ -800,6 +816,9 @@ def run_tiktok_profile_videos_spider(
                             processed_count=processed_count,
                             play_counts_map=play_counts_map,
                             fetch_play_counts_bool=fetch_play_counts_bool,
+                            detail_load_timeout=detail_load_timeout_val,
+                            detail_delay_min=detail_delay_min_val,
+                            detail_delay_max=detail_delay_max_val,
                         )
                     if stop_profile:
                         break
@@ -833,7 +852,7 @@ def run_tiktok_profile_videos_spider(
                         log_line(log_callback, "  连续多次没有新视频链接，结束当前主页。")
                         break
 
-                    trigger_profile_lazy_load(profile_page)
+                    trigger_profile_lazy_load(profile_page, scroll_px=scroll_px_val)
                     if interruptible_sleep(scroll_interval, stop_event):
                         break
 
@@ -860,6 +879,9 @@ def run_tiktok_profile_videos_spider(
                             processed_count=processed_count,
                             play_counts_map=play_counts_map,
                             fetch_play_counts_bool=fetch_play_counts_bool,
+                            detail_load_timeout=detail_load_timeout_val,
+                            detail_delay_min=detail_delay_min_val,
+                            detail_delay_max=detail_delay_max_val,
                         )
 
             if fetch_play_counts_bool:

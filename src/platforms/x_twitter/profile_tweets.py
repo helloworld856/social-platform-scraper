@@ -341,11 +341,17 @@ def collect_profile_tweets(
     pause_event=None,
     keyword: str | None = None,
     max_collect: int | None = None,
+    scroll_px=None,
+    initial_load_delay=None,
 ) -> list[dict[str, str]] | tuple[list[dict[str, str]], int, int]:
     if page_timeout is None:
         page_timeout = PAGE_LOAD_TIMEOUT
     if scroll_delay is None:
         scroll_delay = SCROLL_DELAY
+    if scroll_px is None:
+        scroll_px = SCROLL_PX
+    if initial_load_delay is None:
+        initial_load_delay = INITIAL_LOAD_DELAY
     if no_new_scroll_limit is None:
         no_new_scroll_limit = NO_NEW_SCROLL_LIMIT
     if save_batch_size is None:
@@ -384,7 +390,7 @@ def collect_profile_tweets(
             return tweets
         raise
 
-    interruptible_sleep(INITIAL_LOAD_DELAY, stop_event)
+    interruptible_sleep(initial_load_delay, stop_event)
     log_line(log_callback, f"  开始采集 @{username} 主页帖子，最多滚动 {max_scrolls} 次。")
 
     for scroll_index in range(max_scrolls):
@@ -471,7 +477,7 @@ def collect_profile_tweets(
         if should_stop(stop_event):
             break
 
-        page.evaluate(f"window.scrollBy(0, {SCROLL_PX})")
+        page.evaluate(f"window.scrollBy(0, {scroll_px})")
         interruptible_sleep(scroll_delay + 1.0 if no_new_count else scroll_delay, stop_event)
 
     if writer and pending_rows:
@@ -520,6 +526,8 @@ def run_x_profile_tweets_spider(
     save_batch_size_val = int(config.get("save_batch_size", SAVE_BATCH_SIZE))
     cooldown_min_val = float(config.get("cooldown_min", COOLDOWN_MIN_SECONDS))
     cooldown_max_val = float(config.get("cooldown_max", COOLDOWN_MAX_SECONDS))
+    scroll_px_val = int(config.get("scroll_px", SCROLL_PX))
+    initial_load_delay_val = float(config.get("initial_load_delay", INITIAL_LOAD_DELAY))
     max_scrolls = int(config.get("max_scrolls", max_scrolls))
 
     completed_path = None
@@ -583,7 +591,7 @@ def run_x_profile_tweets_spider(
                 try:
                     # 获取主页以提取帖文数
                     page.goto(clean_profile_url(profile_url), wait_until="domcontentloaded", timeout=page_load_timeout_val)
-                    interruptible_sleep(INITIAL_LOAD_DELAY, stop_event)
+                    interruptible_sleep(initial_load_delay_val, stop_event)
                     post_count = None
                     for attempt in range(10):
                         post_count = extract_post_count(page)
@@ -599,7 +607,7 @@ def run_x_profile_tweets_spider(
 
                     if post_count is None or post_count <= 1000:
                         _, row_offset, written_count = collect_profile_tweets(
-                            page, detail_page, profile_url, max_scrolls, limit_time_bool, start_dt, end_dt, get_comments_bool, max_comments_val, log_callback, stop_event, writer=writer, row_offset=row_offset, page_timeout=page_load_timeout_val, scroll_delay=scroll_delay_val, no_new_scroll_limit=no_new_scroll_limit_val, save_batch_size=save_batch_size_val, cooldown_min=cooldown_min_val, cooldown_max=cooldown_max_val, pause_event=pause_event, keyword=None, max_collect=None
+                            page, detail_page, profile_url, max_scrolls, limit_time_bool, start_dt, end_dt, get_comments_bool, max_comments_val, log_callback, stop_event, writer=writer, row_offset=row_offset, page_timeout=page_load_timeout_val, scroll_delay=scroll_delay_val, no_new_scroll_limit=no_new_scroll_limit_val, save_batch_size=save_batch_size_val, cooldown_min=cooldown_min_val, cooldown_max=cooldown_max_val, scroll_px=scroll_px_val, initial_load_delay=initial_load_delay_val, pause_event=pause_event, keyword=None, max_collect=None
                         )
                         log_line(log_callback, f"  完成 @{username} 全量采集：写入 {written_count} 条帖子。")
                     else:
@@ -616,7 +624,7 @@ def run_x_profile_tweets_spider(
                                     break
                                 log_line(log_callback, f"  -> 补充采集关键词: {kw}")
                                 _, row_offset, kw_written = collect_profile_tweets(
-                                    page, detail_page, profile_url, max_scrolls, limit_time_bool, start_dt, end_dt, get_comments_bool, max_comments_val, log_callback, stop_event, writer=writer, row_offset=row_offset, page_timeout=page_load_timeout_val, scroll_delay=scroll_delay_val, no_new_scroll_limit=no_new_scroll_limit_val, save_batch_size=save_batch_size_val, cooldown_min=cooldown_min_val, cooldown_max=cooldown_max_val, pause_event=pause_event, keyword=kw, max_collect=None
+                                    page, detail_page, profile_url, max_scrolls, limit_time_bool, start_dt, end_dt, get_comments_bool, max_comments_val, log_callback, stop_event, writer=writer, row_offset=row_offset, page_timeout=page_load_timeout_val, scroll_delay=scroll_delay_val, no_new_scroll_limit=no_new_scroll_limit_val, save_batch_size=save_batch_size_val, cooldown_min=cooldown_min_val, cooldown_max=cooldown_max_val, scroll_px=scroll_px_val, initial_load_delay=initial_load_delay_val, pause_event=pause_event, keyword=kw, max_collect=None
                                 )
                                 log_line(log_callback, f"  完成关键词 '{kw}' 采集：新增写入 {kw_written} 条。")
                         else:

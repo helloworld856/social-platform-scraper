@@ -475,7 +475,8 @@ def extract_visible_video_cards(page, tab: str) -> list[dict[str, str]]:
 
 
 def collect_video_tab_with_playwright(page, channel_url: str, tab: str, max_scrolls: int, log_callback, stop_event=None, pause_event=None,
-                                      page_timeout=None, scroll_delay=None, no_new_limit=None, scroll_px=None) -> list[dict[str, str]]:
+                                      page_timeout=None, scroll_delay=None, no_new_limit=None, scroll_px=None,
+                                      initial_load_delay=None) -> list[dict[str, str]]:
     """
     使用 Playwright 模拟用户滚动获取视频（Videos）或短视频（Shorts）列表。
     - 拼接标签页 URL 自动跳转，并等待首个视频卡片加载。
@@ -490,12 +491,14 @@ def collect_video_tab_with_playwright(page, channel_url: str, tab: str, max_scro
         no_new_limit = NO_NEW_POST_LIMIT
     if scroll_px is None:
         scroll_px = POST_SCROLL_PX
+    if initial_load_delay is None:
+        initial_load_delay = INITIAL_LOAD_DELAY
 
     url = tab_url(channel_url, tab)
     label = "Videos" if tab == "videos" else "Shorts"
     log_line(log_callback, f"  Playwright 读取 {label}：{url}")
     page.goto(url, wait_until="domcontentloaded", timeout=page_timeout)
-    if interruptible_sleep(INITIAL_LOAD_DELAY, stop_event):
+    if interruptible_sleep(initial_load_delay, stop_event):
         return []
     wait_selector = 'a[href*="/watch?v="]' if tab == "videos" else 'a[href*="/shorts/"]'
     try:
@@ -695,7 +698,8 @@ def extract_visible_posts(page) -> list[dict[str, str]]:
 
 
 def collect_posts_with_playwright(page, channel_url: str, max_post_scrolls: int, log_callback, stop_event=None, pause_event=None,
-                                   page_timeout=None, scroll_delay=None, no_new_limit=None, scroll_px=None) -> list[dict[str, str]]:
+                                   page_timeout=None, scroll_delay=None, no_new_limit=None, scroll_px=None,
+                                   initial_load_delay=None) -> list[dict[str, str]]:
     """
     使用 Playwright 模拟用户滚动获取社区帖子（Posts）列表。
     - 自动打开 Posts 标签页，并获取当前 DOM 中已加载的帖子并清洗。
@@ -710,10 +714,12 @@ def collect_posts_with_playwright(page, channel_url: str, max_post_scrolls: int,
         no_new_limit = NO_NEW_POST_LIMIT
     if scroll_px is None:
         scroll_px = POST_SCROLL_PX
+    if initial_load_delay is None:
+        initial_load_delay = INITIAL_LOAD_DELAY
 
     url = posts_url(channel_url)
     page.goto(url, wait_until="domcontentloaded", timeout=page_timeout)
-    if interruptible_sleep(INITIAL_LOAD_DELAY, stop_event):
+    if interruptible_sleep(initial_load_delay, stop_event):
         return []
 
     posts: list[dict[str, str]] = []
@@ -831,10 +837,11 @@ def run_youtube_channel_works_spider(
     if config is None:
         config = {}
     page_timeout = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
-    scroll_delay_val = float(config.get("scroll_delay", POST_SCROLL_DELAY))
+    scroll_interval_val = float(config.get("scroll_interval", POST_SCROLL_DELAY))
     no_new_limit = int(config.get("no_new_scroll_limit", NO_NEW_POST_LIMIT))
     scroll_px_val = int(config.get("scroll_px", POST_SCROLL_PX))
     max_post_scrolls = int(config.get("max_post_scrolls", max_post_scrolls))
+    initial_load_delay_val = float(config.get("initial_load_delay", INITIAL_LOAD_DELAY))
 
     completed_path = None
     browser = None
@@ -919,9 +926,9 @@ def run_youtube_channel_works_spider(
                     try:
                         active_page = ensure_page()
                         if active_page is not None:
-                            works.extend(collect_video_tab_with_playwright(active_page, channel_url, "videos", max_post_scrolls, log_callback, stop_event, pause_event, page_timeout, scroll_delay_val, no_new_limit, scroll_px_val))
+                            works.extend(collect_video_tab_with_playwright(active_page, channel_url, "videos", max_post_scrolls, log_callback, stop_event, pause_event, page_timeout, scroll_interval_val, no_new_limit, scroll_px_val, initial_load_delay_val))
                             if not should_stop(stop_event):
-                                works.extend(collect_video_tab_with_playwright(active_page, channel_url, "shorts", max_post_scrolls, log_callback, stop_event, pause_event, page_timeout, scroll_delay_val, no_new_limit, scroll_px_val))
+                                works.extend(collect_video_tab_with_playwright(active_page, channel_url, "shorts", max_post_scrolls, log_callback, stop_event, pause_event, page_timeout, scroll_interval_val, no_new_limit, scroll_px_val, initial_load_delay_val))
                     except PlaywrightTimeoutError:
                         log_line(log_callback, "  跳过浏览器 Videos/Shorts：页面加载超时。")
                     except Exception as exc:
@@ -931,7 +938,7 @@ def run_youtube_channel_works_spider(
                     try:
                         active_page = ensure_page()
                         if active_page is not None:
-                            works.extend(collect_posts_with_playwright(active_page, channel_url, max_post_scrolls, log_callback, stop_event, pause_event, page_timeout, scroll_delay_val, no_new_limit, scroll_px_val))
+                            works.extend(collect_posts_with_playwright(active_page, channel_url, max_post_scrolls, log_callback, stop_event, pause_event, page_timeout, scroll_interval_val, no_new_limit, scroll_px_val, initial_load_delay_val))
                     except PlaywrightTimeoutError:
                         log_line(log_callback, "  跳过 Posts：页面加载超时。")
                     except Exception as exc:

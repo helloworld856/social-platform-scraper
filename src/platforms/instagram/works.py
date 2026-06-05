@@ -305,7 +305,7 @@ def is_instagram_unavailable_page(page) -> bool:
     )
 
 
-def collect_profile_work_links(page, profile_url: str, max_works: int, max_scrolls: int, log_callback, stop_event=None, pause_event=None, page_timeout=None, scroll_delay=None, scroll_px=None, no_new_limit=None) -> list[dict[str, str]]:
+def collect_profile_work_links(page, profile_url: str, max_works: int, max_scrolls: int, log_callback, stop_event=None, pause_event=None, page_timeout=None, scroll_delay=None, scroll_px=None, no_new_limit=None, initial_load_delay=None) -> list[dict[str, str]]:
     if page_timeout is None:
         page_timeout = PAGE_LOAD_TIMEOUT
     if scroll_delay is None:
@@ -314,13 +314,15 @@ def collect_profile_work_links(page, profile_url: str, max_works: int, max_scrol
         scroll_px = SCROLL_PX
     if no_new_limit is None:
         no_new_limit = NO_NEW_SCROLL_LIMIT
+    if initial_load_delay is None:
+        initial_load_delay = INITIAL_LOAD_DELAY
 
     username = extract_username(profile_url)
     if not username:
         raise ValueError(f"无效的 Instagram 作者主页链接：{profile_url}")
 
     page.goto(clean_profile_url(profile_url), wait_until="domcontentloaded", timeout=page_timeout)
-    interruptible_sleep(INITIAL_LOAD_DELAY, stop_event)
+    interruptible_sleep(initial_load_delay, stop_event)
     try:
         page.wait_for_selector('main, article, a[href*="/p/"], a[href*="/reel/"], a[href*="/tv/"]', timeout=12000)
     except PlaywrightTimeoutError:
@@ -610,9 +612,11 @@ def extract_detail_from_page(page, fallback_media_type: str) -> dict[str, str]:
     )
 
 
-def enrich_work_detail(page, work: dict[str, str], log_callback, stop_event=None, page_timeout=None) -> dict[str, str]:
+def enrich_work_detail(page, work: dict[str, str], log_callback, stop_event=None, page_timeout=None, initial_load_delay=None) -> dict[str, str]:
     if page_timeout is None:
         page_timeout = PAGE_LOAD_TIMEOUT
+    if initial_load_delay is None:
+        initial_load_delay = INITIAL_LOAD_DELAY
     last_rate_limit = False
     for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
         if should_stop(stop_event):
@@ -622,7 +626,7 @@ def enrich_work_detail(page, work: dict[str, str], log_callback, stop_event=None
             page.wait_for_selector('article, section', timeout=8000)
         except Exception:
             pass
-        interruptible_sleep(INITIAL_LOAD_DELAY, stop_event)
+        interruptible_sleep(initial_load_delay, stop_event)
         if should_stop(stop_event):
             raise InstagramStoppedError("任务已停止")
         if not is_instagram_rate_limited_page(page, response):
@@ -689,6 +693,9 @@ def run_instagram_profile_works_spider(
     cooldown_max_val = float(config.get("cooldown_max", COOLDOWN_MAX_SECONDS))
     detail_delay_min_val = float(config.get("detail_delay_min", DETAIL_DELAY_MIN_SECONDS))
     detail_delay_max_val = float(config.get("detail_delay_max", DETAIL_DELAY_MAX_SECONDS))
+    initial_load_delay_val = float(config.get("initial_load_delay", INITIAL_LOAD_DELAY))
+    before_detail_delay_min_val = float(config.get("before_detail_delay_min", BEFORE_DETAIL_DELAY_MIN_SECONDS))
+    before_detail_delay_max_val = float(config.get("before_detail_delay_max", BEFORE_DETAIL_DELAY_MAX_SECONDS))
     max_scrolls = int(config.get("max_scrolls", max_scrolls))
 
     completed_path = None
@@ -730,12 +737,12 @@ def run_instagram_profile_works_spider(
                 written_count = 0
                 batch_written = 0
                 try:
-                    links = collect_profile_work_links(page, profile_url, max_works, max_scrolls, log_callback, stop_event, pause_event, page_timeout=page_timeout_val, scroll_delay=scroll_delay_val, scroll_px=scroll_px_val, no_new_limit=no_new_limit_val)
+                    links = collect_profile_work_links(page, profile_url, max_works, max_scrolls, log_callback, stop_event, pause_event, page_timeout=page_timeout_val, scroll_delay=scroll_delay_val, scroll_px=scroll_px_val, no_new_limit=no_new_limit_val, initial_load_delay=initial_load_delay_val)
                     log_line(log_callback, f"  @{username} 共收集到 {len(links)} 条作品链接，开始读取详情。")
                     if links:
                         interruptible_random_sleep(
-                            BEFORE_DETAIL_DELAY_MIN_SECONDS,
-                            BEFORE_DETAIL_DELAY_MAX_SECONDS,
+                            before_detail_delay_min_val,
+                            before_detail_delay_max_val,
                             log_callback,
                             stop_event,
                             reason="主页链接收集完成，开始详情页前",
@@ -749,7 +756,7 @@ def run_instagram_profile_works_spider(
                         if wait_if_paused(pause_event, stop_event):
                             break
                         try:
-                            detail = enrich_work_detail(page, work, log_callback, stop_event, page_timeout=page_timeout_val)
+                            detail = enrich_work_detail(page, work, log_callback, stop_event, page_timeout=page_timeout_val, initial_load_delay=initial_load_delay_val)
                             writer.writerow(row_from_work(serial_number, detail))
                             serial_number += 1
                             written_count += 1

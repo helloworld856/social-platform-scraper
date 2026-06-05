@@ -98,6 +98,11 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         self.reload_btn.setToolTip("重新扫描组件目录，加载新增或修改的工具")
         self.reload_btn.clicked.connect(self.reload_tools)
         header.addWidget(self.reload_btn)
+
+        self.global_config_btn = QPushButton("全局配置")
+        self.global_config_btn.setToolTip("配置所有工具共享的爬取参数（超时、滚动、冷却等）")
+        self.global_config_btn.clicked.connect(self._open_global_config)
+        header.addWidget(self.global_config_btn)
         root_layout.addLayout(header)
 
         # 水平分割器，左侧分类导航，中间工具表格，右侧详情简介
@@ -388,6 +393,23 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
             self.reload_btn.setText("✓ 重载成功")
             # 1.5 秒后清除成功复位状态按钮文本
             QTimer.singleShot(1500, lambda: self.reload_btn.setText("重载工具"))
+
+    def _open_global_config(self) -> None:
+        """打开全局配置对话框，编辑所有工具共享的爬取参数。"""
+        from src.ui.config_dialog import ConfigDialog
+        from src.core.config_store import (
+            GLOBAL_CONFIG_PARAMS,
+            GLOBAL_TOOL_ID,
+            load_config,
+            save_config,
+        )
+
+        defaults = {p.key: p.default for p in GLOBAL_CONFIG_PARAMS}
+        current = load_config(GLOBAL_TOOL_ID, defaults, None)
+        dialog = ConfigDialog("全局配置", GLOBAL_CONFIG_PARAMS, current, self, tool_id=GLOBAL_TOOL_ID)
+        if dialog.exec_() == ConfigDialog.Accepted:
+            values = dialog.get_values()
+            save_config(GLOBAL_TOOL_ID, values, defaults, None)
 
     def refresh_tools(self) -> None:
         """

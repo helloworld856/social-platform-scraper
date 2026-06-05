@@ -5,6 +5,7 @@ from datetime import datetime
 from src.core import (
     MultiSheetXlsxWriter,
     connect_existing_chromium,
+    interruptible_sleep,
     should_stop,
     wait_if_paused,
     DEFAULT_X_CDP_URL,
@@ -60,6 +61,8 @@ def run_facebook_keyword_search_spider(
     
     max_posts = int(config.get("max_posts", 100))
     collect_comments_bool = (config.get("collect_comments", "否") == "是")
+    cooldown_min_val = float(config.get("cooldown_min", 1.0))
+    cooldown_max_val = float(config.get("cooldown_max", 3.0))
     
     try:
         with sync_playwright() as p:
@@ -179,8 +182,8 @@ def run_facebook_keyword_search_spider(
                             writer.save()
                             
                         # 冷却时间
-                        cooldown = random.uniform(1.0, 3.0)
-                        page.wait_for_timeout(cooldown * 1000)
+                        delay = random.uniform(cooldown_min_val, cooldown_max_val)
+                        interruptible_sleep(delay, stop_event)
                         
                     except Exception as e:
                         log_line(log_callback, f"  详情解析失败: {e}")

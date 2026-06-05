@@ -162,18 +162,14 @@ class YouTubeChannelWorksWindow(SimpleToolWindow):
     def tool_config_params(self):
         return [
             ConfigParam("max_video_items", "最多作品数", kind="int", default=5000, minimum=1, maximum=5000),
-            ConfigParam("page_load_timeout", "页面加载超时(毫秒)", kind="int", default=45000, minimum=10000, maximum=120000, step=1000),
-            ConfigParam("scroll_delay", "滚动间隔(秒)", kind="float", default=0.8, minimum=0.1, maximum=5.0, step=0.1, decimals=1),
-            ConfigParam("no_new_scroll_limit", "无新内容停止阈值", kind="int", default=6, minimum=2, maximum=50),
-            ConfigParam("scroll_px", "每次滚动像素(px)", kind="int", default=2800, minimum=500, maximum=10000, step=100),
             ConfigParam("max_post_scrolls", "帖子最大滚动次数", kind="int", default=200, minimum=1, maximum=5000),
-            ConfigParam("save_batch_size", "每批保存条数", kind="int", default=10, minimum=1, maximum=100),
+            ConfigParam("initial_load_delay", "初始加载等待(秒)", kind="float", default=1.8, minimum=0.5, maximum=10.0, step=0.1, decimals=1),
         ]
 
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
         from src.platforms.youtube.channel_works import run_youtube_channel_works_spider
 
-        config = {k: v for k, v in values.items() if k in ("max_video_items", "page_load_timeout", "scroll_delay", "no_new_scroll_limit", "scroll_px", "max_post_scrolls", "save_batch_size")}
+        config = {k: v for k, v in values.items() if k in ("max_video_items", "page_load_timeout", "scroll_interval", "no_new_scroll_limit", "scroll_px", "max_post_scrolls", "save_batch_size", "initial_load_delay")}
         return run_youtube_channel_works_spider(
             values["api_key"],
             values["channel_urls"],
@@ -211,7 +207,6 @@ class YouTubeCommentsWindow(SimpleToolWindow):
 
     def tool_config_params(self):
         return [
-            ConfigParam("comment_top_limit", "最多输出评论数", kind="int", default=100, minimum=1, maximum=500),
             ConfigParam("youtube_api_page_size", "评论每页条数", kind="int", default=100, minimum=1, maximum=100),
         ]
 

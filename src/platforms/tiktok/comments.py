@@ -907,7 +907,7 @@ def fetch_comments_via_page_api(page, video_id: str, collector: CommentCollector
     return total_added
 
 
-def collect_video_comments(page, video_url: str, max_scan_comments: int, log_callback, stop_event=None, pause_event=None, comment_top_limit: int | None = None, page_load_timeout: int | None = None, scroll_pause: float | None = None, max_scroll_rounds: int | None = None) -> list[dict[str, Any]]:
+def collect_video_comments(page, video_url: str, max_scan_comments: int, log_callback, stop_event=None, pause_event=None, comment_top_limit: int | None = None, page_load_timeout: int | None = None, scroll_pause: float | None = None, max_scroll_rounds: int | None = None, comment_wait_timeout: int | None = None, no_new_scroll_limit: int | None = None) -> list[dict[str, Any]]:
     """
     单个视频评论收集主调度程序。
     1. 页面监听：给 Playwright 页面注册 'response' 事件处理器，拦截页面自加载或滚动的 API 请求。
@@ -923,6 +923,8 @@ def collect_video_comments(page, video_url: str, max_scan_comments: int, log_cal
     _page_timeout = page_load_timeout if page_load_timeout is not None else PAGE_LOAD_TIMEOUT
     _scroll_pause = scroll_pause if scroll_pause is not None else SCROLL_PAUSE
     _max_scroll_rounds = max_scroll_rounds if max_scroll_rounds is not None else MAX_SCROLL_ROUNDS
+    _comment_wait_timeout = comment_wait_timeout if comment_wait_timeout is not None else COMMENT_WAIT_TIMEOUT
+    _no_new_scroll_limit = no_new_scroll_limit if no_new_scroll_limit is not None else NO_NEW_SCROLL_LIMIT
     page.on("response", collector.handle_response)
     try:
         page.goto(video_url, wait_until="domcontentloaded", timeout=_page_timeout)
@@ -943,7 +945,7 @@ def collect_video_comments(page, video_url: str, max_scan_comments: int, log_cal
 
         try:
             if opened:
-                page.wait_for_selector("[data-e2e='comment-level-1'], [data-e2e='browse-comment-list']", timeout=COMMENT_WAIT_TIMEOUT)
+                page.wait_for_selector("[data-e2e='comment-level-1'], [data-e2e='browse-comment-list']", timeout=_comment_wait_timeout)
         except PlaywrightTimeoutError:
             log_callback("  未等到评论 DOM，继续通过接口响应和滚动尝试。")
 
@@ -976,8 +978,8 @@ def collect_video_comments(page, video_url: str, max_scan_comments: int, log_cal
             current_count = len(collector.comments)
             if current_count == last_count:
                 no_new_rounds += 1
-                if no_new_rounds >= NO_NEW_SCROLL_LIMIT:
-                    log_callback(f"  连续 {NO_NEW_SCROLL_LIMIT} 次滚动没有新增主楼评论，停止当前视频。")
+                if no_new_rounds >= _no_new_scroll_limit:
+                    log_callback(f"  连续 {_no_new_scroll_limit} 次滚动没有新增主楼评论，停止当前视频。")
                     break
             else:
                 no_new_rounds = 0
@@ -1042,6 +1044,11 @@ def run_tiktok_top_comments_spider(
     config_page_load_timeout = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
     config_scroll_pause = float(config.get("scroll_interval", SCROLL_PAUSE))
     config_max_scroll_rounds = int(config.get("max_scroll_rounds", MAX_SCROLL_ROUNDS))
+    comment_wait_timeout_val = int(config.get("comment_wait_timeout", COMMENT_WAIT_TIMEOUT))
+    no_new_scroll_limit_val = int(config.get("no_new_scroll_limit", NO_NEW_SCROLL_LIMIT))
+    video_batch_cooldown_every_val = int(config.get("video_batch_cooldown_every", VIDEO_BATCH_COOLDOWN_EVERY))
+    video_batch_cooldown_min_val = float(config.get("video_batch_cooldown_min", VIDEO_BATCH_COOLDOWN_MIN))
+    video_batch_cooldown_max_val = float(config.get("video_batch_cooldown_max", VIDEO_BATCH_COOLDOWN_MAX))
 
     completed_path = None
     page = None
@@ -1081,7 +1088,7 @@ def run_tiktok_top_comments_spider(
                 video_url = entry["视频链接"]
                 log_callback(f"[{progress_index}/{len(entries)}] 读取评论：{video_url}")
                 try:
-                    comments = collect_video_comments(page, video_url, max_scan_comments, log_callback, stop_event, pause_event=pause_event, comment_top_limit=comment_top_limit, page_load_timeout=config_page_load_timeout, scroll_pause=config_scroll_pause, max_scroll_rounds=config_max_scroll_rounds)
+                    comments = collect_video_comments(page, video_url, max_scan_comments, log_callback, stop_event, pause_event=pause_event, comment_top_limit=comment_top_limit, page_load_timeout=config_page_load_timeout, scroll_pause=config_scroll_pause, max_scroll_rounds=config_max_scroll_rounds, comment_wait_timeout=comment_wait_timeout_val, no_new_scroll_limit=no_new_scroll_limit_val)
                     rows = build_top_rows(video_index, video_url, comments, comment_top_limit=comment_top_limit)
                     if not rows:
                         rows = [empty_video_row(video_index, video_url)]
@@ -1100,13 +1107,13 @@ def run_tiktok_top_comments_spider(
 
                 if (
                     progress_index < len(entries)
-                    and progress_index % VIDEO_BATCH_COOLDOWN_EVERY == 0
+                    and progress_index % video_batch_cooldown_every_val == 0
                     and random_cooldown(
                         log_callback=log_callback,
                         stop_event=stop_event,
-                        min_seconds=VIDEO_BATCH_COOLDOWN_MIN,
-                        max_seconds=VIDEO_BATCH_COOLDOWN_MAX,
-                        reason=f"已连续处理 {VIDEO_BATCH_COOLDOWN_EVERY} 个视频，降低 TikTok 访问频率",
+                        min_seconds=video_batch_cooldown_min_val,
+                        max_seconds=video_batch_cooldown_max_val,
+                        reason=f"已连续处理 {video_batch_cooldown_every_val} 个视频，降低 TikTok 访问频率",
                     )
                 ):
                     log_callback("任务已停止。")

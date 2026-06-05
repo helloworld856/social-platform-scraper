@@ -573,7 +573,9 @@ def _scrape_single_tiktok_keyword(keyword, keyword_index, total_keywords,
                                   max_queue_size,
                                   cdp_port_or_url, log_callback, stop_event, pause_event,
                                   search_scroll_pause, config_max_search_scrolls,
-                                  no_new_scroll_limit, comment_top_limit, run_stamp):
+                                  no_new_scroll_limit, comment_top_limit,
+                                  run_stamp,
+                                  cooldown_min=3.0, cooldown_max=8.0):
     """
     抓取单个 TikTok 关键词的线程函数。
     根据指定的限制参数，滚动搜索结果页面，提取视频元数据。如果开启了评论抓取，将启动多个消费者子线程并发抓取评论。
@@ -708,7 +710,7 @@ def _scrape_single_tiktok_keyword(keyword, keyword_index, total_keywords,
                         log(f"    跳过：{exc}")
                     # 每处理 20 个候选视频进行一次随机冷却，防止风控
                     if scanned_count and scanned_count % 20 == 0:
-                        if random_cooldown(log, stop_event, 3.0, 8.0):
+                        if random_cooldown(log, stop_event, cooldown_min, cooldown_max):
                             break
 
                 # 各种边界条件判断，是否跳出搜索滚动循环
@@ -781,6 +783,8 @@ def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str,
     max_parallel_tabs = max(1, min(3, int(config.get("max_parallel_tabs", 1))))
     max_comment_tabs = max(1, min(3, int(config.get("max_comment_tabs", 1))))
     max_queue_size = max(10, min(10000, int(config.get("max_queue_size", 5000))))
+    cooldown_min_val = float(config.get("cooldown_min", 3.0))
+    cooldown_max_val = float(config.get("cooldown_max", 8.0))
 
     output_paths: list[str] = []
     try:
@@ -814,6 +818,7 @@ def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str,
                     search_scroll_pause, config_max_search_scrolls,
                     no_new_scroll_limit, comment_top_limit,
                     run_stamp,
+                    cooldown_min_val, cooldown_max_val,
                 )
                 if path:
                     output_paths.append(path)
@@ -844,6 +849,7 @@ def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str,
                     search_scroll_pause, config_max_search_scrolls,
                     no_new_scroll_limit, comment_top_limit,
                     run_stamp,
+                    cooldown_min_val, cooldown_max_val,
                 )
                 future_to_keyword[future] = keyword
 
