@@ -194,36 +194,83 @@ def extract_view_count(article) -> tuple[str, float]:
             continue
     return "", 0
 
-def extract_followers_count(page, profile_url: str, page_timeout=None, stop_event=None) -> str:
+def extract_followers_count(page, profile_url: str, page_timeout=None, stop_event=None, needs_navigation=True) -> str:
     if page_timeout is None:
         page_timeout = PAGE_LOAD_TIMEOUT
-    try:
-        page.goto(profile_url, wait_until="domcontentloaded", timeout=page_timeout)
+    
+    if needs_navigation:
         try:
-            page.wait_for_selector('a[href*="/followers"]', state="attached", timeout=10000)
+            # 去除末尾斜杠以确保对比一致
+            target_clean = profile_url.rstrip('/').lower()
+            current_clean = page.url.rstrip('/').lower()
+            if target_clean not in current_clean:
+                page.goto(profile_url, wait_until="domcontentloaded", timeout=page_timeout)
         except Exception:
-            pass
-        interruptible_sleep(2, stop_event)
-    except Exception:
-        return ""
+            return ""
 
     selectors = [
         'a[href$="/followers"]',
         'a[href*="/followers"]',
         'a[href*="/verified_followers"]',
+        'text=/(?:followers?|粉丝|关注者|粉絲|關注者|フォロワー|팔로워|seguidores?|abonn[eé]s?|читатели|متابع(ون)?|takipçi(ler)?|pengikut|फ़ॉलोअर्स)/i',
     ]
-    for selector in selectors:
+
+    start_time = time.time()
+    max_poll_time = 15  # 最多轮询15秒等待网络数据返回
+    
+    while time.time() - start_time < max_poll_time:
+        if should_stop(stop_event):
+            break
+            
+        # 尝试绕过敏感内容警告 (Sensitive Content Warning)
         try:
-            for node in page.locator(selector).all():
-                text = node.inner_text(timeout=1500).strip()
-                aria = node.get_attribute("aria-label", timeout=1500) or ""
-                raw = text or aria
-                if raw and re.search(r"follower|粉丝|フォロワー|followers", raw, re.IGNORECASE):
-                    match = re.search(r"([\d,.]+(?:\.\d+)?\s*(?:[KkMmBb]|千|万|萬|亿|億)?)", raw)
-                    if match:
-                        return expand_compact_number(match.group(1).strip())
+            btn_selectors = [
+                'div[data-testid="empty_state_button_text"]',
+                'div[role="button"]:has-text("view profile")',
+                'div[role="button"]:has-text("查看个人主页")',
+                'div[role="button"]:has-text("プロフィールを表示")'
+            ]
+            for btn_sel in btn_selectors:
+                btn = page.locator(btn_sel)
+                if btn.count() > 0 and btn.first.is_visible(timeout=100):
+                    btn.first.click(timeout=1000)
+                    interruptible_sleep(1.0, stop_event)
+                    break
         except Exception:
-            continue
+            pass
+
+        for selector in selectors:
+            try:
+                for node in page.locator(selector).all():
+                    # 使用 text_content() 代替 inner_text()，即使被弹窗遮挡也能读取
+                    text = node.text_content(timeout=500) or ""
+                    aria = node.get_attribute("aria-label", timeout=500) or ""
+                    
+                    # 为了应对文本选择器匹配到最深层节点（只有“粉丝”而无数字）的情况，向上获取父级和祖父级的文本
+                    family_text = ""
+                    try:
+                        family_text = node.evaluate("""n => {
+                            let p1 = n.parentElement ? n.parentElement.textContent : '';
+                            let p2 = (n.parentElement && n.parentElement.parentElement) ? n.parentElement.parentElement.textContent : '';
+                            return [n.textContent, p1, p2].join(' | ');
+                        }""")
+                    except Exception:
+                        pass
+                    
+                    for raw in (text, aria, family_text):
+                        if not raw:
+                            continue
+                            
+                        # 确保数字紧挨着粉丝关键词，防止误匹配个人简介里的无关文本
+                        pattern = r"([\d,.]+(?:\.\d+)?\s*(?:[KkMmBb]|千|万|萬|亿|億)?)\s*(?:followers?|粉丝|关注者|粉絲|關注者|フォロワー|팔로워|seguidores?|abonn[eé]s?|читатели|متابع(?:ون)?|takipçi(?:ler)?|pengikut|फ़ॉलोअर्स)"
+                        match = re.search(pattern, raw, re.IGNORECASE)
+                        if match:
+                            return expand_compact_number(match.group(1).strip())
+            except Exception:
+                continue
+                
+        interruptible_sleep(1.0, stop_event)
+
     return ""
 
 def extract_tweet_author_record(tweet_page, profile_page, tweet_url: str, log_callback, page_timeout=None, tweet_ready_timeout=None, stop_event=None) -> dict | None:
@@ -264,7 +311,6 @@ def extract_profile_record(profile_page, profile_url: str, log_callback, page_ti
     profile_url = normalize_x_url(profile_url)
     try:
         profile_page.goto(profile_url, wait_until="domcontentloaded", timeout=page_timeout if page_timeout is not None else PAGE_LOAD_TIMEOUT)
-        interruptible_sleep(3, stop_event)
     except Exception as e:
         log_callback(f"跳过：无法加载主页：{profile_url}，错误：{e}")
         return None
@@ -279,15 +325,31 @@ def extract_profile_record(profile_page, profile_url: str, log_callback, page_ti
     # Extract author name from profile header
     author_name = ""
     try:
-        name_selector = 'div[data-testid="profile_header_0"] div[dir="auto"] span'
-        name_locator = profile_page.locator(name_selector)
-        if name_locator.count() > 0:
-            author_name = name_locator.first.inner_text(timeout=2000).strip() or ""
+        profile_page.wait_for_selector('div[data-testid="UserName"]', state="attached", timeout=10000)
+    except Exception:
+        pass
+
+    try:
+        name_selectors = [
+            'div[data-testid="UserName"] span',
+            'div[data-testid="profile_header_0"] div[dir="auto"] span'
+        ]
+        for selector in name_selectors:
+            try:
+                for node in profile_page.locator(selector).all():
+                    text = node.text_content(timeout=500)
+                    if text and text.strip() and not text.strip().startswith('@'):
+                        author_name = text.strip()
+                        break
+            except Exception:
+                continue
+            if author_name:
+                break
     except Exception:
         pass
 
     # Extract followers count
-    followers = extract_followers_count(profile_page, profile_url, page_timeout=page_timeout, stop_event=stop_event)
+    followers = extract_followers_count(profile_page, profile_url, page_timeout=page_timeout, stop_event=stop_event, needs_navigation=False)
 
     return {
         "作者主页链接": profile_url,
@@ -311,6 +373,8 @@ def run_scraper(txt_path: str, input_mode: str, cdp_port_or_url: str, log_callba
         config = {}
     page_load_timeout = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
     tweet_ready_timeout = int(config.get("tweet_ready_timeout", TWEET_READY_TIMEOUT))
+    cooldown_min = float(config.get("cooldown_min", 2.0))
+    cooldown_max = float(config.get("cooldown_max", 5.0))
 
     output_path = None
     try:
@@ -385,9 +449,9 @@ def run_scraper(txt_path: str, input_mode: str, cdp_port_or_url: str, log_callba
                     else:
                         log_callback(f"  跳过：作者 {record['账号ID']} 已有更高浏览量推文。")
                 
-                if index % 10 == 0:
-                    if random_cooldown(log_callback, stop_event, 3.0, 8.0):
-                        break
+                # 每条采集完毕后应用配置的随机休眠
+                if random_cooldown(log_callback, stop_event, cooldown_min, cooldown_max):
+                    break
 
             for opened_page in (tweet_page, profile_page):
                 if opened_page is not None and not opened_page.is_closed():
