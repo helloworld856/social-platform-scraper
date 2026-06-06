@@ -376,11 +376,10 @@ def collect_profile_tweets(
 
         for text_lbl in ['view original', '查看原文', '原文を表示', 'show original', '原文を見る', 'show more', 'show more...', 'もっと見る', '더 보기', '显示更多']:
             try:
-                locs = page.locator(f"text='{text_lbl}'").all()
+                locs = page.locator(f"article >> text='{text_lbl}'").all()
                 for loc in locs:
                     try:
-                        if loc.is_visible(timeout=500):
-                            loc.click(timeout=1000)
+                        loc.click(timeout=500)
                     except (PlaywrightTimeoutError, PlaywrightError):
                         pass
             except (PlaywrightTimeoutError, PlaywrightError):

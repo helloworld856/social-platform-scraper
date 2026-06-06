@@ -126,15 +126,13 @@ def get_tweet_url(article) -> str:
 def get_tweet_text(article, stop_event=None) -> str:
     try:
         revert_locator = article.locator("text='view original', text='查看原文', text='原文を表示', text='show original', text='原文を見る'").first
-        if revert_locator.count() > 0:
-            revert_locator.click(timeout=1000)
+        revert_locator.click(timeout=500)
     except (PlaywrightTimeoutError, PlaywrightError):
         pass
 
     try:
         expand_locator = article.locator("text='show more', text='show more...', text='もっと見る', text='더 보기', text='显示更多'").first
-        if expand_locator.count() > 0:
-            expand_locator.click(timeout=1000)
+        expand_locator.click(timeout=500)
     except (PlaywrightTimeoutError, PlaywrightError):
         pass
 
@@ -745,8 +743,8 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
     no_change_threshold = int(config.get("no_new_scroll_limit", 5))
     max_search_scrolls = int(config.get("max_scrolls", MAX_SEARCH_SCROLLS))
     slice_days = int(config.get("slice_days", 7))
-    max_parallel_tabs = 1
-    max_comment_tabs = 1
+    max_parallel_tabs = max(1, min(3, int(config.get("max_parallel_tabs", 1))))
+    max_comment_tabs = max(1, min(3, int(config.get("max_comment_tabs", 1))))
     max_queue_size = max(10, min(10000, int(config.get("max_queue_size", 5000))))
     comment_no_new_scroll_limit = int(config.get("comment_no_new_scroll_limit", 5))
     search_refresh_count = int(config.get("search_refresh_count", 3))

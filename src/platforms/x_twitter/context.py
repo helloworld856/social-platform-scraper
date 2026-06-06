@@ -212,15 +212,13 @@ def get_tweet_datetime(article) -> datetime | None:
 def get_tweet_text(article) -> str:
     try:
         revert_locator = article.locator("text='view original', text='查看原文', text='原文を表示', text='show original', text='原文を見る'").first
-        if revert_locator.count() > 0:
-            revert_locator.click(timeout=1000)
+        revert_locator.click(timeout=500)
     except (PlaywrightTimeoutError, PlaywrightError):
         pass
 
     try:
         expand_locator = article.locator("text='show more', text='show more...', text='もっと見る', text='더 보기', text='显示更多'").first
-        if expand_locator.count() > 0:
-            expand_locator.click(timeout=1000)
+        expand_locator.click(timeout=500)
     except (PlaywrightTimeoutError, PlaywrightError):
         pass
 
