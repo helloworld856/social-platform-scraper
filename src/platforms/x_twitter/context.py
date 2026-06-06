@@ -5,7 +5,7 @@ import re
 import time
 import urllib.parse
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError, Error as PlaywrightError
 
 from src.core import (
     XlsxRowWriter,
@@ -78,7 +78,7 @@ def datetime_from_status_id(status_id: str) -> datetime | None:
     try:
         timestamp_ms = (int(status_id) >> 22) + TWITTER_EPOCH_MS
         return datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
-    except Exception:
+    except (ValueError, TypeError, OverflowError):
         return None
 
 def extract_profile_url_from_tweet_url(url: str) -> str:
@@ -146,7 +146,7 @@ def safe_text(locator, default: str = "") -> str:
         if locator.count() <= 0:
             return default
         return locator.first.inner_text(timeout=1800).strip() or default
-    except Exception:
+    except (PlaywrightTimeoutError, PlaywrightError, ValueError):
         return default
 
 def safe_attr(locator, attr: str, default: str = "") -> str:
@@ -154,7 +154,7 @@ def safe_attr(locator, attr: str, default: str = "") -> str:
         if locator.count() <= 0:
             return default
         return locator.first.get_attribute(attr, timeout=1800) or default
-    except Exception:
+    except (PlaywrightTimeoutError, PlaywrightError, ValueError, KeyError):
         return default
 
 def normalize_metric_text(text: str) -> str:
@@ -206,46 +206,23 @@ def get_tweet_datetime(article) -> datetime | None:
         return None
     try:
         return datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
-    except Exception:
+    except (ValueError, TypeError):
         return None
 
 def get_tweet_text(article) -> str:
     try:
-        article.evaluate("""el => {
-            // Step 1: Revert auto-translation — click "View original" / "查看原文" / "原文を表示"
-            const revertTexts = ['view original', '查看原文', '原文を表示', 'show original', '原文を見る'];
-            const allNodes = el.querySelectorAll('*');
-            for (const node of allNodes) {
-                const text = (node.textContent || '').trim().toLowerCase();
-                if (!text || node.children.length > 0) continue;
-                if (revertTexts.includes(text)) {
-                    try { node.click(); } catch (_) {}
-                    break;
-                }
-            }
-
-            // Step 2: Remove CSS truncation to reveal full text
-            const tweetText = el.querySelector('[data-testid="tweetText"]');
-            if (!tweetText) return;
-            tweetText.style.setProperty('max-height', 'none', 'important');
-            tweetText.style.setProperty('overflow', 'visible', 'important');
-            tweetText.style.setProperty('-webkit-line-clamp', 'unset', 'important');
-            tweetText.style.setProperty('display', 'block', 'important');
-            tweetText.style.setProperty('white-space', 'normal', 'important');
-
-            // Step 3: Click "Show more" if present (for dynamic-load cases)
-            const expandTexts = ['show more', 'show more...', 'もっと見る', '더 보기'];
-            for (const node of allNodes) {
-                const text = (node.textContent || '').trim().toLowerCase();
-                if (!text || node.children.length > 0) continue;
-                if (!expandTexts.includes(text)) continue;
-                try { node.click(); } catch (_) {}
-                break;
-            }
-        }""")
-        time.sleep(0.3)
-    except Exception:
+        revert_locator = article.locator("text='view original', text='查看原文', text='原文を表示', text='show original', text='原文を見る'").first
+        revert_locator.click(timeout=500)
+    except (PlaywrightTimeoutError, PlaywrightError):
         pass
+
+    try:
+        expand_locator = article.locator("text='show more', text='show more...', text='もっと見る', text='더 보기', text='显示更多'").first
+        expand_locator.click(timeout=500)
+    except (PlaywrightTimeoutError, PlaywrightError):
+        pass
+
+    time.sleep(0.3)
     return safe_text(article.locator('[data-testid="tweetText"]'))
 
 def collect_status_urls(article, profile_handle: str = "") -> list[str]:

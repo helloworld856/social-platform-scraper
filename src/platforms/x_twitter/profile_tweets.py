@@ -6,10 +6,11 @@ import re
 import time
 
 try:
-    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, Error as PlaywrightError
     from playwright.sync_api import sync_playwright
 except ModuleNotFoundError:
     PlaywrightTimeoutError = TimeoutError
+    PlaywrightError = Exception
     sync_playwright = None
 
 from src.core import (
@@ -242,9 +243,7 @@ def extract_visible_profile_tweets(page, username: str) -> list[dict[str, str]]:
                 return '';
             };
 
-            // Phase 1: collect matching articles and apply mutations
-            const revertTexts = ['view original', '查看原文', '原文を表示', 'show original', '原文を見る'];
-            const expandTexts = ['show more', 'show more...', 'もっと見る', '더 보기'];
+            // Phase 1: collect matching articles
             const articles = [];
             for (const article of document.querySelectorAll('article[data-testid="tweet"], article')) {
                 try {
@@ -252,30 +251,6 @@ def extract_visible_profile_tweets(page, username: str) -> list[dict[str, str]]:
                     const info = ownStatus(article);
                     if (!info.postId || normalize(info.handle) !== username) continue;
 
-                    const textEl = article.querySelector('[data-testid="tweetText"]');
-                    if (textEl) {
-                        const allNodes = article.querySelectorAll('*');
-                        for (const node of allNodes) {
-                            const nodeText = (node.textContent || '').trim().toLowerCase();
-                            if (!nodeText || node.children.length > 0) continue;
-                            if (revertTexts.includes(nodeText)) {
-                                try { node.click(); } catch (_) {}
-                                break;
-                            }
-                        }
-                        textEl.style.setProperty('max-height', 'none', 'important');
-                        textEl.style.setProperty('overflow', 'visible', 'important');
-                        textEl.style.setProperty('-webkit-line-clamp', 'unset', 'important');
-                        textEl.style.setProperty('display', 'block', 'important');
-                        textEl.style.setProperty('white-space', 'normal', 'important');
-                        for (const node of allNodes) {
-                            const nodeText = (node.textContent || '').trim().toLowerCase();
-                            if (!nodeText || node.children.length > 0) continue;
-                            if (!expandTexts.includes(nodeText)) continue;
-                            try { node.click(); } catch (_) {}
-                            break;
-                        }
-                    }
                     const timeEl = article.querySelector('time');
                     const publishedAt = timeEl ? (timeEl.getAttribute('datetime') || '') : '';
                     const href = info.href.startsWith('http') ? info.href : `https://x.com${info.href}`;
@@ -399,6 +374,17 @@ def collect_profile_tweets(
         if wait_if_paused(pause_event, stop_event):
             break
 
+        for text_lbl in ['view original', '查看原文', '原文を表示', 'show original', '原文を見る', 'show more', 'show more...', 'もっと見る', '더 보기', '显示更多']:
+            try:
+                locs = page.locator(f"article >> text='{text_lbl}'").all()
+                for loc in locs:
+                    try:
+                        loc.click(timeout=500)
+                    except (PlaywrightTimeoutError, PlaywrightError):
+                        pass
+            except (PlaywrightTimeoutError, PlaywrightError):
+                pass
+            
         visible_tweets = extract_visible_profile_tweets(page, username)
         added = 0
         for tweet in visible_tweets:
@@ -416,7 +402,7 @@ def collect_profile_tweets(
                     pub_dt = datetime.strptime(pub_time, "%Y-%m-%d %H:%M:%S")
                     if not (start_dt.date() <= pub_dt.date() <= end_dt.date()):
                         continue
-                except Exception:
+                except (ValueError, TypeError):
                     continue
                     
             normalized_tweet["profile_url"] = profile_url

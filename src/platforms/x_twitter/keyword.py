@@ -9,7 +9,7 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError, Error as PlaywrightError
 
 from src.core import (
     XlsxRowWriter,
@@ -62,7 +62,7 @@ def safe_text(locator, default: str = "") -> str:
         if locator.count() <= 0:
             return default
         return locator.first.inner_text(timeout=1500).strip() or default
-    except Exception:
+    except (PlaywrightTimeoutError, PlaywrightError, ValueError):
         return default
 
 def safe_attr(locator, attr: str, default: str = "") -> str:
@@ -70,7 +70,7 @@ def safe_attr(locator, attr: str, default: str = "") -> str:
         if locator.count() <= 0:
             return default
         return locator.first.get_attribute(attr, timeout=1500) or default
-    except Exception:
+    except (PlaywrightTimeoutError, PlaywrightError, ValueError, KeyError):
         return default
 
 def collect_status_urls(article) -> list[str]:
@@ -78,13 +78,13 @@ def collect_status_urls(article) -> list[str]:
     seen = set()
     try:
         anchors = article.locator('a[href*="/status/"]').all()
-    except Exception:
+    except (PlaywrightTimeoutError, PlaywrightError):
         return urls
 
     for anchor in anchors:
         try:
             href = anchor.get_attribute("href") or ""
-        except Exception:
+        except (PlaywrightTimeoutError, PlaywrightError, KeyError):
             continue
         match = STATUS_PATH_RE.search(href)
         if not match:
@@ -116,7 +116,7 @@ def article_contains_nested_tweet(article) -> bool:
     try:
         nested_articles = article.locator('article[data-testid="tweet"]').count()
         return nested_articles > 0
-    except Exception:
+    except (PlaywrightTimeoutError, PlaywrightError):
         return False
 
 def get_tweet_url(article) -> str:
@@ -125,41 +125,18 @@ def get_tweet_url(article) -> str:
 
 def get_tweet_text(article, stop_event=None) -> str:
     try:
-        article.evaluate("""el => {
-            // Step 1: Revert auto-translation — click "View original" / "查看原文" / "原文を表示"
-            const revertTexts = ['view original', '查看原文', '原文を表示', 'show original', '原文を見る'];
-            const allNodes = el.querySelectorAll('*');
-            for (const node of allNodes) {
-                const text = (node.textContent || '').trim().toLowerCase();
-                if (!text || node.children.length > 0) continue;
-                if (revertTexts.includes(text)) {
-                    try { node.click(); } catch (_) {}
-                    break;
-                }
-            }
-
-            // Step 2: Remove CSS truncation to reveal full text
-            const tweetText = el.querySelector('[data-testid="tweetText"]');
-            if (!tweetText) return;
-            tweetText.style.setProperty('max-height', 'none', 'important');
-            tweetText.style.setProperty('overflow', 'visible', 'important');
-            tweetText.style.setProperty('-webkit-line-clamp', 'unset', 'important');
-            tweetText.style.setProperty('display', 'block', 'important');
-            tweetText.style.setProperty('white-space', 'normal', 'important');
-
-            // Step 3: Click "Show more" if present (for dynamic-load cases)
-            const expandTexts = ['show more', 'show more...', 'もっと見る', '더 보기'];
-            for (const node of allNodes) {
-                const text = (node.textContent || '').trim().toLowerCase();
-                if (!text || node.children.length > 0) continue;
-                if (!expandTexts.includes(text)) continue;
-                try { node.click(); } catch (_) {}
-                break;
-            }
-        }""")
-        interruptible_sleep(0.3, stop_event)
-    except Exception:
+        revert_locator = article.locator("text='view original', text='查看原文', text='原文を表示', text='show original', text='原文を見る'").first
+        revert_locator.click(timeout=500)
+    except (PlaywrightTimeoutError, PlaywrightError):
         pass
+
+    try:
+        expand_locator = article.locator("text='show more', text='show more...', text='もっと見る', text='더 보기', text='显示更多'").first
+        expand_locator.click(timeout=500)
+    except (PlaywrightTimeoutError, PlaywrightError):
+        pass
+
+    interruptible_sleep(0.3, stop_event)
     return safe_text(article.locator('[data-testid="tweetText"]'), default="无文字内容")
 
 def get_tweet_time(article) -> str:
@@ -169,7 +146,7 @@ def get_tweet_time(article) -> str:
     try:
         dt_obj = datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
         return dt_obj.strftime("%Y-%m-%d %H:%M:%S")
-    except Exception:
+    except (ValueError, TypeError):
         return raw_time
 
 def extract_metric_value(locator, default: str = "未知") -> str:
@@ -186,7 +163,7 @@ def extract_metric_value(locator, default: str = "未知") -> str:
             return expand_compact_number(match.group(1))
         if aria:
             return "0"
-    except Exception:
+    except (PlaywrightTimeoutError, PlaywrightError, ValueError, AttributeError):
         pass
     return default
 
@@ -721,14 +698,22 @@ def _scrape_single_x_keyword(base_keyword, adv_params, port,
                 for t in comment_threads:
                     t.join(timeout=120)
 
-            writer.save()
+            if writer_lock:
+                with writer_lock:
+                    writer.save()
+            else:
+                writer.save()
             return output_path
 
     except Exception as exc:
         log(f"发生致命错误：{exc}")
         if writer is not None:
             try:
-                writer.save()
+                if writer_lock:
+                    with writer_lock:
+                        writer.save()
+                else:
+                    writer.save()
             except Exception:
                 pass
         return None
