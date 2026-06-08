@@ -13,6 +13,8 @@ from typing import Any
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
+from src.core.app_logging import log_line
+
 logger = logging.getLogger(__name__)
 
 # 默认 CDP 调试接口地址
@@ -203,8 +205,7 @@ def ensure_chrome_for_cdp(port_or_url: str | int, log_callback=None, wait_second
     if is_cdp_available(port_or_url):
         return
 
-    if log_callback:
-        log_callback("未检测到浏览器，正在自动启动 Chrome...")
+    log_line(log_callback, "未检测到浏览器，正在自动启动 Chrome...")
     launch_chrome_for_cdp(port_or_url)
 
     # 循环检查 CDP 可用性，设定 12 秒上限是考虑到老旧机器上 Chrome 进程冷启动的延迟时间

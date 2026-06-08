@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from functools import partial
 from typing import Any
 from urllib.parse import urlencode, urlparse
 
@@ -29,6 +30,9 @@ from src.core import (
     connect_existing_chromium,
     expand_compact_number,
     interruptible_sleep,
+    log_error,
+    log_line,
+    log_warn,
     random_cooldown,
     sanitize_csv_row,
     sanitize_csv_rows,
@@ -201,7 +205,7 @@ class CommentCollector:
     def __init__(self, max_scan_comments: int, log_callback, comment_top_limit: int | None = None) -> None:
         self.comment_top_limit = comment_top_limit if comment_top_limit is not None else TOP_COMMENT_LIMIT
         self.max_scan_comments = max(self.comment_top_limit, int(max_scan_comments or DEFAULT_SCAN_LIMIT))
-        self.log_callback = log_callback
+        self.log_callback = partial(log_line, log_callback)
         self.comments: list[dict[str, Any]] = []          # 最终的评论列表存储
         self.seen_ids: set[str] = set()                   # API 评论 ID 去重集合
         self.seen_dom_fingerprints: set[str] = set()       # DOM 评论特征去重集合
@@ -679,7 +683,7 @@ def collect_visible_dom_comments(page, collector: CommentCollector, log_callback
         if collector.add_comment(item.get("id", ""), item.get("like_count", 0), item.get("text", ""), "dom", item.get("create_time", "")):
             added += 1
     if added:
-        log_callback(f"  页面可见评论新增主楼评论 {added} 条，累计 {len(collector.comments)} 条。")
+        log_line(log_callback, f"  页面可见评论新增主楼评论 {added} 条，累计 {len(collector.comments)} 条。")
     return added
 
 
@@ -886,17 +890,17 @@ def fetch_comments_via_page_api(page, video_id: str, collector: CommentCollector
             last_error = f"status_code={status_code}, status_msg={status_msg}"
 
         if data is None:
-            log_callback(f"  主动评论接口失败：{last_error or '所有候选接口均失败'}")
+            log_error(log_callback, f"  主动评论接口失败：{last_error or '所有候选接口均失败'}")
             break
 
         added = collector.add_comments_from_payload(data, "api-fetch")
         total_added += added
         if added:
-            log_callback(f"  主动评论接口新增主楼评论 {added} 条，累计 {len(collector.comments)} 条。")
+            log_line(log_callback, f"  主动评论接口新增主楼评论 {added} 条，累计 {len(collector.comments)} 条。")
         else:
             status_code = data.get("status_code")
             status_msg = data.get("status_msg") or data.get("statusMsg") or ""
-            log_callback(f"  主动评论接口未获得主楼评论：status_code={status_code} status_msg={status_msg}")
+            log_line(log_callback, f"  主动评论接口未获得主楼评论：status_code={status_code} status_msg={status_msg}")
 
         next_cursor = data.get("cursor") or data.get("nextCursor") or data.get("next_cursor")
         if not has_more_comments(data.get("has_more")) or not next_cursor or str(next_cursor) == str(cursor):
@@ -930,7 +934,7 @@ def collect_video_comments(page, video_url: str, max_scan_comments: int, log_cal
         page.goto(video_url, wait_until="domcontentloaded", timeout=_page_timeout)
         time.sleep(2.5)
         if looks_blocked_or_captcha(page):
-            log_callback("  跳过：疑似验证码或风控页面。")
+            log_warn(log_callback, "  跳过：疑似验证码或风控页面。")
             return []
 
         api_added = fetch_comments_via_page_api(page, video_id, collector, log_callback, stop_event=stop_event, pause_event=pause_event, max_scroll_rounds=_max_scroll_rounds)
@@ -938,16 +942,16 @@ def collect_video_comments(page, video_url: str, max_scan_comments: int, log_cal
         if len(collector.comments) == 0:
             opened = open_comment_panel(page)
         if not opened and api_added == 0 and len(collector.comments) < collector.max_scan_comments:
-            log_callback("  评论入口未能打开，改用页面上下文评论接口。")
+            log_line(log_callback, "  评论入口未能打开，改用页面上下文评论接口。")
             fetch_comments_via_page_api(page, video_id, collector, log_callback, stop_event=stop_event, pause_event=pause_event, max_scroll_rounds=_max_scroll_rounds)
         if opened:
-            log_callback("  已点击评论入口。")
+            log_line(log_callback, "  已点击评论入口。")
 
         try:
             if opened:
                 page.wait_for_selector("[data-e2e='comment-level-1'], [data-e2e='browse-comment-list']", timeout=_comment_wait_timeout)
         except PlaywrightTimeoutError:
-            log_callback("  未等到评论 DOM，继续通过接口响应和滚动尝试。")
+            log_line(log_callback, "  未等到评论 DOM，继续通过接口响应和滚动尝试。")
 
         use_dom_fallback = len(collector.comments) == 0
         if use_dom_fallback:
@@ -960,7 +964,7 @@ def collect_video_comments(page, video_url: str, max_scan_comments: int, log_cal
         last_count = len(collector.comments)
         for round_index in range(_max_scroll_rounds):
             if should_stop(stop_event):
-                log_callback("  任务已停止。")
+                log_line(log_callback, "  任务已停止。")
                 break
             if wait_if_paused(pause_event, stop_event):
                 break
@@ -979,14 +983,14 @@ def collect_video_comments(page, video_url: str, max_scan_comments: int, log_cal
             if current_count == last_count:
                 no_new_rounds += 1
                 if no_new_rounds >= _no_new_scroll_limit:
-                    log_callback(f"  连续 {_no_new_scroll_limit} 次滚动没有新增主楼评论，停止当前视频。")
+                    log_warn(log_callback, f"  连续 {_no_new_scroll_limit} 次滚动没有新增主楼评论，停止当前视频。")
                     break
             else:
                 no_new_rounds = 0
                 last_count = current_count
 
             if round_index and round_index % 10 == 0:
-                log_callback(f"  已滚动 {round_index} 轮，累计主楼评论 {len(collector.comments)} 条。")
+                log_line(log_callback, f"  已滚动 {round_index} 轮，累计主楼评论 {len(collector.comments)} 条。")
 
         return collector.comments
     finally:
@@ -1054,39 +1058,39 @@ def run_tiktok_top_comments_spider(
     page = None
     try:
         if sync_playwright is None:
-            log_callback("缺少依赖：playwright。请先在当前运行环境执行 pip install -r requirements.txt，并执行 python -m playwright install chromium。")
+            log_line(log_callback, "缺少依赖：playwright。请先在当前运行环境执行 pip install -r requirements.txt，并执行 python -m playwright install chromium。")
             return
 
         entries = parse_video_entries(txt_path)
         if not entries:
-            log_callback("TXT 中没有找到有效的 TikTok 视频链接。")
+            log_warn(log_callback, "TXT 中没有找到有效的 TikTok 视频链接。")
             return
 
         max_scan_comments = max(comment_top_limit, int(max_scan_comments or DEFAULT_SCAN_LIMIT))
         output_path = build_output_path("tiktok", f"tiktok_top_comments_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
         writer = XlsxRowWriter(output_path, CSV_FIELDS)
-        log_callback(f"输出文件：{output_path}")
-        log_callback(f"最多扫描主楼评论数：{max_scan_comments}，每个视频输出点赞量前 {comment_top_limit} 条。")
+        log_line(log_callback, f"输出文件：{output_path}")
+        log_line(log_callback, f"最多扫描主楼评论数：{max_scan_comments}，每个视频输出点赞量前 {comment_top_limit} 条。")
 
         with sync_playwright() as playwright:
-            log_callback("正在连接本地 Chrome...")
+            log_line(log_callback, "正在连接本地 Chrome...")
             try:
                 _, context = connect_existing_chromium(playwright, cdp_port_or_url, log_callback=log_callback)
             except Exception as exc:
-                log_callback(f"连接失败：请确认 Chrome 已自动打开并已登录 TikTok。错误：{exc}")
+                log_error(log_callback, f"连接失败：请确认 Chrome 已自动打开并已登录 TikTok。错误：{exc}")
                 return
 
             page = context.new_page()
             for progress_index, entry in enumerate(entries, 1):
                 if should_stop(stop_event):
-                    log_callback("任务已停止。")
+                    log_line(log_callback, "任务已停止。")
                     break
                 if wait_if_paused(pause_event, stop_event):
                     break
 
                 video_index = entry["编号"]
                 video_url = entry["视频链接"]
-                log_callback(f"[{progress_index}/{len(entries)}] 读取评论：{video_url}")
+                log_line(log_callback, f"[{progress_index}/{len(entries)}] 读取评论：{video_url}")
                 try:
                     comments = collect_video_comments(page, video_url, max_scan_comments, log_callback, stop_event, pause_event=pause_event, comment_top_limit=comment_top_limit, page_load_timeout=config_page_load_timeout, scroll_pause=config_scroll_pause, max_scroll_rounds=config_max_scroll_rounds, comment_wait_timeout=comment_wait_timeout_val, no_new_scroll_limit=no_new_scroll_limit_val)
                     rows = build_top_rows(video_index, video_url, comments, comment_top_limit=comment_top_limit)
@@ -1095,15 +1099,15 @@ def run_tiktok_top_comments_spider(
                     writer.writerows(sanitize_csv_rows(rows))
                     writer.save()
                     written_count = len([row for row in rows if row.get("评论内容") and row.get("评论内容") != "该视频无评论"])
-                    log_callback(f"  完成：扫描主楼评论 {len(comments)} 条，写入 {written_count} 条并已保存。")
+                    log_line(log_callback, f"  完成：扫描主楼评论 {len(comments)} 条，写入 {written_count} 条并已保存。")
                 except PlaywrightTimeoutError:
                     writer.writerow(sanitize_csv_row(empty_video_row(video_index, video_url)))
                     writer.save()
-                    log_callback("  跳过：页面加载超时，已写入空评论占位行并保存。")
+                    log_warn(log_callback, "  跳过：页面加载超时，已写入空评论占位行并保存。")
                 except Exception as exc:
                     writer.writerow(sanitize_csv_row(empty_video_row(video_index, video_url)))
                     writer.save()
-                    log_callback(f"  跳过：{exc}，已写入空评论占位行并保存。")
+                    log_warn(log_callback, f"  跳过：{exc}，已写入空评论占位行并保存。")
 
                 if (
                     progress_index < len(entries)
@@ -1116,7 +1120,7 @@ def run_tiktok_top_comments_spider(
                         reason=f"已连续处理 {video_batch_cooldown_every_val} 个视频，降低 TikTok 访问频率",
                     )
                 ):
-                    log_callback("任务已停止。")
+                    log_line(log_callback, "任务已停止。")
                     break
 
             if page and not page.is_closed():
@@ -1124,7 +1128,7 @@ def run_tiktok_top_comments_spider(
 
         completed_path = output_path
         writer.save()
-        log_callback(f"完成，已保存：{output_path}")
+        log_line(log_callback, f"完成，已保存：{output_path}")
     finally:
         try:
             if page and not page.is_closed():

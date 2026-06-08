@@ -2,6 +2,7 @@
 核心基础工具包，提供配置、浏览器 CDP 连接、文件输出、通用数值及 CSV/Excel 格式化工具。
 """
 
+from src.core.app_logging import get_logger, log_error, log_line, log_warn, make_keyword_log, setup_console_logging
 from src.core.config_store import (
     GLOBAL_ALIAS_MAP,
     GLOBAL_CONFIG_DEFAULTS,
@@ -24,7 +25,7 @@ from src.core.tiktok_metadata import (
     resolve_tiktok_card_container,
 )
 from src.core.output import build_output_path, get_output_root, get_platform_output_dir, get_workspace_root
-from src.core.timing import interruptible_sleep, random_cooldown, should_stop, wait_if_paused
+from src.core.timing import interruptible_random_sleep, interruptible_sleep, random_cooldown, should_stop, wait_if_paused
 from src.core.number_format import expand_compact_number
 from src.core.csv_utils import sanitize_csv_cell, sanitize_csv_row, sanitize_csv_rows
 from src.core.xlsx import XlsxRowWriter, sanitize_xlsx_cell, MultiSheetXlsxWriter
@@ -49,6 +50,7 @@ __all__ = [
     "get_workspace_root",
     "extract_tiktok_video_title",
     "resolve_tiktok_card_container",
+    "interruptible_random_sleep",
     "interruptible_sleep",
     "random_cooldown",
     "should_stop",
@@ -60,4 +62,10 @@ __all__ = [
     "sanitize_xlsx_cell",
     "XlsxRowWriter",
     "MultiSheetXlsxWriter",
+    "log_line",
+    "log_warn",
+    "make_keyword_log",
+    "log_error",
+    "get_logger",
+    "setup_console_logging",
 ]

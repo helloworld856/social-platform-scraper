@@ -5,6 +5,9 @@ import inspect
 import importlib
 sys.path.insert(0, ".")
 
+from PyQt5.QtWidgets import QApplication
+app = QApplication.instance() or QApplication(sys.argv)
+
 from src.studio.registry import TOOLS
 from src.studio.base import load_object
 

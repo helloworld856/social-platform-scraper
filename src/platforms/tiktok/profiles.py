@@ -11,6 +11,9 @@ from src.core import (
     build_output_path,
     connect_existing_chromium,
     expand_compact_number,
+    log_error,
+    log_line,
+    log_warn,
     random_cooldown,
     sanitize_csv_row,
     should_stop,
@@ -146,31 +149,31 @@ def run_tiktok_profile_spider(txt_path: str, cdp_port_or_url: str, log_callback,
     try:
         profile_urls = parse_profile_urls(txt_path)
         if not profile_urls:
-            log_callback("TXT 中没有找到有效的 TikTok 博主主页链接。")
+            log_warn(log_callback, "TXT 中没有找到有效的 TikTok 博主主页链接。")
             return
 
         output_path = build_output_path("tiktok", f"tiktok_profiles_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
         writer = XlsxRowWriter(output_path, CSV_FIELDS)
 
         with sync_playwright() as p:
-            log_callback("正在连接本地 Chrome...")
+            log_line(log_callback, "正在连接本地 Chrome...")
             try:
                 _, context = connect_existing_chromium(p, cdp_port_or_url)
             except Exception as exc:
-                log_callback(f"连接失败：请确认 Chrome 已自动打开并已登录 TikTok。错误：{exc}")
+                log_error(log_callback, f"连接失败：请确认 Chrome 已自动打开并已登录 TikTok。错误：{exc}")
                 return
 
             page = context.new_page()
             for index, profile_url in enumerate(profile_urls, 1):
                 if should_stop(stop_event):
-                    log_callback("任务已停止。")
+                    log_line(log_callback, "任务已停止。")
                     break
                 if wait_if_paused(pause_event, stop_event):
                     break
-                log_callback(f"[{index}/{len(profile_urls)}] 提取博主信息：{profile_url}")
+                log_line(log_callback, f"[{index}/{len(profile_urls)}] 提取博主信息：{profile_url}")
                 try:
                     row = extract_profile_row(page, profile_url, page_load_timeout=page_load_timeout, captcha_wait=captcha_wait)
-                    log_callback(f"  完成：{row['博主名称']} | {row['博主ID']} | 粉丝 {row['粉丝量'] or '未提取'}")
+                    log_line(log_callback, f"  完成：{row['博主名称']} | {row['博主ID']} | 粉丝 {row['粉丝量'] or '未提取'}")
                 except Exception as exc:
                     row = {
                         "博主主页链接": profile_url,
@@ -179,7 +182,7 @@ def run_tiktok_profile_spider(txt_path: str, cdp_port_or_url: str, log_callback,
                         "粉丝量": "",
                         "作者简介": str(exc),
                     }
-                    log_callback(f"  失败：{exc}")
+                    log_error(log_callback, f"  失败：{exc}")
 
                 writer.writerow(sanitize_csv_row(row))
                 # 每抓取 5 个博主主页进行随机冷却，以避免触发高频风控限制
@@ -191,7 +194,7 @@ def run_tiktok_profile_spider(txt_path: str, cdp_port_or_url: str, log_callback,
                 page.close()
 
         writer.save()
-        log_callback(f"完成，已保存：{output_path}")
+        log_line(log_callback, f"完成，已保存：{output_path}")
         completed_path = output_path
     finally:
         finish_callback(completed_path)

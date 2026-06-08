@@ -24,7 +24,9 @@ from src.platforms.tiktok.profile_videos import (
     normalize_profile_url,
     parse_profile_urls,
     trigger_profile_lazy_load,
+    log_error,
     log_line,
+    log_warn,
 )
 
 CSV_FIELDS = ["序号", "视频链接", "播放量"]
@@ -59,12 +61,12 @@ def run_tiktok_profile_play_counts_spider(
     completed_path = None
     try:
         if sync_playwright is None:
-            log_line(log_callback, "缺少依赖：playwright。请先安装 requirements.txt 中的依赖。")
+            log_error(log_callback, "缺少依赖：playwright。请先安装 requirements.txt 中的依赖。")
             return
 
         profile_urls = parse_profile_urls(txt_path)
         if not profile_urls:
-            log_line(log_callback, "TXT 中没有找到有效的 TikTok 博主主页链接。")
+            log_warn(log_callback, "TXT 中没有找到有效的 TikTok 博主主页链接。")
             return
 
         output_path = build_output_path("tiktok", f"tiktok_profile_play_counts_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
@@ -78,7 +80,7 @@ def run_tiktok_profile_play_counts_spider(
             try:
                 _, context = connect_existing_chromium(playwright, cdp_port_or_url, log_callback=log_callback)
             except Exception as exc:
-                log_line(log_callback, f"连接失败：请确认 Chrome 已打开并已登录 TikTok。错误：{exc}")
+                log_error(log_callback, f"连接失败：请确认 Chrome 已打开并已登录 TikTok。错误：{exc}")
                 return
 
             profile_page = context.new_page()
@@ -90,7 +92,7 @@ def run_tiktok_profile_play_counts_spider(
                     break
                 profile_url = normalize_profile_url(raw_profile_url)
                 if not profile_url:
-                    log_line(log_callback, f"[{profile_index}/{len(profile_urls)}] 跳过无效主页：{raw_profile_url}")
+                    log_warn(log_callback, f"[{profile_index}/{len(profile_urls)}] 跳过无效主页：{raw_profile_url}")
                     continue
                 
                 match = re.search(r"tiktok\.com/(@[^/?#]+)", profile_url)
@@ -129,7 +131,7 @@ def run_tiktok_profile_play_counts_spider(
                     profile_page.goto(profile_url, wait_until="domcontentloaded", timeout=page_load_timeout)
                     interruptible_sleep(2.5, stop_event)
                 except PlaywrightTimeoutError:
-                    log_line(log_callback, "  主页加载超时，跳过。")
+                    log_warn(log_callback, "  主页加载超时，跳过。")
                     profile_page.remove_listener("response", handle_response)
                     continue
 
@@ -152,7 +154,7 @@ def run_tiktok_profile_play_counts_spider(
                         for item in new_items:
                             video_link = f"https://www.tiktok.com/{username}/video/{item['video_id']}"
                             play_count = item["play_count"]
-                            
+
                             row = {
                                 "序号": str(serial_number),
                                 "视频链接": video_link,
@@ -161,6 +163,7 @@ def run_tiktok_profile_play_counts_spider(
                             writer.writerow(sanitize_csv_row(row))
                             written_count += 1
                             serial_number += 1
+                            log_line(log_callback, f"    [{written_count}] {video_link} 播放量 {play_count}")
                     else:
                         no_new_count += 1
 
@@ -184,6 +187,6 @@ def run_tiktok_profile_play_counts_spider(
         log_line(log_callback, f"完成：写入 {written_count} 条，已保存：{output_path}")
     except Exception as e:
         import traceback
-        log_line(log_callback, f"发生异常: {e}\n{traceback.format_exc()}")
+        log_error(log_callback, f"发生异常: {e}\n{traceback.format_exc()}")
     finally:
         finish_callback(completed_path)

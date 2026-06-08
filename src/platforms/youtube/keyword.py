@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 from googleapiclient.discovery import build
 
-from src.core import XlsxRowWriter, MultiSheetXlsxWriter, build_output_path, interruptible_sleep, sanitize_csv_rows, should_stop, wait_if_paused
+from src.core import XlsxRowWriter, MultiSheetXlsxWriter, build_output_path, interruptible_sleep, log_error, log_line, log_warn, sanitize_csv_rows, should_stop, wait_if_paused
 from src.platforms.youtube.comments import extract_video_id, fetch_top_level_comments, format_youtube_datetime
 
 # Excel 输出表头字段定义
@@ -138,7 +138,7 @@ def iter_search_video_id_batches(youtube, keyword: str, max_results: int, limit_
                         seen_video_ids.add(video_id)
 
                 if batch_ids:
-                    log_callback(f"  {keyword}: 已找到 {len(seen_video_ids)} 个日期范围内的视频")
+                    log_line(log_callback, f"  {keyword}: 已找到 {len(seen_video_ids)} 个日期范围内的视频")
                     yield batch_ids
 
                 next_page_token = response.get("nextPageToken")
@@ -151,7 +151,7 @@ def iter_search_video_id_batches(youtube, keyword: str, max_results: int, limit_
         next_page_token = None
         while len(seen_video_ids) < max_results:
             if should_stop(stop_event):
-                log_callback("任务已停止。")
+                log_line(log_callback, "任务已停止。")
                 break
             if wait_if_paused(pause_event, stop_event):
                 break
@@ -177,7 +177,7 @@ def iter_search_video_id_batches(youtube, keyword: str, max_results: int, limit_
                     seen_video_ids.add(video_id)
 
             if batch_ids:
-                log_callback(f"  {keyword}: 已找到 {len(seen_video_ids)} 个日期范围内的视频")
+                log_line(log_callback, f"  {keyword}: 已找到 {len(seen_video_ids)} 个日期范围内的视频")
                 yield batch_ids
 
             next_page_token = response.get("nextPageToken")
@@ -248,7 +248,7 @@ def collect_video_ids_with_playwright(page, keyword: str, max_results: int, star
     """
     import urllib.parse
 
-    log_callback(f"  [浏览器优先] 搜索关键词：{keyword}...")
+    log_line(log_callback, f"  [浏览器优先] 搜索关键词：{keyword}...")
     video_ids: list[str] = []
     seen = set()
 
@@ -264,12 +264,12 @@ def collect_video_ids_with_playwright(page, keyword: str, max_results: int, star
             # 尝试等待视频元素渲染
             page.wait_for_selector('ytd-video-renderer, ytd-reel-item-renderer', timeout=min(15000, page_timeout))
         except Exception:
-            log_callback("  [浏览器优先] 未能即时等待到视频卡片，尝试直接向下滚动解析。")
+            log_line(log_callback, "  [浏览器优先] 未能即时等待到视频卡片，尝试直接向下滚动解析。")
 
         no_new_count = 0
         target_collect_limit = max_results
 
-        log_callback(f"  [浏览器优先] 开始滚动加载视频链接 (目标收集量: {target_collect_limit}, 最大滚动 {max_scrolls} 轮)...")
+        log_line(log_callback, f"  [浏览器优先] 开始滚动加载视频链接 (目标收集量: {target_collect_limit}, 最大滚动 {max_scrolls} 轮)...")
 
         # 在配置的滚动轮数范围内收集视频 ID
         for scroll_index in range(max_scrolls):
@@ -299,17 +299,17 @@ def collect_video_ids_with_playwright(page, keyword: str, max_results: int, star
                     added += 1
 
             if added > 0:
-                log_callback(f"    第 {scroll_index + 1} 次滚动：新增 {added} 条，已累计 {len(video_ids)} 条。")
+                log_line(log_callback, f"    第 {scroll_index + 1} 次滚动：新增 {added} 条，已累计 {len(video_ids)} 条。")
                 no_new_count = 0
             else:
                 no_new_count += 1
                 # 连续 N 次未搜集到新链接，认为列表内容已拉取到底
                 if no_new_count >= no_new_limit:
-                    log_callback(f"    连续 {no_new_limit} 次无新增链接，判定已加载到底。")
+                    log_line(log_callback, f"    连续 {no_new_limit} 次无新增链接，判定已加载到底。")
                     break
 
             if len(video_ids) >= target_collect_limit:
-                log_callback(f"    已收集到 {len(video_ids)} 条链接，已达到目标数量。")
+                log_line(log_callback, f"    已收集到 {len(video_ids)} 条链接，已达到目标数量。")
                 break
 
             # 向下滚动预设像素值以触发懒加载
@@ -318,7 +318,7 @@ def collect_video_ids_with_playwright(page, keyword: str, max_results: int, star
                 break
 
     except Exception as e:
-        log_callback(f"  [浏览器优先] Playwright 采集过程异常：{e}")
+        log_warn(log_callback, f"  [浏览器优先] Playwright 采集过程异常：{e}")
 
     return video_ids
 
@@ -374,7 +374,7 @@ def run_youtube_spider(api_key, keywords_list, max_results, limit_time_str, star
         # 强制走 API 模式，利用 publishedAfter / publishedBefore 在搜索阶段精确过滤。
         if use_browser and limit_time_bool:
             use_browser = False
-            log_callback("  [模式切换] 启用了时间过滤，浏览器模式无法按日期筛选，自动切换为 API 模式。")
+            log_line(log_callback, "  [模式切换] 启用了时间过滤，浏览器模式无法按日期筛选，自动切换为 API 模式。")
 
         # 尝试使用无头浏览器连接环境，获取视频链接
         if use_browser:
@@ -383,14 +383,14 @@ def run_youtube_spider(api_key, keywords_list, max_results, limit_time_str, star
             try:
                 playwright_context = sync_playwright().start()
                 browser, _ = connect_existing_chromium(playwright_context, DEFAULT_X_CDP_URL, log_callback=log_callback)
-                log_callback("  [浏览器优先] Chromium 已连接。")
+                log_line(log_callback, "  [浏览器优先] Chromium 已连接。")
             except Exception as e:
-                log_callback(f"  [浏览器优先] 浏览器启动失败 ({e})，将使用 API 模式。")
+                log_warn(log_callback, f"  [浏览器优先] 浏览器启动失败 ({e})，将使用 API 模式。")
                 use_browser = False
 
         for index, keyword in enumerate(keywords_list, 1):
             if should_stop(stop_event):
-                log_callback("任务已停止。")
+                log_line(log_callback, "任务已停止。")
                 break
             if wait_if_paused(pause_event, stop_event):
                 break
@@ -406,12 +406,12 @@ def run_youtube_spider(api_key, keywords_list, max_results, limit_time_str, star
             else:
                 writer = XlsxRowWriter(output_path, CSV_FIELDS)
             serial_number = 1
-            log_callback(f"[{index}/{len(keywords_list)}] 搜索关键词：{keyword}")
-            log_callback(f"  输出文件：{output_path}")
+            log_line(log_callback, f"[{index}/{len(keywords_list)}] 搜索关键词：{keyword}")
+            log_line(log_callback, f"  输出文件：{output_path}")
             if limit_time_bool:
-                log_callback(f"  日期范围：{start_date} 至 {end_date}")
+                log_line(log_callback, f"  日期范围：{start_date} 至 {end_date}")
             else:
-                log_callback("  日期范围：不限时间")
+                log_line(log_callback, "  日期范围：不限时间")
             
             all_video_ids = []
             
@@ -428,9 +428,9 @@ def run_youtube_spider(api_key, keywords_list, max_results, limit_time_str, star
                         page_timeout=browser_page_timeout, no_new_limit=browser_no_new_limit,
                     )
                     if not all_video_ids:
-                        log_callback("  [浏览器优先] 未获取到任何视频 ID，将 Fallback 自动切换到 API 模式。")
+                        log_line(log_callback, "  [浏览器优先] 未获取到任何视频 ID，将 Fallback 自动切换到 API 模式。")
                 except Exception as e:
-                    log_callback(f"  [浏览器优先] 模式失败 ({e})，将 Fallback 自动切换到 API 模式。")
+                    log_warn(log_callback, f"  [浏览器优先] 模式失败 ({e})，将 Fallback 自动切换到 API 模式。")
                 finally:
                     if page:
                         try:
@@ -440,17 +440,17 @@ def run_youtube_spider(api_key, keywords_list, max_results, limit_time_str, star
             
             # 若浏览器模式未返回 ID 或获取失败，兜底切换至 API 搜索模式
             if not all_video_ids:
-                log_callback("  使用 API 搜索模式获取视频 ID 列表中...")
+                log_line(log_callback, "  使用 API 搜索模式获取视频 ID 列表中...")
                 try:
                     for batch_ids in iter_search_video_id_batches(youtube, keyword, max_results, limit_time_bool, start_dt, end_dt, log_callback, stop_event, pause_event, search_batch_size, date_chunk_days):
                         all_video_ids.extend(batch_ids)
                         if len(all_video_ids) >= max_results:
                             break
                 except Exception as exc:
-                    log_callback(f"  API 搜索失败: {exc}")
+                    log_error(log_callback, f"  API 搜索失败: {exc}")
                     
             written_count = 0
-            log_callback(f"  共获取到 {len(all_video_ids)} 个待查询的视频 ID，开始分批获取详情并写入...")
+            log_line(log_callback, f"  共获取到 {len(all_video_ids)} 个待查询的视频 ID，开始分批获取详情并写入...")
             
             for chunk_ids in chunked(all_video_ids, video_batch_size):
                 if should_stop(stop_event):
@@ -484,9 +484,10 @@ def run_youtube_spider(api_key, keywords_list, max_results, limit_time_str, star
                                 }
                                 writer.writerow("评论信息", comment_row)
                         except Exception as exc:
-                            log_callback(f"    提取评论失败：{exc}")
+                            log_warn(log_callback, f"    提取评论失败：{exc}")
                             
                     serial_number += 1
+                    log_line(log_callback, f"    [{serial_number - 1}] {row['视频链接']}")
                 
                 if get_comments_bool:
                     for r in rows:
@@ -495,19 +496,19 @@ def run_youtube_spider(api_key, keywords_list, max_results, limit_time_str, star
                     writer.writerows(sanitize_csv_rows(rows))
                 
                 written_count += len(rows)
-                log_callback(f"  已写入 {written_count} 条视频")
+                log_line(log_callback, f"  已写入 {written_count} 条视频")
                 
                 if written_count >= max_results:
                     break
                     
             writer.save()
-            log_callback(f"  写入完成，共 {written_count} 条视频")
+            log_line(log_callback, f"  写入完成，共 {written_count} 条视频")
  
-        log_callback("完成，已按关键词分别保存：")
+        log_line(log_callback, "完成，已按关键词分别保存：")
         for path in output_paths:
-            log_callback(f"  {path}")
+            log_line(log_callback, f"  {path}")
     except Exception as exc:
-        log_callback(f"运行失败：{exc}")
+        log_error(log_callback, f"运行失败：{exc}")
         output_path = None
     finally:
         if browser:

@@ -22,6 +22,9 @@ from src.core import (
     connect_existing_chromium,
     expand_compact_number,
     extract_tiktok_video_title,
+    log_error,
+    log_line,
+    log_warn,
     random_cooldown,
     resolve_tiktok_card_container,
     sanitize_csv_rows,
@@ -547,7 +550,7 @@ def collect_author_items_via_api(page, sec_uid: str, target_video_id: str, log_c
                 target_index = index
                 break
 
-        log_callback(f"  API 已收集 {len(items)} 条投稿记录。")
+        log_line(log_callback, f"  API 已收集 {len(items)} 条投稿记录。")
         if target_index >= 0 and len(items) >= target_index + context_size + 1:
             break
         if len(items) == before_count or not data.get("hasMore"):
@@ -634,7 +637,7 @@ def collect_profile_video_links(page, profile_url: str, target_video_id: str, lo
     except Exception as exc:
         if "interrupted by another navigation" not in str(exc):
             raise
-        log_callback("  主页导航被 TikTok 自动跳转打断，正在重置页面后重试。")
+        log_line(log_callback, "  主页导航被 TikTok 自动跳转打断，正在重置页面后重试。")
         try:
             page.goto("about:blank", wait_until="domcontentloaded", timeout=10000)
         except Exception:
@@ -645,7 +648,7 @@ def collect_profile_video_links(page, profile_url: str, target_video_id: str, lo
     # 人机验证码拦截等待
     try:
         if "captcha" in page.url or page.locator("div[id^='captcha']").count() > 0:
-            log_callback("  发现 TikTok 验证页，等待 15 秒给你手动处理。")
+            log_line(log_callback, "  发现 TikTok 验证页，等待 15 秒给你手动处理。")
             time.sleep(15)
     except Exception:
         pass
@@ -685,7 +688,7 @@ def collect_profile_video_links(page, profile_url: str, target_video_id: str, lo
 
         # 网格卡片渲染已完整覆盖上下文，提前停止滚动
         if target_index >= 0 and len(all_links) > target_index + context_size:
-            log_callback(f"  主页网格命中目标视频，已加载 {len(all_links)} 个视频链接。")
+            log_line(log_callback, f"  主页网格命中目标视频，已加载 {len(all_links)} 个视频链接。")
             break
 
         page.mouse.wheel(delta_x=0, delta_y=PROFILE_SCROLL_DELTA)
@@ -704,7 +707,7 @@ def collect_profile_video_links(page, profile_url: str, target_video_id: str, lo
 
         if scroll_index and scroll_index % 10 == 0:
             status = "已命中目标，继续补齐后续视频" if target_index >= 0 else "继续寻找目标"
-            log_callback(f"  主页已加载 {len(all_links)} 个视频链接，{status}...")
+            log_line(log_callback, f"  主页已加载 {len(all_links)} 个视频链接，{status}...")
 
     return all_links, target_index
 
@@ -822,16 +825,16 @@ def fallback_rows_from_profile(profile_page, detail_page, profile_candidates: li
             return []
         if not candidate_profile_url:
             continue
-        log_callback(f"  兜底：尝试主页定位：{candidate_profile_url}")
+        log_line(log_callback, f"  兜底：尝试主页定位：{candidate_profile_url}")
         links, target_index = collect_profile_video_links(profile_page, candidate_profile_url, target_video_id, log_callback, stop_event, pause_event, context_size, max_profile_scrolls, profile_scroll_pause)
-        log_callback(f"  该主页已捕获 {len(links)} 个视频链接。")
+        log_line(log_callback, f"  该主页已捕获 {len(links)} 个视频链接。")
         if target_index >= 0:
             matched_profile_url = candidate_profile_url
             break
 
     if target_index < 0:
         if links:
-            log_callback("  主页未命中目标视频，不再用底部视频冒充上下文。")
+            log_warn(log_callback, "  主页未命中目标视频，不再用底部视频冒充上下文。")
         return []
 
     selected_indices = list(range(max(0, target_index - context_size), target_index))
@@ -846,7 +849,7 @@ def fallback_rows_from_profile(profile_page, detail_page, profile_candidates: li
         if wait_if_paused(pause_event, stop_event):
             break
         video_url = links[current_index]
-        log_callback(f"  提取 {relation_for_index(target_index, current_index)}：{video_url}")
+        log_line(log_callback, f"  提取 {relation_for_index(target_index, current_index)}：{video_url}")
         metrics = extract_video_metrics(detail_page, video_url)
         metrics["播放量"] = play_counts.get(video_url, metrics.get("播放量", ""))
         rows.append({
@@ -886,18 +889,18 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
     try:
         pairs = parse_input_pairs(txt_path)
         if not pairs:
-            log_callback("TXT 中没有有效的“视频链接 博主链接”行。")
+            log_warn(log_callback, "TXT 中没有有效的\u201c视频链接 博主链接\u201d行。")
             return
 
         output_path = build_output_path("tiktok", f"tiktok_context_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
         writer = XlsxRowWriter(output_path, CSV_FIELDS)
 
         with sync_playwright() as p:
-            log_callback("正在连接本地 Chrome...")
+            log_line(log_callback, "正在连接本地 Chrome...")
             try:
                 _, context = connect_existing_chromium(p, cdp_port_or_url)
             except Exception as exc:
-                log_callback(f"连接失败：请确认 Chrome 已自动打开并已登录 TikTok。错误：{exc}")
+                log_error(log_callback, f"连接失败：请确认 Chrome 已自动打开并已登录 TikTok。错误：{exc}")
                 return
 
             target_page = context.new_page()
@@ -906,15 +909,15 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
 
             for index, (target_video_url, profile_url) in enumerate(pairs, 1):
                 if should_stop(stop_event):
-                    log_callback("任务已停止。")
+                    log_line(log_callback, "任务已停止。")
                     break
                 if wait_if_paused(pause_event, stop_event):
                     break
-                log_callback(f"[{index}/{len(pairs)}] 定位 TikTok 目标视频：{target_video_url}")
+                log_line(log_callback, f"[{index}/{len(pairs)}] 定位 TikTok 目标视频：{target_video_url}")
                 try:
                     resolved_video_url, target_video_id, resolved_profile_url = resolve_target_video_context(target_page, target_video_url)
                     if not target_video_id:
-                        log_callback("  跳过：无法解析视频 ID。")
+                        log_warn(log_callback, "  跳过：无法解析视频 ID。")
                         continue
 
                     metadata = extract_target_metadata(target_page, target_video_id, resolved_profile_url or profile_url)
@@ -934,17 +937,17 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
                     sec_uid = metadata.get("sec_uid", "")
                     if sec_uid:
                         try:
-                            log_callback("  使用 API 快速定位投稿列表。")
+                            log_line(log_callback, "  使用 API 快速定位投稿列表。")
                             items, target_index = collect_author_items_via_api(target_page, sec_uid, target_video_id, log_callback, context_size, api_page_size, max_api_pages)
                             if target_index >= 0:
                                 rows = rows_from_api_items(items, target_index, matched_profile_url, resolved_video_url, context_size)
-                                log_callback(f"  API 命中目标视频，准备写入 {len(rows)} 条。")
+                                log_line(log_callback, f"  API 命中目标视频，准备写入 {len(rows)} 条。")
                             else:
-                                log_callback("  API 未命中目标视频，切换到主页兜底。")
+                                log_warn(log_callback, "  API 未命中目标视频，切换到主页兜底。")
                         except Exception as exc:
-                            log_callback(f"  API 路线失败，切换到主页兜底：{exc}")
+                            log_error(log_callback, f"  API 路线失败，切换到主页兜底：{exc}")
                     else:
-                        log_callback("  未从目标视频页解析到 secUid，切换到主页兜底。")
+                        log_line(log_callback, "  未从目标视频页解析到 secUid，切换到主页兜底。")
 
                     # 极速 API 路线不可用或未命中时，无缝切换至主页滚动兜底路线
                     if not rows:
@@ -955,23 +958,23 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
                         rows = fallback_rows_from_profile(profile_page, detail_page, profile_candidates, target_video_id, resolved_video_url, log_callback, stop_event, pause_event, context_size, max_profile_scrolls, profile_scroll_pause)
 
                     if not rows:
-                        log_callback("  跳过：API 和主页兜底都没有定位到目标视频。")
+                        log_warn(log_callback, "  跳过：API 和主页兜底都没有定位到目标视频。")
                         continue
 
                     write_rows(writer, rows)
-                    log_callback(f"  完成：写入 {len(rows)} 条。")
+                    log_line(log_callback, f"  完成：写入 {len(rows)} 条。")
                     if index % 3 == 0:
                         if random_cooldown(log_callback, stop_event, 3.0, 8.0):
                             break
                 except Exception as exc:
-                    log_callback(f"  处理失败：{exc}")
+                    log_error(log_callback, f"  处理失败：{exc}")
 
             for opened_page in (target_page, profile_page, detail_page):
                 if opened_page is not None and not opened_page.is_closed():
                     opened_page.close()
 
         writer.save()
-        log_callback(f"完成，已保存：{output_path}")
+        log_line(log_callback, f"完成，已保存：{output_path}")
         completed_path = output_path
     finally:
         finish_callback(completed_path)

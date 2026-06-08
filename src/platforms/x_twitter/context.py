@@ -13,6 +13,9 @@ from src.core import (
     connect_existing_chromium,
     expand_compact_number,
     interruptible_sleep,
+    log_error,
+    log_line,
+    log_warn,
     random_cooldown,
     sanitize_csv_rows,
     should_stop,
@@ -422,7 +425,7 @@ def collect_profile_timeline(page, profile_url: str, target_status_id: str, log_
             no_growth_count = 0
 
         if scroll_idx and scroll_idx % 10 == 0:
-            log_callback(f"  主页已收集 {len(timeline_urls)} 条推文链接...")
+            log_line(log_callback, f"  主页已收集 {len(timeline_urls)} 条推文链接...")
 
         try:
             retry_btn = page.locator(
@@ -470,11 +473,11 @@ def collect_author_search_timeline(
 
     for window_days in (1, 3, 7, 14, 30):
         search_url = build_author_search_url(handle, center_dt, window_days)
-        log_callback(f"  尝试作者搜索窗口：前后 {window_days} 天")
+        log_line(log_callback, f"  尝试作者搜索窗口：前后 {window_days} 天")
         try:
             page.goto(search_url, wait_until="domcontentloaded", timeout=page_timeout)
         except Exception as exc:
-            log_callback(f"  搜索页打开失败，继续下一个窗口：{exc}")
+            log_error(log_callback, f"  搜索页打开失败，继续下一个窗口：{exc}")
             continue
 
         interruptible_sleep(1.5, stop_event)
@@ -536,7 +539,7 @@ def collect_author_search_timeline(
 
         target_url = target_url or next((url for url in rows_by_url if target_status_id in url), "")
         if not target_url:
-            log_callback(f"  搜索窗口前后 {window_days} 天未命中目标推文。")
+            log_warn(log_callback, f"  搜索窗口前后 {window_days} 天未命中目标推文。")
             continue
 
         target_dt = rows_by_url.get(target_url, (None, 0))[0] or center_dt
@@ -552,7 +555,7 @@ def collect_author_search_timeline(
             timeline_urls.append(target_url)
 
         target_index = timeline_urls.index(target_url)
-        log_callback(
+        log_line(log_callback, 
             f"  作者搜索命中目标，目标时间约 {target_dt.strftime('%Y-%m-%d %H:%M:%S')} UTC，收集 {len(timeline_urls)} 条。"
         )
         return timeline_urls, target_index
@@ -578,7 +581,7 @@ def extract_detail_metrics(page, tweet_url: str, fallback: dict, log_callback, p
             if value:
                 metrics[key] = value
     except Exception as exc:
-        log_callback(f"    详情页补充失败，保留主页已提取指标：{exc}")
+        log_warn(log_callback, f"    详情页补充失败，保留主页已提取指标：{exc}")
     return metrics
 
 def selected_context_indices(timeline_urls: list[str], target_index: int, context_size=None) -> list[int]:
@@ -601,37 +604,37 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
     try:
         pairs = parse_input_pairs(txt_path)
         if not pairs:
-            log_callback("TXT 中没有有效的\"推文链接 + 博主主页链接\"行。")
+            log_warn(log_callback, "TXT 中没有有效的\"推文链接 + 博主主页链接\"行。")
             return
 
         output_path = build_output_path("x", f"x_context_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
         writer = XlsxRowWriter(output_path, OUTPUT_FIELDS)
 
         with sync_playwright() as p:
-            log_callback("正在连接本地 Chrome...")
+            log_line(log_callback, "正在连接本地 Chrome...")
             try:
                 _, context = connect_existing_chromium(p, cdp_port_or_url)
             except Exception as e:
-                log_callback(f"连接失败：请确认 Chrome 已自动打开并已登录 X/Twitter。错误：{e}")
+                log_error(log_callback, f"连接失败：请确认 Chrome 已自动打开并已登录 X/Twitter。错误：{e}")
                 return
 
             page = context.new_page()
             for index, (target_tweet_url, profile_url) in enumerate(pairs, 1):
                 if should_stop(stop_event):
-                    log_callback("任务已停止。")
+                    log_line(log_callback, "任务已停止。")
                     break
                 if wait_if_paused(pause_event, stop_event):
                     break
                 target_status_id = extract_status_id(target_tweet_url)
-                log_callback(f"[{index}/{len(pairs)}] 定位目标推文：{target_tweet_url}")
+                log_line(log_callback, f"[{index}/{len(pairs)}] 定位目标推文：{target_tweet_url}")
                 if not target_status_id:
-                    log_callback("  跳过：无法解析推文 ID。")
+                    log_warn(log_callback, "  跳过：无法解析推文 ID。")
                     continue
 
                 try:
                     tweet_prefix_profile_url = extract_profile_url_from_tweet_url(target_tweet_url)
                     if tweet_prefix_profile_url and normalize_x_url(tweet_prefix_profile_url) != normalize_x_url(profile_url):
-                        log_callback(f"  从目标推文链接前缀识别作者主页：{tweet_prefix_profile_url}")
+                        log_line(log_callback, f"  从目标推文链接前缀识别作者主页：{tweet_prefix_profile_url}")
 
                     timeline_urls: list[str] = []
                     target_index = -1
@@ -661,7 +664,7 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
 
                     if target_index < 0:
                         for candidate_profile_url in profile_candidates:
-                            log_callback(f"  尝试主页时间线：{candidate_profile_url}")
+                            log_line(log_callback, f"  尝试主页时间线：{candidate_profile_url}")
                             timeline_urls, target_index = collect_profile_timeline(
                                 page,
                                 candidate_profile_url,
@@ -674,21 +677,21 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
                                 pause_event=pause_event,
                                 stop_event=stop_event,
                             )
-                            log_callback(f"  当前时间线共收集 {len(timeline_urls)} 条推文链接。")
+                            log_line(log_callback, f"  当前时间线共收集 {len(timeline_urls)} 条推文链接。")
                             if target_index >= 0:
                                 matched_profile_url = candidate_profile_url
                                 break
 
                     if target_index < 0:
-                        log_callback("  快速候选页未命中，打开目标推文详情页反查作者后再补扫一次。")
+                        log_warn(log_callback, "  快速候选页未命中，打开目标推文详情页反查作者后再补扫一次。")
                         resolved_profile_url = resolve_profile_url_from_tweet_page(page, target_tweet_url, target_status_id, page_timeout=page_load_timeout_val, stop_event=stop_event)
                         if resolved_profile_url:
                             if normalize_x_url(resolved_profile_url) != normalize_x_url(profile_url):
-                                log_callback(f"  从目标推文详情页反查到作者主页：{resolved_profile_url}")
+                                log_line(log_callback, f"  从目标推文详情页反查到作者主页：{resolved_profile_url}")
                             for candidate_profile_url in expand_profile_candidates([resolved_profile_url]):
                                 if candidate_profile_url in profile_candidates:
                                     continue
-                                log_callback(f"  补扫主页时间线：{candidate_profile_url}")
+                                log_line(log_callback, f"  补扫主页时间线：{candidate_profile_url}")
                                 timeline_urls, target_index = collect_profile_timeline(
                                     page,
                                     candidate_profile_url,
@@ -701,13 +704,13 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
                                     pause_event=pause_event,
                                     stop_event=stop_event,
                                 )
-                                log_callback(f"  当前时间线共收集 {len(timeline_urls)} 条推文链接。")
+                                log_line(log_callback, f"  当前时间线共收集 {len(timeline_urls)} 条推文链接。")
                                 if target_index >= 0:
                                     matched_profile_url = candidate_profile_url
                                     break
 
                     if target_index < 0:
-                        log_callback("  跳过：在博主主页和回复页中都没有找到目标推文。目标可能太旧、不可见、不是该作者公开时间线内容，或页面没有继续加载。")
+                        log_warn(log_callback, "  跳过：在博主主页和回复页中都没有找到目标推文。目标可能太旧、不可见、不是该作者公开时间线内容，或页面没有继续加载。")
                         continue
 
                     indices = selected_context_indices(timeline_urls, target_index, context_size=context_size_val)
@@ -715,7 +718,7 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
                     for current_index in indices:
                         tweet_url = timeline_urls[current_index]
                         relation = relation_for_index(target_index, current_index)
-                        log_callback(f"  提取 {relation}：{tweet_url}")
+                        log_line(log_callback, f"  提取 {relation}：{tweet_url}")
                         metrics = extract_detail_metrics(page, tweet_url, {}, log_callback, page_timeout=page_load_timeout_val, stop_event=stop_event)
                         rows.append(
                             {
@@ -728,18 +731,18 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
                         )
 
                     writer.writerows(sanitize_csv_rows(rows))
-                    log_callback(f"  完成：写入 {len(rows)} 条。")
+                    log_line(log_callback, f"  完成：写入 {len(rows)} 条。")
                     if index % 3 == 0:
                         if random_cooldown(log_callback, stop_event, 3.0, 8.0):
                             break
                 except Exception as e:
-                    log_callback(f"  处理失败：{e}")
+                    log_error(log_callback, f"  处理失败：{e}")
 
             if not page.is_closed():
                 page.close()
 
         writer.save()
-        log_callback(f"完成，已保存：{output_path}")
+        log_line(log_callback, f"完成，已保存：{output_path}")
         completed_path = output_path
     finally:
         finish_callback(completed_path)

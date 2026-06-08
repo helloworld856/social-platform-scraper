@@ -6,9 +6,14 @@ or API keys. They exercise SimpleToolWindow directly.
 
 from __future__ import annotations
 
+import os
+import sys
 import threading
 import time
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication
 
 from src.core.timing import wait_if_paused, should_stop
@@ -376,6 +381,7 @@ def test_text_or_file_collect_empty_direct_mode():
     w = _TextOrFileWindow(required=True)
     widget = w.widgets["data"]
     widget.text_edit.setPlainText("")
+    w.setAttribute(Qt.WA_DontShowOnScreen, True)
     w.show()
     # Patch QMessageBox.warning to avoid blocking in headless tests
     from PyQt5.QtWidgets import QMessageBox
@@ -396,6 +402,7 @@ def test_text_or_file_collect_missing_file_path():
     widget = w.widgets["data"]
     widget.mode_combo.setCurrentText("TXT 文件")
     widget.file_edit.setText("")
+    w.setAttribute(Qt.WA_DontShowOnScreen, True)
     w.show()
     from PyQt5.QtWidgets import QMessageBox
     original = QMessageBox.warning
@@ -415,6 +422,7 @@ def test_text_or_file_collect_bad_file():
     widget = w.widgets["data"]
     widget.mode_combo.setCurrentText("TXT 文件")
     widget.file_edit.setText("/nonexistent/path/to/file.txt")
+    w.setAttribute(Qt.WA_DontShowOnScreen, True)
     w.show()
     from PyQt5.QtWidgets import QMessageBox
     original = QMessageBox.warning

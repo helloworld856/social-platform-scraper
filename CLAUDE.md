@@ -1,51 +1,88 @@
-# CLAUDE.md - Project Guidelines for three-zone-scraper
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
-A `PyQt5`-based desktop application designed for social media data extraction from YouTube, TikTok, X/Twitter, Instagram, and Facebook. It includes an AIGC content validation engine (powered by `langgraph` and DeepSeek) and utilities for merging `XLSX` files based on keywords.
+
+A PyQt5 desktop application for social media data extraction from YouTube, TikTok, X/Twitter, Instagram, and Facebook. Includes AIGC content validation (langgraph + DeepSeek) and XLSX file merging utilities.
 
 ## Setup and Execution
-- **Python Version**: 3.10+ (Recommended: 3.11 or 3.12).
-- **Dependencies**: 
-  ```bash
-  pip install -r requirements.txt
-  python -m playwright install chromium
-  ```
-- **Execution**: 
-  ```bash
-  python main.py
-  ```
-- **Environment Variables**: Create a `.env` file in the root directory for AIGC judgment features:
-  ```env
-  DEEPSEEK_API_KEY=your_api_key
-  DEEPSEEK_BASE_URL=https://api.deepseek.com
-  DEEPSEEK_MODEL_NAME=deepseek-chat
-  ```
 
-## Architecture and Directory Structure
-- `main.py`: Application entry point.
-- `src/studio/`: Core studio UI, tool registry, and subprocess launchers.
-- `src/ui/`: Shared UI base classes and configuration dialogs (`config_dialog.py`).
-- `src/core/`: Utility modules for `XLSX` writing, number parsing, text cleaning, Chrome CDP protocols, and waiting mechanisms.
-- `src/platforms/`: Individual platform scraper implementations:
-  - `youtube/`: Utilizes `google-api-python-client` with a fallback to `playwright`.
-  - `tiktok/`: Powered by `playwright`.
-  - `x_twitter/`: Powered by `playwright`.
-  - `instagram/`: Powered by `playwright`.
-  - `facebook/`: Powered by `playwright` (includes Profile Works Scraper and Keyword Search Scraper, supports optional comments extraction, custom post limit, and recent sorting).
-- `src/judge_aigc/`: AI-generated content judgment engine utilizing `langchain` and `langgraph`.
-- `src/processing/`: AIGC entry points and `XLSX` file merging logic.
-- `user_data/`: Directory for storing persistent Playwright browser sessions/profiles.
-- `output/`: Default directory for `.xlsx` export files. Contains `output/temp/` for intermediate files.
+```bash
+.\.venv\Scripts\pip.exe install -r requirements.txt
+.\.venv\Scripts\python.exe -m playwright install chromium
+.\.venv\Scripts\python.exe main.py
+```
+
+Environment variables for AIGC features (create `.env` in project root):
+```
+DEEPSEEK_API_KEY=your_api_key
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL_NAME=deepseek-chat
+```
+
+## Common Commands
+
+All commands must use the project virtual environment (`.venv`):
+
+- **Run application**: `.\.venv\Scripts\python.exe main.py`
+- **Run linter**: `.\.venv\Scripts\python.exe -m ruff check .`
+- **Run single test**: `.\.venv\Scripts\python.exe test/test_visibility.py`
+- **Check tool integrity**: `.\.venv\Scripts\python.exe src/studio/tool_runner.py --check --tool-id <tool_id>`
+
+## Architecture
+
+### Process Isolation Model
+
+The app uses a **two-level process architecture**:
+1. **Main process** (`src/studio/qt_app.py`): Hosts the studio UI, tool discovery, and registry.
+2. **Tool subprocesses** (`src/studio/tool_runner.py`): Each tool launches as an isolated QProcess. A tool crash doesn't affect the main window.
+
+When a tool is launched, the main process spawns `tool_runner.py` with `--tool-id <id>`, which reflectively loads the entrypoint class specified in the manifest.
+
+### Tool Discovery System
+
+Tools are defined by **manifest files** (`*.manifest.json`) scanned from `src/platforms/` and `src/processing/`. Each manifest declares:
+- `tool_id`: Globally unique identifier
+- `entrypoint`: Dotted path to a QWidget class (e.g., `src.platforms.youtube.windows.YouTubeKeywordWindow`)
+- `implementation_path`: Relative path to the scraper logic
+
+Discovery happens at startup and on "reload tools" button press. See `src/studio/discovery.py`.
+
+### Configuration System
+
+`src/core/config_store.py` manages per-tool JSON config files stored in `config/` directory:
+- Each tool has a `DEFAULT_CONFIGS` entry with type-safe defaults
+- Config values are loaded with automatic type coercion from JSON
+- Supports **named profiles** (e.g., `tool_id_profileName.json`)
+- **Global config** (`__global__`) provides shared parameters with alias mapping across tools
+
+### Browser Automation
+
+`src/core/browser.py` handles Chrome CDP connections:
+- Uses `user_data/` for persistent browser sessions (login state preserved across runs)
+- `connect_existing_chromium()` is the standard entry point — always use `with sync_playwright() as p:` pattern
+- Auto-launches Chrome with CDP port if not already running
+
+### Excel Output
+
+- `src/core/xlsx.py` provides two writer classes:
+  - `MultiSheetXlsxWriter`: Initialize with dict of `{sheet_name: [headers]}` for multi-sheet files
+  - `XlsxRowWriter`: Simple single-sheet writer with flat header list
+- Output goes to `output/<platform>/` subdirectories
 
 ## Development Conventions
-- **Code Linter & Formatter**: `ruff`.
-  - `line-length = 150`.
-  - Ignored rules: `E402` (module level import not at top of file), `F841` (local variable assigned but never used).
-- **UI Framework**: `PyQt5`.
-- **Browser Automation**: `playwright`. Persistent contexts are used to maintain user login states across sessions, storing data in `user_data/`. 
-  - *Note*: Always use `with sync_playwright() as p:` and pass `p` to `connect_existing_chromium(p, DEFAULT_X_CDP_URL)` to handle browser connectivity.
-- **Excel Handling**: `openpyxl`. 
-  - *Note*: When using `MultiSheetXlsxWriter`, you must initialize it with a dictionary mapping sheet names to lists of headers (e.g. `{"Sheet1": ["Col1", "Col2"]}`). For single sheet simple writes, `XlsxRowWriter` takes a flat list of headers.
-- **Data Input**: TXT files (one record per line). Ignore lines starting with `#` and empty lines.
-- **Data Output**: Primarily `.xlsx` files written to platform-specific subdirectories inside `output/`.
-- **Error Handling**: Network requests and browser automations should include retries and handle timeouts gracefully. Implement random waiting intervals during batch operations to prevent rate-limiting.
+
+- **Linter**: `ruff` with `line-length = 150`, ignoring `E402` and `F841`
+- **UI Framework**: PyQt5 (no Qt Designer files)
+- **Browser**: Playwright with persistent contexts; always use sync_playwright pattern
+- **Data Input**: TXT files, one record per line, skip `#` lines and empty lines
+- **Data Output**: `.xlsx` files in `output/` subdirectories
+
+## Adding a New Tool
+
+1. Create implementation file: `src/platforms/<platform>/new_tool.py`
+2. Add window class to `src/platforms/<platform>/windows.py`
+3. Create manifest: `src/platforms/<platform>/new_tool.manifest.json`
+4. Add defaults to `DEFAULT_CONFIGS` in `src/core/config_store.py` if the tool needs configurable parameters
+5. Click "Reload Tools" in the main window (no restart needed)

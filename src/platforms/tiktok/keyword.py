@@ -30,6 +30,9 @@ from src.core import (
     expand_compact_number,
     extract_tiktok_video_title,
     interruptible_sleep,
+    log_error,
+    log_line,
+    make_keyword_log,
     random_cooldown,
     resolve_tiktok_card_container,
     sanitize_csv_row,
@@ -485,9 +488,7 @@ def extract_video_row(page, keyword: str, video_url: str, play_count: str = "", 
 
 def _make_keyword_log_callback(base_log_callback, keyword: str):
     """Wrap log_callback to prefix messages with [keyword] for disambiguation."""
-    def log(msg: str) -> None:
-        base_log_callback(f"[{keyword}] {msg}")
-    return log
+    return make_keyword_log(base_log_callback, keyword)
 
 
 def _tiktok_comment_consumer(keyword, queue_obj, cdp_port_or_url, writer, writer_lock,
@@ -803,7 +804,7 @@ def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str,
         if max_parallel_tabs <= 1 or len(keywords_list) <= 1:
             for idx, keyword in enumerate(keywords_list, 1):
                 if should_stop(stop_event):
-                    log_callback("任务已停止。")
+                    log_line(log_callback, "任务已停止。")
                     break
                 if wait_if_paused(pause_event, stop_event):
                     break
@@ -823,9 +824,9 @@ def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str,
                 if path:
                     output_paths.append(path)
 
-            log_callback("完成，已按关键词分别保存：")
+            log_line(log_callback, "完成，已按关键词分别保存：")
             for p in output_paths:
-                log_callback(f"  {p}")
+                log_line(log_callback, f"  {p}")
             finish_callback(output_paths[-1] if output_paths else None)
             return
 
@@ -860,13 +861,13 @@ def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str,
                     if path:
                         output_paths.append(path)
                 except Exception as exc:
-                    log_callback(f"[{keyword}] 线程异常: {exc}")
+                    log_error(log_callback, f"[{keyword}] 线程异常: {exc}")
 
-        log_callback(f"全部关键词处理完毕。{len(output_paths)}/{len(keywords_list)} 个成功。")
+        log_line(log_callback, f"全部关键词处理完毕。{len(output_paths)}/{len(keywords_list)} 个成功。")
         for p in output_paths:
-            log_callback(f"  {p}")
+            log_line(log_callback, f"  {p}")
         finish_callback(output_paths[-1] if output_paths else None)
 
     except Exception as exc:
-        log_callback(f"运行失败：{exc}")
+        log_error(log_callback, f"运行失败：{exc}")
         finish_callback(None)

@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 from googleapiclient.discovery import build
 
-from src.core import XlsxRowWriter, build_output_path, sanitize_csv_row, should_stop, wait_if_paused
+from src.core import XlsxRowWriter, build_output_path, log_error, log_line, log_warn, sanitize_csv_row, should_stop, wait_if_paused
 
 # Excel 输出表头定义
 CSV_FIELDS = ["作者主页链接", "作者名称", "作者ID", "粉丝量", "作者简介"]
@@ -150,7 +150,7 @@ def run_channel_spider(api_key, txt_file_path, log_callback, finish_callback, st
 
         profile_urls = [url for url in profile_urls if "youtube.com" in url or "youtu.be" in url]
         if not profile_urls:
-            log_callback("TXT 中没有有效的 YouTube 作者主页链接。")
+            log_warn(log_callback, "TXT 中没有有效的 YouTube 作者主页链接。")
             return
 
         # 实例化 YouTube V3 API 服务客户端
@@ -160,15 +160,15 @@ def run_channel_spider(api_key, txt_file_path, log_callback, finish_callback, st
         writer = XlsxRowWriter(output_path, CSV_FIELDS)
         for index, profile_url in enumerate(profile_urls, 1):
             if should_stop(stop_event):
-                log_callback("任务已停止。")
+                log_line(log_callback, "任务已停止。")
                 break
             if wait_if_paused(pause_event, stop_event):
                 break
-            log_callback(f"[{index}/{len(profile_urls)}] 解析作者：{profile_url}")
+            log_line(log_callback, f"[{index}/{len(profile_urls)}] 解析作者：{profile_url}")
             try:
                 item = resolve_channel(youtube, profile_url)
                 if not item:
-                    log_callback("  未找到作者信息")
+                    log_warn(log_callback, "  未找到作者信息")
                     writer.writerow(
                         sanitize_csv_row({
                             "作者主页链接": profile_url,
@@ -182,15 +182,15 @@ def run_channel_spider(api_key, txt_file_path, log_callback, finish_callback, st
 
                 row = channel_row(profile_url, item)
                 writer.writerow(sanitize_csv_row(row))
-                log_callback(f"  成功：{row['作者名称']} | 粉丝量：{row['粉丝量']}")
+                log_line(log_callback, f"  成功：{row['作者名称']} | 粉丝量：{row['粉丝量']}")
             except Exception as exc:
-                log_callback(f"  解析失败：{exc}")
+                log_warn(log_callback, f"  解析失败：{exc}")
 
         writer.save()
 
-        log_callback(f"完成，已保存：{output_path}")
+        log_line(log_callback, f"完成，已保存：{output_path}")
     except Exception as exc:
-        log_callback(f"运行失败：{exc}")
+        log_error(log_callback, f"运行失败：{exc}")
         output_path = None
     finally:
         finish_callback(output_path)
