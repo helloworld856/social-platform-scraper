@@ -22,7 +22,7 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # GitHub API 请求超时（秒）
-REQUEST_TIMEOUT = 5
+REQUEST_TIMEOUT = 15
 # GitHub API 要求的 User-Agent 头
 USER_AGENT = "social-platform-scraper"
 # 可选：GitHub Personal Access Token，用于提高 API 额度（60→5000 次/小时）

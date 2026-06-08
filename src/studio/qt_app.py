@@ -53,6 +53,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
     _update_error = pyqtSignal(str)            # error message
     _no_update = pyqtSignal()                  # no update available
     _update_failed = pyqtSignal()              # update failed, re-enable UI
+    _restart_now = pyqtSignal()                # update success, restart from main thread
 
     def __init__(self) -> None:
         super().__init__()
@@ -62,6 +63,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         self._update_error.connect(self._show_update_error)
         self._no_update.connect(self._show_no_update)
         self._update_failed.connect(self._on_update_failed)
+        self._restart_now.connect(self._on_restart)
 
         from src.version import __version__
         self.setWindowTitle(f"多平台数据爬取工具 v{__version__}")
@@ -639,6 +641,10 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         """更新失败时恢复界面操作。"""
         self.setEnabled(True)
 
+    def _on_restart(self) -> None:
+        """在主线程中安全退出应用。"""
+        QApplication.quit()
+
     def _show_no_update(self) -> None:
         """显示已是最新版本，3 秒后自动隐藏。"""
         self.update_label.setText("已是最新版本")
@@ -675,6 +681,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
             success, msg = run_hot_update(tag, "helloworld856", "social-platform-scraper")
             if success:
                 restart_app()
+                self._restart_now.emit()
             else:
                 self._update_error.emit(msg)
                 self._update_failed.emit()

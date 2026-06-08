@@ -116,11 +116,10 @@ def _replace_project(src: Path, dst: Path) -> None:
 
 
 def restart_app() -> None:
-    """启动新进程并退出当前进程。"""
+    """启动新进程，不退出当前进程（由调用方在主线程安全退出）。"""
     logger.info("正在重启应用…")
     subprocess.Popen(
         [sys.executable, "main.py"],
         cwd=str(PROJECT_ROOT),
         creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
     )
-    os._exit(0)
