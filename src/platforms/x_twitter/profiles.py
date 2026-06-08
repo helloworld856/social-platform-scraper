@@ -17,8 +17,8 @@ from src.core import (
     XlsxRowWriter,
 )
 
-OUTPUT_FIELDS = ["推文链接", "作者主页链接", "作者的名称", "账号ID", "粉丝数"]
-OUTPUT_FIELDS_PROFILE_MODE = ["作者主页链接", "作者的名称", "账号ID", "粉丝数"]
+OUTPUT_FIELDS = ["推文链接", "作者主页链接", "作者的名称", "账号ID", "粉丝数", "简介"]
+OUTPUT_FIELDS_PROFILE_MODE = ["作者主页链接", "作者的名称", "账号ID", "粉丝数", "简介"]
 PAGE_LOAD_TIMEOUT = 45000
 STATUS_RE = re.compile(r"/status/(\d+)")
 TWEET_READY_TIMEOUT = 12000
@@ -88,6 +88,28 @@ def safe_attr(locator, attr: str, default: str = "") -> str:
         return locator.first.get_attribute(attr, timeout=2000) or default
     except Exception:
         return default
+
+def extract_bio(page) -> str:
+    """Extract the bio/description from a profile page."""
+    selectors = [
+        'div[data-testid="UserDescription"]',
+        'div[data-testid="profile_bio"]',
+        'div[data-testid="userProfileInfo"]',
+        'div[id="profile-acc-bio"]',
+        'div[dir="auto"]:has(span)',
+    ]
+    for selector in selectors:
+        try:
+            locator = page.locator(selector)
+            if locator.count() <= 0:
+                continue
+            text = locator.first.inner_text(timeout=2000).strip()
+            if text and len(text) > 0:
+                return text
+        except Exception:
+            continue
+    return ""
+
 
 def find_target_article(page, target_status_id: str):
     try:
@@ -296,12 +318,15 @@ def extract_tweet_author_record(tweet_page, profile_page, tweet_url: str, log_ca
     view_text, view_value = extract_view_count(article)
     followers = extract_followers_count(profile_page, author["profile_url"], page_timeout=page_timeout, stop_event=stop_event)
 
+    bio = extract_bio(profile_page)
+
     return {
         "推文链接": normalize_x_url(tweet_url),
         "作者主页链接": author["profile_url"],
         "作者的名称": author["author_name"],
         "账号ID": author["account_id"],
         "粉丝数": followers,
+        "简介": bio,
         "_view_text": view_text,
         "_view_value": view_value,
     }
@@ -351,11 +376,15 @@ def extract_profile_record(profile_page, profile_url: str, log_callback, page_ti
     # Extract followers count
     followers = extract_followers_count(profile_page, profile_url, page_timeout=page_timeout, stop_event=stop_event, needs_navigation=False)
 
+    # Extract bio
+    bio = extract_bio(profile_page)
+
     return {
         "作者主页链接": profile_url,
         "作者的名称": author_name,
         "账号ID": account_id,
         "粉丝数": followers,
+        "简介": bio,
     }
 
 def output_row(record: dict, fields: list[str]) -> dict:
