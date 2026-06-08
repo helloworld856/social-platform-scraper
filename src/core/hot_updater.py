@@ -36,6 +36,7 @@ def _write_version(version: str) -> None:
     """将新版本号写入 config/version.json。"""
     version_path = PROJECT_ROOT / "config" / "version.json"
     try:
+        version_path.parent.mkdir(parents=True, exist_ok=True)
         version_path.write_text(
             json.dumps({"version": version}, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",

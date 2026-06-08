@@ -663,7 +663,11 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
             " background: #dbeafe; border: 1px solid #3b82f6; border-radius: 6px; margin-bottom: 2px;"
         )
 
-        tag = getattr(self, "_pending_tag", "main")
+        tag = getattr(self, "_pending_tag", None)
+        if not tag:
+            self._update_error.emit("更新失败：无法获取目标版本号")
+            self._update_failed.emit()
+            return
         import threading
 
         def _do_update() -> None:
