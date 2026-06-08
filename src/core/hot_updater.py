@@ -65,7 +65,7 @@ def _git_checkout(tag: str) -> tuple[bool, str]:
             ["git", "fetch", "origin", "--tags"],
             cwd=str(PROJECT_ROOT),
             capture_output=True,
-            text=True,
+            encoding="utf-8", errors="replace",
             timeout=60,
             check=True,
         )
@@ -73,7 +73,7 @@ def _git_checkout(tag: str) -> tuple[bool, str]:
             ["git", "checkout", f"v{tag.lstrip('v')}"],
             cwd=str(PROJECT_ROOT),
             capture_output=True,
-            text=True,
+            encoding="utf-8", errors="replace",
             timeout=30,
         )
         if result.returncode == 0:

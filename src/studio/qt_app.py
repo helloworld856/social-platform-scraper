@@ -52,6 +52,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
     _update_available = pyqtSignal(str, str)   # latest_version, url
     _update_error = pyqtSignal(str)            # error message
     _no_update = pyqtSignal()                  # no update available
+    _update_failed = pyqtSignal()              # update failed, re-enable UI
 
     def __init__(self) -> None:
         super().__init__()
@@ -60,6 +61,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         self._update_available.connect(self._show_update_banner)
         self._update_error.connect(self._show_update_error)
         self._no_update.connect(self._show_no_update)
+        self._update_failed.connect(self._on_update_failed)
 
         from src.version import __version__
         self.setWindowTitle(f"多平台数据爬取工具 v{__version__}")
@@ -633,6 +635,10 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         self.update_label.setVisible(True)
         logger.info("发现新版本 v%s，当前版本 %s", latest_version, __version__)
 
+    def _on_update_failed(self) -> None:
+        """更新失败时恢复界面操作。"""
+        self.setEnabled(True)
+
     def _show_no_update(self) -> None:
         """显示已是最新版本，3 秒后自动隐藏。"""
         self.update_label.setText("已是最新版本")
@@ -662,8 +668,8 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
             if success:
                 restart_app()
             else:
-                QTimer.singleShot(0, lambda: self.setEnabled(True))
                 self._update_error.emit(msg)
+                self._update_failed.emit()
 
         t = threading.Thread(target=_do_update, daemon=True)
         t.start()
