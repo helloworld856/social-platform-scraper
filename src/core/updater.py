@@ -2,14 +2,22 @@
 
 通过 GitHub API v3 获取仓库最新 release，与本地版本号比较，
 判断是否存在可用的新版本。
+
+如需提高 API 额度（5000 次/小时），可在 .env 中配置：
+    GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
+Token 无需任何 scope（公开仓库即可）。
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import re
 
 import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +25,8 @@ logger = logging.getLogger(__name__)
 REQUEST_TIMEOUT = 5
 # GitHub API 要求的 User-Agent 头
 USER_AGENT = "social-platform-scraper"
+# 可选：GitHub Personal Access Token，用于提高 API 额度（60→5000 次/小时）
+_GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 
 
 def parse_semver(version_string: str) -> tuple[int, int, int] | None:
@@ -69,6 +79,9 @@ def check_for_updates(current_version: str, repo_owner: str, repo_name: str) -> 
     通过 GitHub API v3 获取最新的 release 标签，
     与当前本地版本号比较，判断是否需要更新。
 
+    如果 .env 中配置了 GITHUB_TOKEN，自动使用 Token 认证，
+    将 API 额度从 60 次/小时提升至 5000 次/小时。
+
     Args:
         current_version: 当前本地版本号，如 "1.0.0"
         repo_owner: GitHub 仓库所有者
@@ -86,6 +99,10 @@ def check_for_updates(current_version: str, repo_owner: str, repo_name: str) -> 
     """
     url = f"https://api.github.com/repos/{repo_owner}/{repo_name}/releases/latest"
     headers = {"User-Agent": USER_AGENT}
+
+    # 可选 Token 认证，提高 API 额度
+    if _GITHUB_TOKEN:
+        headers["Authorization"] = f"Bearer {_GITHUB_TOKEN}"
 
     logger.info("正在检查更新：%s/%s", repo_owner, repo_name)
     response = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
