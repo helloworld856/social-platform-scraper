@@ -49,7 +49,8 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
     """
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("多平台数据爬取工具")
+        from src.version import __version__
+        self.setWindowTitle(f"多平台数据爬取工具 v{__version__}")
         self.resize(1040, 640)
         self.setMinimumSize(860, 560)
 
@@ -83,11 +84,22 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         # 顶部标题栏 + 搜索重载操作栏
         header = QHBoxLayout()
         title_box = QVBoxLayout()
+
+        # 标题行：标题 + 版本号
+        title_row = QHBoxLayout()
         self.title_label = QLabel("多平台数据爬取工具")
         self.title_label.setObjectName("titleLabel")
+        title_row.addWidget(self.title_label)
+        title_row.addStretch(1)
+
+        from src.version import __version__
+        self.version_label = QLabel(f"v{__version__}")
+        self.version_label.setObjectName("versionLabel")
+        title_row.addWidget(self.version_label)
+
+        title_box.addLayout(title_row)
         self.subtitle_label = QLabel("集中启动 YouTube、TikTok、X/Twitter、Instagram、Facebook 采集工具和数据处理工具")
         self.subtitle_label.setObjectName("subtitleLabel")
-        title_box.addWidget(self.title_label)
         title_box.addWidget(self.subtitle_label)
         header.addLayout(title_box, 1)
 
@@ -310,6 +322,11 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
                 border-bottom: 1px solid #e4eaf2;
                 padding: 8px;
                 font-weight: 700;
+            }
+            #versionLabel {
+                color: #667085;
+                font-size: 11pt;
+                font-weight: 500;
             }
             #updateLabel {
                 color: #d97706;
