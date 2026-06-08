@@ -1,11 +1,11 @@
 """热更新模块。
 
-点击更新提示后，通过 git fetch + checkout 切换到指定 release tag，
-完成后自动重启应用。git 不可用时回退到下载 zip 解压覆盖。
+下载 GitHub release 源码 zip，解压覆盖后自动重启。
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -24,24 +24,8 @@ REQUEST_TIMEOUT = 30
 
 
 def run_hot_update(tag: str, repo_owner: str, repo_name: str) -> tuple[bool, str]:
-    """
-    更新到指定 release tag。优先 git，不可用时下载 zip。
-    成功后自动将新版本号写入 config/version.json。
-
-    Returns:
-        (success, message)
-    """
-    # 标准化版本号（去掉 v 前缀）
+    """下载指定 release 源码 zip，解压覆盖并更新版本号。"""
     version = tag.lstrip("v")
-
-    # 方式一：git fetch + checkout
-    success, msg = _git_checkout(tag)
-    if success:
-        _write_version(version)
-        return (True, msg)
-
-    logger.warning("git 方式失败，尝试下载 zip：%s", msg)
-    # 方式二：下载 release zip 解压覆盖
     success, msg = _download_and_extract(tag, repo_owner, repo_name)
     if success:
         _write_version(version)
@@ -49,49 +33,22 @@ def run_hot_update(tag: str, repo_owner: str, repo_name: str) -> tuple[bool, str
 
 
 def _write_version(version: str) -> None:
-    """将新版本号写入 config/version.json，下次启动即为新版本。"""
+    """将新版本号写入 config/version.json。"""
+    version_path = PROJECT_ROOT / "config" / "version.json"
     try:
-        from src.version import set_version
-        set_version(version)
+        version_path.write_text(
+            json.dumps({"version": version}, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
         logger.info("版本号已更新为 %s", version)
     except Exception as e:
         logger.warning("写入版本号失败：%s", e)
 
 
-def _git_checkout(tag: str) -> tuple[bool, str]:
-    """git fetch --tags && git checkout <tag>"""
-    try:
-        subprocess.run(
-            ["git", "fetch", "origin", "--tags"],
-            cwd=str(PROJECT_ROOT),
-            capture_output=True,
-            encoding="utf-8", errors="replace",
-            timeout=60,
-            check=True,
-        )
-        result = subprocess.run(
-            ["git", "checkout", f"v{tag.lstrip('v')}"],
-            cwd=str(PROJECT_ROOT),
-            capture_output=True,
-            encoding="utf-8", errors="replace",
-            timeout=30,
-        )
-        if result.returncode == 0:
-            logger.info("git checkout v%s 成功", tag)
-            return (True, f"已切换到 v{tag}")
-        else:
-            return (False, result.stderr.strip())
-    except FileNotFoundError:
-        return (False, "未找到 git 命令")
-    except subprocess.TimeoutExpired:
-        return (False, "git 操作超时")
-    except Exception as e:
-        return (False, str(e))
-
-
 def _download_and_extract(tag: str, repo_owner: str, repo_name: str) -> tuple[bool, str]:
-    """下载 release 源码 zip 并解压覆盖。"""
-    zip_url = f"https://github.com/{repo_owner}/{repo_name}/archive/refs/tags/v{tag.lstrip('v')}.zip"
+    """下载 GitHub 源码 zip 并解压覆盖。"""
+    clean_tag = tag.lstrip("v")
+    zip_url = f"https://github.com/{repo_owner}/{repo_name}/archive/refs/tags/v{clean_tag}.zip"
     logger.info("正在下载：%s", zip_url)
 
     try:
@@ -100,7 +57,6 @@ def _download_and_extract(tag: str, repo_owner: str, repo_name: str) -> tuple[bo
     except Exception as e:
         return (False, f"下载失败：{e}")
 
-    # 下载到临时文件
     tmp_dir = tempfile.mkdtemp(prefix="scraper_update_")
     zip_path = os.path.join(tmp_dir, "update.zip")
     try:
@@ -108,42 +64,42 @@ def _download_and_extract(tag: str, repo_owner: str, repo_name: str) -> tuple[bo
             for chunk in resp.iter_content(chunk_size=8192):
                 f.write(chunk)
 
-        # 解压到临时目录
         extract_dir = os.path.join(tmp_dir, "extracted")
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(extract_dir)
 
-        # zip 内有一个顶层目录，找到它
         inner_dirs = [d for d in Path(extract_dir).iterdir() if d.is_dir()]
         if not inner_dirs:
             return (False, "解压后未找到源码目录")
         src_dir = inner_dirs[0]
 
-        # 覆盖项目文件（保留 .env, user_data/, output/）
-        _preserve_and_copy(src_dir, PROJECT_ROOT)
+        _replace_project(src_dir, PROJECT_ROOT)
 
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        logger.info("zip 解压覆盖完成")
-        return (True, f"已更新到 v{tag}")
+        logger.info("更新完成，已切换到 v%s", clean_tag)
+        return (True, f"已更新到 v{clean_tag}")
     except Exception as e:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         return (False, f"解压覆盖失败：{e}")
 
 
-def _preserve_and_copy(src: Path, dst: Path) -> None:
-    """将 src 目录内容覆盖到 dst，保留用户数据，清除已删除的文件。"""
+def _replace_project(src: Path, dst: Path) -> None:
+    """用 src 目录内容整体替换 dst，保留用户数据。"""
     preserve = {".env", "user_data", "output", ".git", ".gitignore"}
 
-    # 新版本包含的条目名称
+    # 新版本包含的条目
     new_items = {item.name for item in src.iterdir()}
 
-    # 删除旧版本有但新版本没有的顶层文件（目录整体替换，无需单独处理）
-    for old_item in dst.iterdir():
+    # 删除旧版本有但新版本没有的文件
+    for old_item in list(dst.iterdir()):
         if old_item.name in preserve:
             continue
-        if old_item.name not in new_items and old_item.is_file():
-            old_item.unlink(missing_ok=True)
-            logger.info("已删除残留文件：%s", old_item.name)
+        if old_item.name not in new_items:
+            if old_item.is_dir():
+                shutil.rmtree(old_item, ignore_errors=True)
+            else:
+                old_item.unlink(missing_ok=True)
+            logger.info("已删除残留：%s", old_item.name)
 
     # 复制新版本条目
     for item in src.iterdir():
@@ -159,7 +115,7 @@ def _preserve_and_copy(src: Path, dst: Path) -> None:
 
 
 def restart_app() -> None:
-    """启动新进程并退出当前进程，实现自动重启。"""
+    """启动新进程并退出当前进程。"""
     logger.info("正在重启应用…")
     subprocess.Popen(
         [sys.executable, "main.py"],
