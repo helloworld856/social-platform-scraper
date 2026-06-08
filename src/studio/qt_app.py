@@ -616,9 +616,10 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         t.start()
 
     def _show_update_banner(self, latest_version: str, url: str) -> None:
-        """在窗口最上方显示新版本更新提示。"""
+        """在窗口最上方显示新版本更新提示，并记住待更新的 tag。"""
         from src.version import __version__
 
+        self._pending_tag = f"v{latest_version}"
         text = (
             f'<a href="{url}" style="color:#92400e;">'
             f'发现新版本 v{latest_version}，当前版本为 {__version__}，点击更新'
@@ -643,7 +644,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         QTimer.singleShot(3000, self.update_label.hide)
 
     def _on_update_clicked(self, url: str) -> None:
-        """点击更新提示后，禁止界面操作，后台 git pull 并自动重启。"""
+        """点击更新提示后，禁止界面操作，后台更新到 release tag 并自动重启。"""
         self.setEnabled(False)
         self.update_label.setText("正在更新，请勿关闭窗口…")
         self.update_label.setVisible(True)
@@ -652,11 +653,12 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
             " background: #dbeafe; border: 1px solid #3b82f6; border-radius: 6px; margin-bottom: 2px;"
         )
 
+        tag = getattr(self, "_pending_tag", "main")
         import threading
 
         def _do_update() -> None:
             from src.core.hot_updater import run_hot_update, restart_app
-            success, msg = run_hot_update()
+            success, msg = run_hot_update(tag, "helloworld856", "social-platform-scraper")
             if success:
                 restart_app()
             else:
