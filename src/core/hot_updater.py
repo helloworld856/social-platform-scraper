@@ -131,8 +131,21 @@ def _download_and_extract(tag: str, repo_owner: str, repo_name: str) -> tuple[bo
 
 
 def _preserve_and_copy(src: Path, dst: Path) -> None:
-    """将 src 目录内容覆盖到 dst，保留用户数据。"""
-    preserve = {".env", "user_data", "output"}
+    """将 src 目录内容覆盖到 dst，保留用户数据，清除已删除的文件。"""
+    preserve = {".env", "user_data", "output", ".git", ".gitignore"}
+
+    # 新版本包含的条目名称
+    new_items = {item.name for item in src.iterdir()}
+
+    # 删除旧版本有但新版本没有的顶层文件（目录整体替换，无需单独处理）
+    for old_item in dst.iterdir():
+        if old_item.name in preserve:
+            continue
+        if old_item.name not in new_items and old_item.is_file():
+            old_item.unlink(missing_ok=True)
+            logger.info("已删除残留文件：%s", old_item.name)
+
+    # 复制新版本条目
     for item in src.iterdir():
         if item.name in preserve:
             continue
