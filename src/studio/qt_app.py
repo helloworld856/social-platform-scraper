@@ -71,9 +71,6 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         # 启动后延迟 500ms 异步检查更新（避免阻塞窗口初始化）
         QTimer.singleShot(500, self._check_for_updates)
 
-        # 构建帮助菜单
-        self._build_menubar()
-
     def _build_ui(self) -> None:
         """主界面布局初始化。"""
         root = QWidget()
@@ -575,16 +572,13 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
 
     # ── 更新检查相关方法 ────────────────────────────────────────
 
-    def _build_menubar(self) -> None:
-        """构建菜单栏，包含「帮助 → 检查更新」菜单项。"""
-        menubar = self.menuBar()
-        help_menu = menubar.addMenu("帮助")
-        check_action = QAction("检查更新", self)
-        check_action.triggered.connect(self._check_for_updates)
-        help_menu.addAction(check_action)
-
     def _check_for_updates(self) -> None:
-        """后台线程检查版本更新，结果通过主线程信号回传 UI。"""
+        """后台线程检查版本更新，结果通过右上角标签展示。
+
+        有更新：显示可点击的更新提示。
+        无更新：标签保持隐藏。
+        检查失败：显示失败原因。
+        """
         from src.version import __version__
         from src.core.updater import check_for_updates
         import threading
@@ -595,21 +589,19 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
                     __version__, "helloworld856", "social-platform-scraper"
                 )
                 if has_update and latest and url:
-                    # 回到主线程显示更新提示
                     QTimer.singleShot(0, lambda: self._show_update_banner(latest, url))
                 else:
                     logger.info("当前已是最新版本 %s。", __version__)
             except Exception as e:
                 logger.warning("检查更新失败：%s", e)
-                # 回到主线程弹出错误提示
-                err_msg = str(e)
+                err_msg = f"检查更新失败：{e}"
                 QTimer.singleShot(0, lambda: self._show_update_error(err_msg))
 
         t = threading.Thread(target=_worker, daemon=True)
         t.start()
 
     def _show_update_banner(self, latest_version: str, url: str) -> None:
-        """在主窗口右上角显示可点击的更新提示标签。"""
+        """在右上角显示可点击的更新提示。"""
         from src.version import __version__
 
         text = (
@@ -619,6 +611,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         )
         self.update_label.setText(text)
         self.update_label.setVisible(True)
+        self.update_label.setStyleSheet("color: #d97706; font-size: 12px; padding: 4px 10px; background: #fef3c7; border: 1px solid #f59e0b; border-radius: 4px;")
         logger.info("发现新版本 v%s，当前版本 %s", latest_version, __version__)
 
     def _on_update_clicked(self, url: str) -> None:
@@ -628,13 +621,11 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         webbrowser.open(url)
         logger.info("用户点击更新链接，打开浏览器：%s", url)
 
-    def _show_update_error(self, detail: str) -> None:
-        """弹出检查更新失败对话框。"""
-        QMessageBox.warning(
-            self,
-            "检查更新失败",
-            "检查更新失败，请稍后重试。"
-        )
+    def _show_update_error(self, message: str) -> None:
+        """在右上角显示检查失败信息。"""
+        self.update_label.setText(message)
+        self.update_label.setVisible(True)
+        self.update_label.setStyleSheet("color: #dc2626; font-size: 12px; padding: 4px 10px; background: #fef2f2; border: 1px solid #ef4444; border-radius: 4px;")
 
     # ── 进程管理与窗口关闭 ────────────────────────────────────────
 
