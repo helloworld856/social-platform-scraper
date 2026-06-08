@@ -88,6 +88,15 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         root_layout.setContentsMargins(18, 16, 18, 14)
         root_layout.setSpacing(12)
 
+        # 更新提示标签，默认隐藏，位于窗口最上方
+        self.update_label = QLabel("")
+        self.update_label.setObjectName("updateLabel")
+        self.update_label.setVisible(False)
+        self.update_label.linkActivated.connect(self._on_update_clicked)
+        self.update_label.setWordWrap(True)
+        self.update_label.setAlignment(Qt.AlignCenter)
+        root_layout.addWidget(self.update_label)
+
         # 顶部标题栏 + 搜索重载操作栏
         header = QHBoxLayout()
         title_box = QVBoxLayout()
@@ -128,13 +137,6 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         self.global_config_btn.setToolTip("配置所有工具共享的爬取参数（超时、滚动、冷却等）")
         self.global_config_btn.clicked.connect(self._open_global_config)
         header.addWidget(self.global_config_btn)
-
-        # 右上角更新提示标签，默认隐藏
-        self.update_label = QLabel("")
-        self.update_label.setObjectName("updateLabel")
-        self.update_label.setVisible(False)
-        self.update_label.linkActivated.connect(self._on_update_clicked)
-        header.addWidget(self.update_label)
 
         root_layout.addLayout(header)
 
@@ -621,7 +623,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         )
         self.update_label.setText(text)
         self.update_label.setVisible(True)
-        self.update_label.setStyleSheet("color: #d97706; font-size: 12px; padding: 4px 10px; background: #fef3c7; border: 1px solid #f59e0b; border-radius: 4px;")
+        self.update_label.setStyleSheet("color: #92400e; font-size: 13px; padding: 8px 16px; background: #fef3c7; border: 1px solid #f59e0b; border-radius: 6px; margin-bottom: 2px;")
         logger.info("发现新版本 v%s，当前版本 %s", latest_version, __version__)
 
     def _on_update_clicked(self, url: str) -> None:
@@ -635,7 +637,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         """在右上角显示检查失败信息。"""
         self.update_label.setText(message)
         self.update_label.setVisible(True)
-        self.update_label.setStyleSheet("color: #dc2626; font-size: 12px; padding: 4px 10px; background: #fef2f2; border: 1px solid #ef4444; border-radius: 4px;")
+        self.update_label.setStyleSheet("color: #991b1b; font-size: 13px; padding: 8px 16px; background: #fef2f2; border: 1px solid #ef4444; border-radius: 6px; margin-bottom: 2px;")
 
     # ── 进程管理与窗口关闭 ────────────────────────────────────────
 
