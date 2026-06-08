@@ -51,6 +51,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
     # 子线程 -> 主线程 更新信号
     _update_available = pyqtSignal(str, str)   # latest_version, url
     _update_error = pyqtSignal(str)            # error message
+    _no_update = pyqtSignal()                  # no update available
 
     def __init__(self) -> None:
         super().__init__()
@@ -58,6 +59,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         # 连接更新信号到主线程槽
         self._update_available.connect(self._show_update_banner)
         self._update_error.connect(self._show_update_error)
+        self._no_update.connect(self._show_no_update)
 
         from src.version import __version__
         self.setWindowTitle(f"多平台数据爬取工具 v{__version__}")
@@ -604,6 +606,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
                     self._update_available.emit(latest, url)
                 else:
                     logger.info("当前已是最新版本 %s。", __version__)
+                    self._no_update.emit()
             except Exception as e:
                 logger.warning("检查更新失败：%s", e)
                 err_msg = f"检查更新失败：{e}"
@@ -636,6 +639,16 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
             )
             logger.info("热更新完成。")
         self.update_label.setVisible(True)
+
+    def _show_no_update(self) -> None:
+        """显示已是最新版本，3 秒后自动隐藏。"""
+        self.update_label.setText("已是最新版本")
+        self.update_label.setVisible(True)
+        self.update_label.setStyleSheet(
+            "color: #065f46; font-size: 13px; padding: 8px 16px;"
+            " background: #d1fae5; border: 1px solid #10b981; border-radius: 6px; margin-bottom: 2px;"
+        )
+        QTimer.singleShot(3000, self.update_label.hide)
 
     def _on_update_clicked(self, url: str) -> None:
         """点击更新提示后，确认并执行 git pull 热更新。"""
