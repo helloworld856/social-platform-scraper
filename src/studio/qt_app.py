@@ -651,6 +651,10 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
 
     def _on_update_clicked(self, url: str) -> None:
         """点击更新提示后，禁止界面操作，后台更新到 release tag 并自动重启。"""
+        # 停掉文件监听，否则更新替换目录时会报错
+        if hasattr(self, "watcher") and self.watcher.directories():
+            self.watcher.removePaths(self.watcher.directories())
+
         self.setEnabled(False)
         self.update_label.setText("正在更新，请勿关闭窗口…")
         self.update_label.setVisible(True)
