@@ -67,6 +67,12 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         self.refresh_tools()
         self._setup_watcher()
 
+        # 启动后延迟 500ms 异步检查更新（避免阻塞窗口初始化）
+        QTimer.singleShot(500, self._check_for_updates)
+
+        # 构建帮助菜单
+        self._build_menubar()
+
     def _build_ui(self) -> None:
         """主界面布局初始化。"""
         root = QWidget()
@@ -103,6 +109,14 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         self.global_config_btn.setToolTip("配置所有工具共享的爬取参数（超时、滚动、冷却等）")
         self.global_config_btn.clicked.connect(self._open_global_config)
         header.addWidget(self.global_config_btn)
+
+        # 右上角更新提示标签，默认隐藏
+        self.update_label = QLabel("")
+        self.update_label.setObjectName("updateLabel")
+        self.update_label.setVisible(False)
+        self.update_label.linkActivated.connect(self._on_update_clicked)
+        header.addWidget(self.update_label)
+
         root_layout.addLayout(header)
 
         # 水平分割器，左侧分类导航，中间工具表格，右侧详情简介
@@ -296,6 +310,14 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
                 border-bottom: 1px solid #e4eaf2;
                 padding: 8px;
                 font-weight: 700;
+            }
+            #updateLabel {
+                color: #d97706;
+                font-size: 12px;
+                padding: 4px 10px;
+                background: #fef3c7;
+                border: 1px solid #f59e0b;
+                border-radius: 4px;
             }
             """
         )
@@ -533,6 +555,71 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         """检查指定子窗口进程是否存活。"""
         process = self.processes.get(tool_id)
         return bool(process and process.state() != QProcess.NotRunning)
+
+    # ── 更新检查相关方法 ────────────────────────────────────────
+
+    def _build_menubar(self) -> None:
+        """构建菜单栏，包含「帮助 → 检查更新」菜单项。"""
+        menubar = self.menuBar()
+        help_menu = menubar.addMenu("帮助")
+        check_action = QAction("检查更新", self)
+        check_action.triggered.connect(self._check_for_updates)
+        help_menu.addAction(check_action)
+
+    def _check_for_updates(self) -> None:
+        """后台线程检查版本更新，结果通过主线程信号回传 UI。"""
+        from src.version import __version__
+        from src.core.updater import check_for_updates
+        import threading
+
+        def _worker() -> None:
+            try:
+                has_update, latest, url = check_for_updates(
+                    __version__, "helloworld856", "social-platform-scraper"
+                )
+                if has_update and latest and url:
+                    # 回到主线程显示更新提示
+                    QTimer.singleShot(0, lambda: self._show_update_banner(latest, url))
+                else:
+                    logger.info("当前已是最新版本 %s。", __version__)
+            except Exception as e:
+                logger.warning("检查更新失败：%s", e)
+                # 回到主线程弹出错误提示
+                err_msg = str(e)
+                QTimer.singleShot(0, lambda: self._show_update_error(err_msg))
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+
+    def _show_update_banner(self, latest_version: str, url: str) -> None:
+        """在主窗口右上角显示可点击的更新提示标签。"""
+        from src.version import __version__
+
+        text = (
+            f'<a href="{url}" style="color:#d97706;">'
+            f'发现新版本 v{latest_version}，当前版本为 {__version__}，点击下载'
+            f'</a>'
+        )
+        self.update_label.setText(text)
+        self.update_label.setVisible(True)
+        logger.info("发现新版本 v%s，当前版本 %s", latest_version, __version__)
+
+    def _on_update_clicked(self, url: str) -> None:
+        """用系统默认浏览器打开下载页面。"""
+        import webbrowser
+
+        webbrowser.open(url)
+        logger.info("用户点击更新链接，打开浏览器：%s", url)
+
+    def _show_update_error(self, detail: str) -> None:
+        """弹出检查更新失败对话框。"""
+        QMessageBox.warning(
+            self,
+            "检查更新失败",
+            "检查更新失败，请稍后重试。"
+        )
+
+    # ── 进程管理与窗口关闭 ────────────────────────────────────────
 
     def closeEvent(self, event) -> None:
         """
