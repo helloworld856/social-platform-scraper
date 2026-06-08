@@ -51,6 +51,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
     # 子线程 -> 主线程 更新信号
     _update_available = pyqtSignal(str, str)   # latest_version, url
     _update_error = pyqtSignal(str)            # error message
+    _no_update = pyqtSignal()                  # no update available
 
     def __init__(self) -> None:
         super().__init__()
@@ -58,6 +59,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         # 连接更新信号到主线程槽
         self._update_available.connect(self._show_update_banner)
         self._update_error.connect(self._show_update_error)
+        self._no_update.connect(self._show_no_update)
 
         from src.version import __version__
         self.setWindowTitle(f"多平台数据爬取工具 v{__version__}")
@@ -604,6 +606,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
                     self._update_available.emit(latest, url)
                 else:
                     logger.info("当前已是最新版本 %s。", __version__)
+                    self._no_update.emit()
             except Exception as e:
                 logger.warning("检查更新失败：%s", e)
                 err_msg = f"检查更新失败：{e}"
@@ -613,25 +616,72 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         t.start()
 
     def _show_update_banner(self, latest_version: str, url: str) -> None:
-        """在右上角显示可点击的更新提示。"""
+        """在窗口最上方显示更新提示。有 url 为发现新版本，无 url 为更新完成。"""
         from src.version import __version__
 
-        text = (
-            f'<a href="{url}" style="color:#d97706;">'
-            f'发现新版本 v{latest_version}，当前版本为 {__version__}，点击下载'
-            f'</a>'
-        )
-        self.update_label.setText(text)
+        if url:
+            text = (
+                f'<a href="{url}" style="color:#92400e;">'
+                f'发现新版本 v{latest_version}，当前版本为 {__version__}，点击更新'
+                f'</a>'
+            )
+            self.update_label.setText(text)
+            self.update_label.setStyleSheet(
+                "color: #92400e; font-size: 13px; padding: 8px 16px;"
+                " background: #fef3c7; border: 1px solid #f59e0b; border-radius: 6px; margin-bottom: 2px;"
+            )
+            logger.info("发现新版本 v%s，当前版本 %s", latest_version, __version__)
+        else:
+            self.update_label.setText("更新完成，请重启应用。")
+            self.update_label.setStyleSheet(
+                "color: #065f46; font-size: 13px; padding: 8px 16px;"
+                " background: #d1fae5; border: 1px solid #10b981; border-radius: 6px; margin-bottom: 2px;"
+            )
+            logger.info("热更新完成。")
         self.update_label.setVisible(True)
-        self.update_label.setStyleSheet("color: #92400e; font-size: 13px; padding: 8px 16px; background: #fef3c7; border: 1px solid #f59e0b; border-radius: 6px; margin-bottom: 2px;")
-        logger.info("发现新版本 v%s，当前版本 %s", latest_version, __version__)
+
+    def _show_no_update(self) -> None:
+        """显示已是最新版本，3 秒后自动隐藏。"""
+        self.update_label.setText("已是最新版本")
+        self.update_label.setVisible(True)
+        self.update_label.setStyleSheet(
+            "color: #065f46; font-size: 13px; padding: 8px 16px;"
+            " background: #d1fae5; border: 1px solid #10b981; border-radius: 6px; margin-bottom: 2px;"
+        )
+        QTimer.singleShot(3000, self.update_label.hide)
 
     def _on_update_clicked(self, url: str) -> None:
-        """用系统默认浏览器打开下载页面。"""
-        import webbrowser
+        """点击更新提示后，确认并执行 git pull 热更新。"""
 
-        webbrowser.open(url)
-        logger.info("用户点击更新链接，打开浏览器：%s", url)
+        reply = QMessageBox.question(
+            self,
+            "确认更新",
+            "发现新版本，是否立即更新？\n\n更新完成后请手动重启应用。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self.update_label.setText("正在更新…")
+        self.update_label.setVisible(True)
+        self.update_label.setStyleSheet(
+            "color: #1d4ed8; font-size: 13px; padding: 8px 16px;"
+            " background: #dbeafe; border: 1px solid #3b82f6; border-radius: 6px; margin-bottom: 2px;"
+        )
+
+        import threading
+
+        def _do_update() -> None:
+            from src.core.hot_updater import run_hot_update
+            success, msg = run_hot_update()
+            if success:
+                self._update_available.emit("", "")  # dummy signal to show success
+            else:
+                self._update_error.emit(msg)
+
+        t = threading.Thread(target=_do_update, daemon=True)
+        t.start()
 
     def _show_update_error(self, message: str) -> None:
         """在右上角显示检查失败信息。"""
