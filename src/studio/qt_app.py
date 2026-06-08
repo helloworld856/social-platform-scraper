@@ -8,7 +8,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PyQt5.QtCore import QFileSystemWatcher, QProcess, Qt, QTimer
+from PyQt5.QtCore import QFileSystemWatcher, QProcess, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QAction,
@@ -47,8 +47,18 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
     """
     爬虫工作台主 GUI 窗口类。
     """
+
+    # 子线程 -> 主线程 更新信号
+    _update_available = pyqtSignal(str, str)   # latest_version, url
+    _update_error = pyqtSignal(str)            # error message
+
     def __init__(self) -> None:
         super().__init__()
+
+        # 连接更新信号到主线程槽
+        self._update_available.connect(self._show_update_banner)
+        self._update_error.connect(self._show_update_error)
+
         from src.version import __version__
         self.setWindowTitle(f"多平台数据爬取工具 v{__version__}")
         self.resize(1040, 640)
@@ -589,13 +599,13 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
                     __version__, "helloworld856", "social-platform-scraper"
                 )
                 if has_update and latest and url:
-                    QTimer.singleShot(0, lambda: self._show_update_banner(latest, url))
+                    self._update_available.emit(latest, url)
                 else:
                     logger.info("当前已是最新版本 %s。", __version__)
             except Exception as e:
                 logger.warning("检查更新失败：%s", e)
                 err_msg = f"检查更新失败：{e}"
-                QTimer.singleShot(0, lambda: self._show_update_error(err_msg))
+                self._update_error.emit(err_msg)
 
         t = threading.Thread(target=_worker, daemon=True)
         t.start()
