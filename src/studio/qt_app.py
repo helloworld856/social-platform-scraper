@@ -8,7 +8,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PyQt5.QtCore import QFileSystemWatcher, QProcess, Qt, QTimer
+from PyQt5.QtCore import QFileSystemWatcher, QProcess, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
     QAction,
@@ -47,9 +47,20 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
     """
     爬虫工作台主 GUI 窗口类。
     """
+
+    # 子线程 -> 主线程 更新信号
+    _update_available = pyqtSignal(str, str)   # latest_version, url
+    _update_error = pyqtSignal(str)            # error message
+
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("多平台数据爬取工具")
+
+        # 连接更新信号到主线程槽
+        self._update_available.connect(self._show_update_banner)
+        self._update_error.connect(self._show_update_error)
+
+        from src.version import __version__
+        self.setWindowTitle(f"多平台数据爬取工具 v{__version__}")
         self.resize(1040, 640)
         self.setMinimumSize(860, 560)
 
@@ -67,6 +78,9 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         self.refresh_tools()
         self._setup_watcher()
 
+        # 启动后延迟 500ms 异步检查更新（避免阻塞窗口初始化）
+        QTimer.singleShot(500, self._check_for_updates)
+
     def _build_ui(self) -> None:
         """主界面布局初始化。"""
         root = QWidget()
@@ -74,14 +88,34 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         root_layout.setContentsMargins(18, 16, 18, 14)
         root_layout.setSpacing(12)
 
+        # 更新提示标签，默认隐藏，位于窗口最上方
+        self.update_label = QLabel("")
+        self.update_label.setObjectName("updateLabel")
+        self.update_label.setVisible(False)
+        self.update_label.linkActivated.connect(self._on_update_clicked)
+        self.update_label.setWordWrap(True)
+        self.update_label.setAlignment(Qt.AlignCenter)
+        root_layout.addWidget(self.update_label)
+
         # 顶部标题栏 + 搜索重载操作栏
         header = QHBoxLayout()
         title_box = QVBoxLayout()
+
+        # 标题行：标题 + 版本号
+        title_row = QHBoxLayout()
         self.title_label = QLabel("多平台数据爬取工具")
         self.title_label.setObjectName("titleLabel")
+        title_row.addWidget(self.title_label)
+        title_row.addStretch(1)
+
+        from src.version import __version__
+        self.version_label = QLabel(f"v{__version__}")
+        self.version_label.setObjectName("versionLabel")
+        title_row.addWidget(self.version_label)
+
+        title_box.addLayout(title_row)
         self.subtitle_label = QLabel("集中启动 YouTube、TikTok、X/Twitter、Instagram、Facebook 采集工具和数据处理工具")
         self.subtitle_label.setObjectName("subtitleLabel")
-        title_box.addWidget(self.title_label)
         title_box.addWidget(self.subtitle_label)
         header.addLayout(title_box, 1)
 
@@ -103,6 +137,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         self.global_config_btn.setToolTip("配置所有工具共享的爬取参数（超时、滚动、冷却等）")
         self.global_config_btn.clicked.connect(self._open_global_config)
         header.addWidget(self.global_config_btn)
+
         root_layout.addLayout(header)
 
         # 水平分割器，左侧分类导航，中间工具表格，右侧详情简介
@@ -296,6 +331,19 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
                 border-bottom: 1px solid #e4eaf2;
                 padding: 8px;
                 font-weight: 700;
+            }
+            #versionLabel {
+                color: #667085;
+                font-size: 11pt;
+                font-weight: 500;
+            }
+            #updateLabel {
+                color: #d97706;
+                font-size: 12px;
+                padding: 4px 10px;
+                background: #fef3c7;
+                border: 1px solid #f59e0b;
+                border-radius: 4px;
             }
             """
         )
@@ -533,6 +581,65 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         """检查指定子窗口进程是否存活。"""
         process = self.processes.get(tool_id)
         return bool(process and process.state() != QProcess.NotRunning)
+
+    # ── 更新检查相关方法 ────────────────────────────────────────
+
+    def _check_for_updates(self) -> None:
+        """后台线程检查版本更新，结果通过右上角标签展示。
+
+        有更新：显示可点击的更新提示。
+        无更新：标签保持隐藏。
+        检查失败：显示失败原因。
+        """
+        from src.version import __version__
+        from src.core.updater import check_for_updates
+        import threading
+
+        def _worker() -> None:
+            try:
+                has_update, latest, url = check_for_updates(
+                    __version__, "helloworld856", "social-platform-scraper"
+                )
+                if has_update and latest and url:
+                    self._update_available.emit(latest, url)
+                else:
+                    logger.info("当前已是最新版本 %s。", __version__)
+            except Exception as e:
+                logger.warning("检查更新失败：%s", e)
+                err_msg = f"检查更新失败：{e}"
+                self._update_error.emit(err_msg)
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+
+    def _show_update_banner(self, latest_version: str, url: str) -> None:
+        """在右上角显示可点击的更新提示。"""
+        from src.version import __version__
+
+        text = (
+            f'<a href="{url}" style="color:#d97706;">'
+            f'发现新版本 v{latest_version}，当前版本为 {__version__}，点击下载'
+            f'</a>'
+        )
+        self.update_label.setText(text)
+        self.update_label.setVisible(True)
+        self.update_label.setStyleSheet("color: #92400e; font-size: 13px; padding: 8px 16px; background: #fef3c7; border: 1px solid #f59e0b; border-radius: 6px; margin-bottom: 2px;")
+        logger.info("发现新版本 v%s，当前版本 %s", latest_version, __version__)
+
+    def _on_update_clicked(self, url: str) -> None:
+        """用系统默认浏览器打开下载页面。"""
+        import webbrowser
+
+        webbrowser.open(url)
+        logger.info("用户点击更新链接，打开浏览器：%s", url)
+
+    def _show_update_error(self, message: str) -> None:
+        """在右上角显示检查失败信息。"""
+        self.update_label.setText(message)
+        self.update_label.setVisible(True)
+        self.update_label.setStyleSheet("color: #991b1b; font-size: 13px; padding: 8px 16px; background: #fef2f2; border: 1px solid #ef4444; border-radius: 6px; margin-bottom: 2px;")
+
+    # ── 进程管理与窗口关闭 ────────────────────────────────────────
 
     def closeEvent(self, event) -> None:
         """
