@@ -616,29 +616,21 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         t.start()
 
     def _show_update_banner(self, latest_version: str, url: str) -> None:
-        """在窗口最上方显示更新提示。有 url 为发现新版本，无 url 为更新完成。"""
+        """在窗口最上方显示新版本更新提示。"""
         from src.version import __version__
 
-        if url:
-            text = (
-                f'<a href="{url}" style="color:#92400e;">'
-                f'发现新版本 v{latest_version}，当前版本为 {__version__}，点击更新'
-                f'</a>'
-            )
-            self.update_label.setText(text)
-            self.update_label.setStyleSheet(
-                "color: #92400e; font-size: 13px; padding: 8px 16px;"
-                " background: #fef3c7; border: 1px solid #f59e0b; border-radius: 6px; margin-bottom: 2px;"
-            )
-            logger.info("发现新版本 v%s，当前版本 %s", latest_version, __version__)
-        else:
-            self.update_label.setText("更新完成，请重启应用。")
-            self.update_label.setStyleSheet(
-                "color: #065f46; font-size: 13px; padding: 8px 16px;"
-                " background: #d1fae5; border: 1px solid #10b981; border-radius: 6px; margin-bottom: 2px;"
-            )
-            logger.info("热更新完成。")
+        text = (
+            f'<a href="{url}" style="color:#92400e;">'
+            f'发现新版本 v{latest_version}，当前版本为 {__version__}，点击更新'
+            f'</a>'
+        )
+        self.update_label.setText(text)
+        self.update_label.setStyleSheet(
+            "color: #92400e; font-size: 13px; padding: 8px 16px;"
+            " background: #fef3c7; border: 1px solid #f59e0b; border-radius: 6px; margin-bottom: 2px;"
+        )
         self.update_label.setVisible(True)
+        logger.info("发现新版本 v%s，当前版本 %s", latest_version, __version__)
 
     def _show_no_update(self) -> None:
         """显示已是最新版本，3 秒后自动隐藏。"""
@@ -651,33 +643,24 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         QTimer.singleShot(3000, self.update_label.hide)
 
     def _on_update_clicked(self, url: str) -> None:
-        """点击更新提示后，确认并执行 git pull 热更新。"""
-
-        reply = QMessageBox.question(
-            self,
-            "确认更新",
-            "发现新版本，是否立即更新？\n\n更新完成后请手动重启应用。",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes,
-        )
-        if reply != QMessageBox.Yes:
-            return
-
-        self.update_label.setText("正在更新…")
+        """点击更新提示后，禁止界面操作，后台 git pull 并自动重启。"""
+        self.setEnabled(False)
+        self.update_label.setText("正在更新，请勿关闭窗口…")
         self.update_label.setVisible(True)
         self.update_label.setStyleSheet(
-            "color: #1d4ed8; font-size: 13px; padding: 8px 16px;"
+            "color: #1d4ed8; font-size: 14px; padding: 10px 16px;"
             " background: #dbeafe; border: 1px solid #3b82f6; border-radius: 6px; margin-bottom: 2px;"
         )
 
         import threading
 
         def _do_update() -> None:
-            from src.core.hot_updater import run_hot_update
+            from src.core.hot_updater import run_hot_update, restart_app
             success, msg = run_hot_update()
             if success:
-                self._update_available.emit("", "")  # dummy signal to show success
+                restart_app()
             else:
+                QTimer.singleShot(0, lambda: self.setEnabled(True))
                 self._update_error.emit(msg)
 
         t = threading.Thread(target=_do_update, daemon=True)
