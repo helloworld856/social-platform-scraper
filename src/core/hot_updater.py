@@ -26,18 +26,36 @@ REQUEST_TIMEOUT = 30
 def run_hot_update(tag: str, repo_owner: str, repo_name: str) -> tuple[bool, str]:
     """
     更新到指定 release tag。优先 git，不可用时下载 zip。
+    成功后自动将新版本号写入 config/version.json。
 
     Returns:
         (success, message)
     """
+    # 标准化版本号（去掉 v 前缀）
+    version = tag.lstrip("v")
+
     # 方式一：git fetch + checkout
     success, msg = _git_checkout(tag)
     if success:
+        _write_version(version)
         return (True, msg)
 
     logger.warning("git 方式失败，尝试下载 zip：%s", msg)
     # 方式二：下载 release zip 解压覆盖
-    return _download_and_extract(tag, repo_owner, repo_name)
+    success, msg = _download_and_extract(tag, repo_owner, repo_name)
+    if success:
+        _write_version(version)
+    return (success, msg)
+
+
+def _write_version(version: str) -> None:
+    """将新版本号写入 config/version.json，下次启动即为新版本。"""
+    try:
+        from src.version import set_version
+        set_version(version)
+        logger.info("版本号已更新为 %s", version)
+    except Exception as e:
+        logger.warning("写入版本号失败：%s", e)
 
 
 def _git_checkout(tag: str) -> tuple[bool, str]:
