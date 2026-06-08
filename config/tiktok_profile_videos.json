@@ -1,0 +1,10 @@
+{
+  "page_load_timeout": 45000,
+  "scroll_interval": 2.5,
+  "no_new_scroll_limit": 10,
+  "max_scrolls": 200,
+  "link_batch_size": 50,
+  "save_batch_size": 10,
+  "cooldown_min": 10.0,
+  "cooldown_max": 20.0
+}

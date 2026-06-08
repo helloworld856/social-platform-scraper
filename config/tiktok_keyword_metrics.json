@@ -1,0 +1,8 @@
+{
+  "max_videos": 1000,
+  "max_candidates": 3000,
+  "scroll_interval": 0.7,
+  "max_search_scrolls": 360,
+  "no_new_scroll_limit": 12,
+  "comment_top_limit": 100
+}

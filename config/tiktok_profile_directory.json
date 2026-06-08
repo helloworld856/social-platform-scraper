@@ -1,0 +1,4 @@
+{
+  "page_load_timeout": 35000,
+  "captcha_wait": 12
+}

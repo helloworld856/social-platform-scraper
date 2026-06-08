@@ -1,0 +1,9 @@
+{
+  "max_video_items": 5000,
+  "page_load_timeout": 45000,
+  "scroll_delay": 0.8,
+  "no_new_scroll_limit": 6,
+  "scroll_px": 2800,
+  "max_post_scrolls": 200,
+  "save_batch_size": 10
+}
