@@ -13,11 +13,13 @@ from __future__ import annotations
 import logging
 import os
 import re
+from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
 
-load_dotenv()
+# 确保从项目根目录加载 .env
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
 logger = logging.getLogger(__name__)
 
