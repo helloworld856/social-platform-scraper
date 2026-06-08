@@ -15,6 +15,9 @@ from src.core import (
     MultiSheetXlsxWriter,
     connect_existing_chromium,
     interruptible_sleep,
+    log_error,
+    log_line,
+    log_warn,
     should_stop,
     wait_if_paused,
     DEFAULT_X_CDP_URL,
@@ -47,10 +50,6 @@ _POST_LINK_PATTERNS = [
 ]
 
 # ── 工具函数 ──────────────────────────────────────────────────────────────────
-
-def log_line(log_callback, message: str) -> None:
-    if log_callback:
-        log_callback(message)
 
 
 def parse_date_range(start_date: str, end_date: str) -> tuple[datetime, datetime]:
@@ -555,7 +554,7 @@ def scroll_and_extract_posts(
 
         articles = page.locator('div[role="article"]').all()
         if not articles:
-            log_line(log_callback, f"  [!] 第 {scroll_idx + 1} 轮未找到任何 article")
+            log_warn(log_callback, f"  [!] 第 {scroll_idx + 1} 轮未找到任何 article")
         added = 0
 
         for article in articles:
@@ -598,6 +597,7 @@ def scroll_and_extract_posts(
                     if post_writer is not None:
                         row = row_from_post(write_count + 1, post_data, profile_url)
                         post_writer.writerow("帖子内容", row)
+                        log_line(log_callback, f"    [{write_count + 1}] {post_data.get('url', '')[:80]}")
                         write_count += 1
                         if write_count % save_batch_size == 0:
                             post_writer.save()
@@ -708,13 +708,17 @@ def run_facebook_profile_works_spider(
     end_date_str: str,
     force_exact_time_str: str,
     log_callback,
+    finish_callback,
     stop_event,
     pause_event,
     **config
-) -> str:
+) -> None:
     urls = [u.strip() for u in profile_urls_text.splitlines() if u.strip()]
     if not urls:
-        return "未提供任何主页链接"
+        log_warn(log_callback, "未提供任何主页链接")
+        if finish_callback:
+            finish_callback(None)
+        return
 
     limit_time_bool = (limit_time_str == "是")
     start_dt = None
@@ -735,18 +739,21 @@ def run_facebook_profile_works_spider(
     cooldown_max_val = float(config.get("cooldown_max", 3.0))
     force_exact = (force_exact_time_str == "是")
 
+    output_path = None
     try:
         with sync_playwright() as p:
             browser, playwright_context = connect_existing_chromium(p, DEFAULT_X_CDP_URL, log_callback=log_callback)
             if not browser:
-                log_line(log_callback, "无法连接到本地浏览器，请确保以调试模式启动 Chrome。")
-                return "浏览器连接失败"
+                log_error(log_callback, "无法连接到本地浏览器，请确保以调试模式启动 Chrome。")
+                return
 
             page = playwright_context.new_page()
 
-            for profile_url in urls:
+            for profile_index, profile_url in enumerate(urls, 1):
                 if should_stop(stop_event):
                     break
+
+                log_line(log_callback, f"[{profile_index}/{len(urls)}] 读取主页：{profile_url}")
 
                 # ── 先初始化 XLSX（滚动前就建好，边滚边写防丢数据）────
                 output_path = _get_output_path(profile_url)
@@ -783,7 +790,7 @@ def run_facebook_profile_works_spider(
                                              and not in_date_range(parse_fb_time_string(p.get("published_at", "")), start_dt, end_dt))])
 
                 if not posts:
-                    log_line(log_callback, f"未抓到任何帖子: {profile_url}")
+                    log_warn(log_callback, f"未抓到任何帖子: {profile_url}")
                     continue
 
                 # ── 阶段二：评论（仅打开帖子详情页）─────────────────
@@ -807,7 +814,7 @@ def run_facebook_profile_works_spider(
                             if comments:
                                 log_line(log_callback, f"  评论: {len(comments)} 条 → {post_data['url'][:60]}")
                         except Exception as e:
-                            log_line(log_callback, f"  评论提取失败: {e}")
+                            log_error(log_callback, f"  评论提取失败: {e}")
                         delay = random.uniform(cooldown_min_val, cooldown_max_val)
                         interruptible_sleep(delay, stop_event)
 
@@ -816,14 +823,17 @@ def run_facebook_profile_works_spider(
                 if collect_comments_bool:
                     msg += f"，评论 {comments_written} 条"
                 log_line(log_callback, msg)
+                if finish_callback:
+                    finish_callback(output_path)
 
             page.close()
             playwright_context.close()
             browser.close()
-            return "采集全部完成"
     except Exception as e:
-        import traceback
-        return f"运行异常: {e}\n{traceback.format_exc()}"
+        log_error(log_callback, f"运行异常: {e}")
+    finally:
+        if finish_callback:
+            finish_callback(output_path)
 
 
 # ── 兼容 keyword_search.py 的包装器 ──────────────────────────────────────────
@@ -892,7 +902,7 @@ def parse_deep_post(page, url: str, collect_comments: bool = False,
 
 # 导出供 keyword_search 使用
 __all__ = [
-    "log_line", "parse_date_range", "parse_fb_time_string", "in_date_range",
+    "log_line", "log_warn", "log_error", "parse_date_range", "parse_fb_time_string", "in_date_range",
     "row_from_post", "collect_profile_urls", "parse_deep_post",
     "PAGE_TIMEOUT_MS", "SCROLL_DELAY_MS", "NO_NEW_LIMIT", "SAVE_BATCH_SIZE",
     "run_facebook_profile_works_spider",

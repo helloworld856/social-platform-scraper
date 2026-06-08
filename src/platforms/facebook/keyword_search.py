@@ -12,7 +12,9 @@ from src.core import (
     build_output_path,
 )
 from src.platforms.facebook.profile_works import (
+    log_error,
     log_line,
+    log_warn,
     parse_date_range,
     parse_fb_time_string,
     in_date_range,
@@ -38,13 +40,17 @@ def run_facebook_keyword_search_spider(
     end_date_str: str, 
     sort_recent_str: str,
     log_callback, 
+    finish_callback,
     stop_event, 
     pause_event, 
     **config
-) -> str:
+) -> None:
     keywords = [k.strip() for k in keywords_text.splitlines() if k.strip()]
     if not keywords:
-        return "未提供任何搜索关键词"
+        log_warn(log_callback, "未提供任何搜索关键词")
+        if finish_callback:
+            finish_callback(None)
+        return
     
     limit_time_bool = (limit_time_str == "是")
     sort_recent_bool = (sort_recent_str == "是")
@@ -64,18 +70,21 @@ def run_facebook_keyword_search_spider(
     cooldown_min_val = float(config.get("cooldown_min", 1.0))
     cooldown_max_val = float(config.get("cooldown_max", 3.0))
     
+    output_path = None
     try:
         with sync_playwright() as p:
             browser, playwright_context = connect_existing_chromium(p, DEFAULT_X_CDP_URL, log_callback=log_callback)
             if not browser:
-                log_line(log_callback, "无法连接到本地浏览器，请确保以调试模式启动 Chrome。")
-                return "浏览器连接失败"
+                log_error(log_callback, "无法连接到本地浏览器，请确保以调试模式启动 Chrome。")
+                return
                 
             page = playwright_context.new_page()
             
-            for keyword in keywords:
+            for keyword_index, keyword in enumerate(keywords, 1):
                 if should_stop(stop_event):
                     break
+                
+                log_line(log_callback, f"[{keyword_index}/{len(keywords)}] 搜索关键词：{keyword}")
                 
                 # 阶段一：打开搜索页面并收集帖子链接
                 search_url = f"https://www.facebook.com/search/top?q={keyword}"
@@ -110,7 +119,7 @@ def run_facebook_keyword_search_spider(
                                 log_line(log_callback, "  > 成功通过备用开关切换，等待页面刷新...")
                                 page.wait_for_timeout(4000)
                     except Exception as e:
-                        log_line(log_callback, f"  [!] 切换排序时出错: {e}")
+                        log_warn(log_callback, f"  [!] 切换排序时出错: {e}")
                 else:
                     log_line(log_callback, "  > 保持默认的搜索相关性排序。")
                 
@@ -186,19 +195,21 @@ def run_facebook_keyword_search_spider(
                         interruptible_sleep(delay, stop_event)
                         
                     except Exception as e:
-                        log_line(log_callback, f"  详情解析失败: {e}")
+                        log_error(log_callback, f"  详情解析失败: {e}")
                         
                 writer.save()
                 msg = f"完成关键词 {keyword}，有效导出 {total_written} 条帖子数据。"
                 if collect_comments_bool:
                     msg += f" 导出评论 {comments_written} 条。"
                 log_line(log_callback, msg)
+                if finish_callback:
+                    finish_callback(output_path)
                 
             page.close()
             playwright_context.close()
             browser.close()
-            
-            return "采集全部完成"
     except Exception as e:
-        import traceback
-        return f"运行异常: {e}\n{traceback.format_exc()}"
+        log_error(log_callback, f"运行异常: {e}")
+    finally:
+        if finish_callback:
+            finish_callback(output_path)

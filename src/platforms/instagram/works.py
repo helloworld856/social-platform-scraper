@@ -19,7 +19,11 @@ from src.core import (
     build_output_path,
     connect_existing_chromium,
     expand_compact_number,
+    interruptible_random_sleep,
     interruptible_sleep,
+    log_error,
+    log_line,
+    log_warn,
     sanitize_csv_cell,
     should_stop,
     wait_if_paused,
@@ -56,11 +60,6 @@ BLOCKED_USERNAMES = {
 }
 
 
-def log_line(log_callback, text: str):
-    if log_callback:
-        log_callback(text)
-
-
 class InstagramRateLimitError(RuntimeError):
     pass
 
@@ -71,16 +70,6 @@ class InstagramUnavailableWorkError(RuntimeError):
 
 class InstagramStoppedError(RuntimeError):
     pass
-
-
-def interruptible_random_sleep(min_seconds: float, max_seconds: float, log_callback=None, stop_event=None, reason: str = "降低访问频率"):
-    min_seconds = max(0.0, float(min_seconds or 0))
-    max_seconds = max(min_seconds, float(max_seconds or min_seconds))
-    seconds = random.uniform(min_seconds, max_seconds)
-    if seconds <= 0:
-        return False
-    log_line(log_callback, f"    {reason}，随机等待 {seconds:.1f} 秒。")
-    return interruptible_sleep(seconds, stop_event)
 
 
 def clean_profile_url(url: str) -> str:
@@ -326,7 +315,7 @@ def collect_profile_work_links(page, profile_url: str, max_works: int, max_scrol
     try:
         page.wait_for_selector('main, article, a[href*="/p/"], a[href*="/reel/"], a[href*="/tv/"]', timeout=12000)
     except PlaywrightTimeoutError:
-        log_line(log_callback, "  未等到主页内容区域，继续滚动尝试。")
+        log_warn(log_callback, "  未等到主页内容区域，继续滚动尝试。")
 
     works: list[dict[str, str]] = []
     seen = set()
@@ -702,12 +691,12 @@ def run_instagram_profile_works_spider(
     page = None
     try:
         if sync_playwright is None:
-            log_line(log_callback, "缺少依赖：playwright。请先安装 requirements.txt 中的依赖。")
+            log_error(log_callback, "缺少依赖：playwright。请先安装 requirements.txt 中的依赖。")
             return
 
         profile_urls = parse_profile_urls(profile_urls_text)
         if not profile_urls:
-            log_line(log_callback, "未读取到有效的 Instagram 作者主页链接。")
+            log_warn(log_callback, "未读取到有效的 Instagram 作者主页链接。")
             return
 
         output_path = build_output_path("instagram", f"instagram_profile_works_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
@@ -719,8 +708,8 @@ def run_instagram_profile_works_spider(
             try:
                 _, context = connect_existing_chromium(playwright, cdp_port_or_url, log_callback=log_callback)
             except Exception as exc:
-                log_line(log_callback, f"无法连接浏览器：{exc}")
-                log_line(log_callback, "连接失败：请确认 Chrome 已打开，并已登录 Instagram。")
+                log_error(log_callback, f"无法连接浏览器：{exc}")
+                log_error(log_callback, "连接失败：请确认 Chrome 已打开，并已登录 Instagram。")
                 return
 
             page = context.new_page()
@@ -774,18 +763,18 @@ def run_instagram_profile_works_spider(
                                     break
                                 batch_written = 0
                         except InstagramRateLimitError as exc:
-                            log_line(log_callback, f"    停止当前作者详情读取：{exc}。已保存 {written_count} 条。")
+                            log_warn(log_callback, f"    停止当前作者详情读取：{exc}。已保存 {written_count} 条。")
                             rate_limited = True
                             break
                         except InstagramUnavailableWorkError as exc:
-                            log_line(log_callback, f"    跳过：{work['link']}：{exc}")
+                            log_warn(log_callback, f"    跳过：{work['link']}：{exc}")
                         except InstagramStoppedError:
                             log_line(log_callback, "    任务已停止。")
                             break
                         except PlaywrightTimeoutError:
-                            log_line(log_callback, f"    跳过：作品详情页加载超时：{work['link']}")
+                            log_warn(log_callback, f"    跳过：作品详情页加载超时：{work['link']}")
                         except Exception as exc:
-                            log_line(log_callback, f"    跳过：{work['link']}：{exc}")
+                            log_warn(log_callback, f"    跳过：{work['link']}：{exc}")
 
                     if rate_limited and not should_stop(stop_event):
                         interruptible_random_sleep(
@@ -797,9 +786,9 @@ def run_instagram_profile_works_spider(
                         )
                     log_line(log_callback, f"  完成 @{username}：写入 {written_count} 条。")
                 except PlaywrightTimeoutError:
-                    log_line(log_callback, "  跳过：主页加载超时，请确认链接可打开且账号已登录。")
+                    log_warn(log_callback, "  跳过：主页加载超时，请确认链接可打开且账号已登录。")
                 except Exception as exc:
-                    log_line(log_callback, f"  跳过：{exc}")
+                    log_warn(log_callback, f"  跳过：{exc}")
 
         completed_path = output_path
         writer.save()

@@ -18,6 +18,9 @@ from src.core import (
     connect_existing_chromium,
     expand_compact_number,
     interruptible_sleep,
+    log_error,
+    log_line,
+    log_warn,
     random_cooldown,
     should_stop,
     wait_if_paused,
@@ -33,11 +36,6 @@ COOLDOWN_MIN_SECONDS = 3.0
 COOLDOWN_MAX_SECONDS = 8.0
 STATUS_RE = re.compile(r"/[^/?#]+/status/(\d+)")
 NUMBER_RE = re.compile(r"(\d[\d,.]*(?:\.\d+)?\s*(?:[KkMmBb]|千|万|萬|亿|億)?)")
-
-
-def log_line(log_callback, text: str):
-    if log_callback:
-        log_callback(text)
 
 
 def clean_tweet_url(url: str) -> str:
@@ -212,12 +210,12 @@ def collect_tweet_metrics(page, tweet_url: str, page_timeout=None, page_ready_wa
 
     current_url = page.url
     if "login" in current_url.lower() or "account" in current_url.lower():
-        log_line(log_callback, f"  警告：当前页面疑似登录页：{current_url}")
+        log_warn(log_callback, f"  警告：当前页面疑似登录页：{current_url}")
         raise RuntimeError("页面跳转到登录页，请确认 Chrome 已登录 X/Twitter")
 
     article = find_target_article(page, status_id, page_timeout=page_timeout)
     if article is None:
-        log_line(log_callback, f"  当前页面 URL：{current_url}")
+        log_warn(log_callback, f"  当前页面 URL：{current_url}")
         raise RuntimeError("未找到目标推文 DOM（页面可能未完全加载、被限流或推文不存在）")
 
     payload = extract_article_payload(article)
@@ -257,7 +255,7 @@ def run_x_tweet_metrics_spider(
     page = None
     try:
         if sync_playwright is None:
-            log_line(log_callback, "缺少依赖：playwright。请先安装 requirements.txt 中的依赖。")
+            log_error(log_callback, "缺少依赖：playwright。请先安装 requirements.txt 中的依赖。")
             return
 
         tweet_urls = parse_tweet_urls(txt_path)
@@ -280,8 +278,8 @@ def run_x_tweet_metrics_spider(
             try:
                 _, context = connect_existing_chromium(playwright, cdp_port_or_url)
             except Exception as exc:
-                log_line(log_callback, f"无法连接浏览器：{exc}")
-                log_line(log_callback, "连接失败：请确认 Chrome 已自动打开并已登录 X/Twitter。")
+                log_error(log_callback, f"无法连接浏览器：{exc}")
+                log_error(log_callback, "连接失败：请确认 Chrome 已自动打开并已登录 X/Twitter。")
                 return
 
             page = context.new_page()
@@ -324,9 +322,9 @@ def run_x_tweet_metrics_spider(
                             log_line(log_callback, f"  提取评论失败：{exc}")
                             
                 except PlaywrightTimeoutError:
-                    log_line(log_callback, "  页面加载超时，写入空指标行。")
+                    log_error(log_callback, "  页面加载超时，写入空指标行。")
                 except Exception as exc:
-                    log_line(log_callback, f"  处理失败，写入空指标行：{exc}")
+                    log_error(log_callback, f"  处理失败，写入空指标行：{exc}")
 
                 if get_comments_bool:
                     writer.writerow("推文信息", row)

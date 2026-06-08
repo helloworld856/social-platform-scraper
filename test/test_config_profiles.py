@@ -6,9 +6,12 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from PyQt5.QtWidgets import QApplication
 
@@ -164,7 +167,7 @@ def test_save_config_without_defaults_param():
     with patch("src.core.config_store.get_config_dir", return_value=tmp):
         # 使用一个已知在 DEFAULT_CONFIGS 中的 tool_id
         save_config("x_keyword_video_search",
-                    {"slice_days": 30, "max_scrolls": 999},
+                    {"slice_days": 30, "no_new_scroll_limit": 20},
                     profile="my_x_config")
         result = load_config("x_keyword_video_search",
                             {"slice_days": 7, "max_scrolls": 200,
@@ -173,7 +176,7 @@ def test_save_config_without_defaults_param():
                              "no_new_scroll_limit": 5},
                             "my_x_config")
         assert result["slice_days"] == 30
-        assert result["max_scrolls"] == 999
+        assert result["no_new_scroll_limit"] == 20
         # 清理
         delete_profile("x_keyword_video_search", "my_x_config")
 

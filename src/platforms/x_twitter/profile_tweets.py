@@ -21,6 +21,9 @@ from src.core import (
     connect_existing_chromium,
     expand_compact_number,
     interruptible_sleep,
+    log_error,
+    log_line,
+    log_warn,
     sanitize_csv_cell,
     should_stop,
     wait_if_paused,
@@ -59,11 +62,6 @@ BLOCKED_PROFILE_NAMES = {
     "signup",
     "login",
 }
-
-
-def log_line(log_callback, text: str):
-    if log_callback:
-        log_callback(text)
 
 
 def clean_profile_url(url: str) -> str:
@@ -359,7 +357,7 @@ def collect_profile_tweets(
         page.wait_for_selector('article[data-testid="tweet"], article', timeout=page_timeout)
     except PlaywrightTimeoutError:
         if keyword:
-            log_line(log_callback, f"    搜索无结果或加载超时，跳过关键词 '{keyword}'。")
+            log_warn(log_callback, f"    搜索无结果或加载超时，跳过关键词 '{keyword}'。")
             if writer:
                 return tweets, row_offset, written_count
             return tweets
@@ -429,7 +427,7 @@ def collect_profile_tweets(
                             }
                             writer.writerow("评论信息", comment_row)
                     except Exception as exc:
-                        log_line(log_callback, f"    提取评论失败：{exc}")
+                        log_warn(log_callback, f"    提取评论失败：{exc}")
                 
                 if len(pending_rows) >= save_batch_size:
                     if hasattr(writer, "writerow") and hasattr(writer, "worksheets"):
@@ -453,7 +451,7 @@ def collect_profile_tweets(
         else:
             no_new_count += 1
             if no_new_count >= no_new_scroll_limit:
-                log_line(log_callback, f"  连续 {no_new_scroll_limit} 次没有新增帖子，停止。")
+                log_warn(log_callback, f"  连续 {no_new_scroll_limit} 次没有新增帖子，停止。")
                 break
 
         if max_collect is not None and len(tweets) >= max_collect:
@@ -520,7 +518,7 @@ def run_x_profile_tweets_spider(
     page = None
     try:
         if sync_playwright is None:
-            log_line(log_callback, "缺少依赖：playwright。请先安装 requirements.txt 中的依赖。")
+            log_error(log_callback, "缺少依赖：playwright。请先安装 requirements.txt 中的依赖。")
             return
 
         profile_urls = parse_profile_urls(profile_urls_text)
@@ -550,8 +548,8 @@ def run_x_profile_tweets_spider(
             try:
                 _, context = connect_existing_chromium(playwright, cdp_port_or_url)
             except Exception as exc:
-                log_line(log_callback, f"无法连接浏览器：{exc}")
-                log_line(log_callback, "连接失败：请确认 Chrome 已自动打开并已登录 X/Twitter。")
+                log_error(log_callback, f"无法连接浏览器：{exc}")
+                log_error(log_callback, "连接失败：请确认 Chrome 已自动打开并已登录 X/Twitter。")
                 return
 
             page = context.new_page()
@@ -617,9 +615,9 @@ def run_x_profile_tweets_spider(
                             log_line(log_callback, "  未提供补充搜索关键词，跳过补充采集阶段。")
 
                 except PlaywrightTimeoutError:
-                    log_line(log_callback, "  跳过：页面加载超时，请确认链接可打开且账号已登录。")
+                    log_warn(log_callback, "  跳过：页面加载超时，请确认链接可打开且账号已登录。")
                 except Exception as exc:
-                    log_line(log_callback, f"  跳过：{exc}")
+                    log_warn(log_callback, f"  跳过：{exc}")
 
             for opened_page in (page, detail_page):
                 if opened_page is not None and not opened_page.is_closed():

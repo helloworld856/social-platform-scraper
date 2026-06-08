@@ -19,6 +19,9 @@ from src.core import (
     ensure_chrome_for_cdp,
     expand_compact_number,
     interruptible_sleep,
+    log_error,
+    log_line,
+    make_keyword_log,
     random_cooldown,
     sanitize_csv_row,
     sanitize_csv_rows,
@@ -331,9 +334,7 @@ def build_search_query(base_keyword: str, adv_params: dict, since: str, until: s
 
 def _make_keyword_log_callback(base_log_callback, keyword: str):
     """Wrap log_callback to prefix messages with [keyword] for disambiguation."""
-    def log(msg: str) -> None:
-        base_log_callback(f"[{keyword}] {msg}")
-    return log
+    return make_keyword_log(base_log_callback, keyword)
 
 
 def _try_reload_if_empty(page, page_timeout, refresh_count, refresh_interval, log, stop_event, label="页面"):
@@ -412,7 +413,7 @@ def _x_comment_consumer(keyword, queue_obj, cdp_port_or_url, writer, writer_lock
                 except Exception as exc:
                     log(f"    提取评论失败：{exc}")
     except Exception as exc:
-        log(f"评论线程异常: {exc}")
+        log_error(log, f"评论线程异常: {exc}")
     finally:
         if comments_page is not None:
             try:
@@ -576,7 +577,7 @@ def _scrape_single_x_keyword(base_keyword, adv_params, port,
                 no_change_strikes = 0
                 buffer_rows: list[dict] = []
 
-                for _ in range(max_search_scrolls):
+                for scroll_index in range(max_search_scrolls):
                     if should_stop(stop_event):
                         break
                     if wait_if_paused(pause_event, stop_event):
@@ -634,6 +635,7 @@ def _scrape_single_x_keyword(base_keyword, adv_params, port,
                             buffer_rows.append(row)
                             total_count += 1
                             slice_count += 1
+                            log(f"    [{total_count}] {tweet_url}")
 
                             if get_comments_bool:
                                 comment_str = row.get("评论数", "0")
@@ -676,9 +678,11 @@ def _scrape_single_x_keyword(base_keyword, adv_params, port,
                     if slice_count == previous_count:
                         no_change_strikes += 1
                         if no_change_strikes >= no_change_threshold:
+                            log(f"  连续 {no_change_threshold} 次滚动无新增，停止当前切片。")
                             break
                     else:
                         no_change_strikes = 0
+                        log(f"  第 {scroll_index + 1} 次滚动：累计 {total_count} 条。")
                     previous_count = slice_count
 
                     if not stop_outer:
@@ -706,7 +710,7 @@ def _scrape_single_x_keyword(base_keyword, adv_params, port,
             return output_path
 
     except Exception as exc:
-        log(f"发生致命错误：{exc}")
+        log_error(log, f"发生致命错误：{exc}")
         if writer is not None:
             try:
                 if writer_lock:
@@ -758,17 +762,18 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
 
         get_comments_bool = adv_params.get("get_comments") == "是"
         if not get_comments_bool:
-            log_callback("过滤规则：跳过转推、跳过引用/嵌套推文。\n")
+            log_line(log_callback, "过滤规则：跳过转推、跳过引用/嵌套推文。\n")
 
         # --- sequential path ---
         output_path = None
         if max_parallel_tabs <= 1 or len(keywords_list) <= 1:
-            for base_keyword in keywords_list:
+            for keyword_index, base_keyword in enumerate(keywords_list, 1):
                 if should_stop(stop_event):
-                    log_callback("任务已停止。")
+                    log_line(log_callback, "任务已停止。")
                     break
                 if wait_if_paused(pause_event, stop_event):
                     break
+                log_line(log_callback, f"[{keyword_index}/{len(keywords_list)}] 开始关键词：{base_keyword}")
                 path = _scrape_single_x_keyword(
                     base_keyword, adv_params, port,
                     log_callback, stop_event, pause_event,
@@ -781,7 +786,7 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
                 )
                 if path:
                     output_path = path
-            log_callback("\nX 关键词媒体推文搜索任务结束。")
+            log_line(log_callback, "\nX 关键词媒体推文搜索任务结束。")
             finish_callback(output_path)
             return
 
@@ -789,11 +794,12 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
         output_paths: list[str] = []
         with ThreadPoolExecutor(max_workers=max_parallel_tabs) as executor:
             future_to_keyword = {}
-            for base_keyword in keywords_list:
+            for keyword_index, base_keyword in enumerate(keywords_list, 1):
                 if should_stop(stop_event):
                     break
                 if wait_if_paused(pause_event, stop_event):
                     break
+                log_line(log_callback, f"[{keyword_index}/{len(keywords_list)}] 开始关键词：{base_keyword}")
                 future = executor.submit(
                     _scrape_single_x_keyword,
                     base_keyword, adv_params, port,
@@ -814,13 +820,13 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
                     if path:
                         output_paths.append(path)
                 except Exception as exc:
-                    log_callback(f"[{keyword}] 线程异常: {exc}")
+                    log_error(log_callback, f"[{keyword}] 线程异常: {exc}")
 
-        log_callback(f"\nX 关键词媒体推文搜索任务结束。{len(output_paths)}/{len(keywords_list)} 个成功。")
+        log_line(log_callback, f"\nX 关键词媒体推文搜索任务结束。{len(output_paths)}/{len(keywords_list)} 个成功。")
         for p in output_paths:
-            log_callback(f"  {p}")
+            log_line(log_callback, f"  {p}")
         finish_callback(output_paths[-1] if output_paths else None)
 
     except Exception as e:
-        log_callback(f"发生致命错误：{e}")
+        log_error(log_callback, f"发生致命错误：{e}")
         finish_callback()

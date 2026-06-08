@@ -10,6 +10,9 @@ from src.core import (
     connect_existing_chromium,
     expand_compact_number,
     interruptible_sleep,
+    log_error,
+    log_line,
+    log_warn,
     random_cooldown,
     sanitize_xlsx_cell,
     should_stop,
@@ -146,7 +149,7 @@ def load_tweet_page(page, tweet_url: str, target_status_id: str, log_callback, p
             title = page.title()
         except Exception:
             pass
-        log_callback(
+        log_warn(log_callback, 
             f"  推文正文未在 {tweet_ready_timeout // 1000} 秒内渲染，快速跳过。当前 URL: {current_url or '未知'}，标题: {title or '未知'}，错误: {e}"
         )
     return False
@@ -298,21 +301,21 @@ def extract_followers_count(page, profile_url: str, page_timeout=None, stop_even
 def extract_tweet_author_record(tweet_page, profile_page, tweet_url: str, log_callback, page_timeout=None, tweet_ready_timeout=None, stop_event=None) -> dict | None:
     target_status_id = extract_status_id(tweet_url)
     if not target_status_id:
-        log_callback(f"跳过：无法解析推文 ID：{tweet_url}")
+        log_warn(log_callback, f"跳过：无法解析推文 ID：{tweet_url}")
         return None
 
     if not load_tweet_page(tweet_page, tweet_url, target_status_id, log_callback, page_timeout=page_timeout, tweet_ready_timeout=tweet_ready_timeout):
-        log_callback(f"跳过：推文页面一直卡在 X 启动页或未渲染正文：{tweet_url}")
+        log_warn(log_callback, f"跳过：推文页面一直卡在 X 启动页或未渲染正文：{tweet_url}")
         return None
 
     article = find_target_article(tweet_page, target_status_id)
     if article is None:
-        log_callback(f"跳过：未找到推文正文：{tweet_url}")
+        log_warn(log_callback, f"跳过：未找到推文正文：{tweet_url}")
         return None
 
     author = extract_author_from_article(article)
     if not author["account_id"] or not author["profile_url"]:
-        log_callback(f"跳过：无法提取作者信息：{tweet_url}")
+        log_warn(log_callback, f"跳过：无法提取作者信息：{tweet_url}")
         return None
 
     view_text, view_value = extract_view_count(article)
@@ -337,13 +340,13 @@ def extract_profile_record(profile_page, profile_url: str, log_callback, page_ti
     try:
         profile_page.goto(profile_url, wait_until="domcontentloaded", timeout=page_timeout if page_timeout is not None else PAGE_LOAD_TIMEOUT)
     except Exception as e:
-        log_callback(f"跳过：无法加载主页：{profile_url}，错误：{e}")
+        log_warn(log_callback, f"跳过：无法加载主页：{profile_url}，错误：{e}")
         return None
 
     # Extract account ID from URL
     account_match = re.search(r"x\.com/([^/?#]+)/?$", profile_url)
     if not account_match:
-        log_callback(f"跳过：无法解析账号 ID：{profile_url}")
+        log_warn(log_callback, f"跳过：无法解析账号 ID：{profile_url}")
         return None
     account_id = account_match.group(1)
 
@@ -414,21 +417,21 @@ def run_scraper(txt_path: str, input_mode: str, cdp_port_or_url: str, log_callba
             links = parse_profile_links(txt_path)
             output_fields = OUTPUT_FIELDS_PROFILE_MODE
             if not links:
-                log_callback("TXT 中没有有效的博主链接。")
+                log_warn(log_callback, "TXT 中没有有效的博主链接。")
                 return
         else:
             links = parse_tweet_links(txt_path)
             output_fields = OUTPUT_FIELDS
             if not links:
-                log_callback("TXT 中没有有效的推文链接。")
+                log_warn(log_callback, "TXT 中没有有效的推文链接。")
                 return
 
         with sync_playwright() as p:
-            log_callback("正在连接本地 Chrome...")
+            log_line(log_callback, "正在连接本地 Chrome...")
             try:
                 _, context = connect_existing_chromium(p, cdp_port_or_url)
             except Exception as e:
-                log_callback(f"连接失败：请确认 Chrome 已自动打开并已登录 X/Twitter。错误：{e}")
+                log_error(log_callback, f"连接失败：请确认 Chrome 已自动打开并已登录 X/Twitter。错误：{e}")
                 return
 
             tweet_page = context.new_page() if not is_profile_mode else None
@@ -441,16 +444,16 @@ def run_scraper(txt_path: str, input_mode: str, cdp_port_or_url: str, log_callba
 
             for index, link in enumerate(links, 1):
                 if should_stop(stop_event):
-                    log_callback("任务已停止。")
+                    log_line(log_callback, "任务已停止。")
                     break
                 if wait_if_paused(pause_event, stop_event):
                     break
                 
                 if is_profile_mode:
-                    log_callback(f"[{index}/{len(links)}] 处理博主链接：{link}")
+                    log_line(log_callback, f"[{index}/{len(links)}] 处理博主链接：{link}")
                     record = extract_profile_record(profile_page, link, log_callback, page_timeout=page_load_timeout, stop_event=stop_event)
                 else:
-                    log_callback(f"[{index}/{len(links)}] 处理推文：{link}")
+                    log_line(log_callback, f"[{index}/{len(links)}] 处理推文：{link}")
                     record = extract_tweet_author_record(tweet_page, profile_page, link, log_callback, page_timeout=page_load_timeout, tweet_ready_timeout=tweet_ready_timeout, stop_event=stop_event)
                 
                 if not record:
@@ -464,20 +467,20 @@ def run_scraper(txt_path: str, input_mode: str, cdp_port_or_url: str, log_callba
                     row_by_author[account_key] = writer.worksheet.max_row
                     written_count += 1
                     if is_profile_mode:
-                        log_callback(f"  写入作者 {account_key or '未知'}。")
+                        log_line(log_callback, f"  写入作者 {account_key or '未知'}。")
                     else:
-                        log_callback(f"  写入作者 {account_key or '未知'}，当前推文浏览量 {record.get('_view_text') or '未知'}。")
+                        log_line(log_callback, f"  写入作者 {account_key or '未知'}，当前推文浏览量 {record.get('_view_text') or '未知'}。")
                 elif not is_profile_mode and record["_view_value"] > old_record.get("_view_value", 0):
                     best_by_author[account_key] = record
                     update_writer_row(writer, row_by_author[account_key], record, output_fields)
-                    log_callback(
+                    log_line(log_callback, 
                         f"  更新作者 {record['账号ID']}：更高浏览量 {record.get('_view_text') or '未知'}。"
                     )
                 else:
                     if is_profile_mode:
-                        log_callback(f"  跳过：作者 {record['账号ID']} 已处理过。")
+                        log_line(log_callback, f"  跳过：作者 {record['账号ID']} 已处理过。")
                     else:
-                        log_callback(f"  跳过：作者 {record['账号ID']} 已有更高浏览量推文。")
+                        log_line(log_callback, f"  跳过：作者 {record['账号ID']} 已有更高浏览量推文。")
                 
                 # 按配置的冷却间隔应用随机休眠
                 if index % cooldown_every_val == 0:
@@ -489,9 +492,9 @@ def run_scraper(txt_path: str, input_mode: str, cdp_port_or_url: str, log_callba
                     opened_page.close()
 
         if not output_path:
-            log_callback("没有提取到可输出的数据。")
+            log_warn(log_callback, "没有提取到可输出的数据。")
             return
         writer.save()
-        log_callback(f"完成，已保存：{output_path}")
+        log_line(log_callback, f"完成，已保存：{output_path}")
     finally:
         finish_callback(output_path)

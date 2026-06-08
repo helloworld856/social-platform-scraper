@@ -20,6 +20,9 @@ from src.core import (
     build_output_path,
     connect_existing_chromium,
     interruptible_sleep,
+    log_error,
+    log_line,
+    log_warn,
     sanitize_csv_row,
     should_stop,
     wait_if_paused,
@@ -239,14 +242,6 @@ def extract_metric(page, data_e2e_candidates, removable_words=(), default=""):
         except Exception:
             continue
     return default
-
-
-def log_line(log_callback, message: str) -> None:
-    """
-    执行日志回调输出。
-    """
-    if log_callback:
-        log_callback(message)
 
 
 def clean_url(url: str) -> str:
@@ -565,16 +560,16 @@ def process_video_batch(
                             wait_after_detail(log_callback, stop_event, pause_event=pause_event, detail_delay_min=detail_delay_min, detail_delay_max=detail_delay_max)
                             break
                         else:
-                            log_line(log_callback, f"      跳过：发布时间超出范围（{published_at}），当前在保底前 {MIN_GUARANTEED_VIDEOS} 条内，不终止。")
+                            log_warn(log_callback, f"      跳过：发布时间超出范围（{published_at}），当前在保底前 {MIN_GUARANTEED_VIDEOS} 条内，不终止。")
                             processed_count += 1
                             if wait_after_detail(log_callback, stop_event, pause_event=pause_event, detail_delay_min=detail_delay_min, detail_delay_max=detail_delay_max):
                                 break
                             continue
 
                     if not published_at:
-                        log_line(log_callback, "      警告：视频信息加载不完全，无法获取发布时间，为防止误杀予以放行。")
+                        log_warn(log_callback, "      警告：视频信息加载不完全，无法获取发布时间，为防止误杀予以放行。")
                     elif not in_date_range(published_at, start_dt, end_dt):
-                        log_line(log_callback, f"      跳过：发布时间不在范围内（{published_at}）。")
+                        log_warn(log_callback, f"      跳过：发布时间不在范围内（{published_at}）。")
                         processed_count += 1
                         if wait_after_detail(log_callback, stop_event, pause_event=pause_event, detail_delay_min=detail_delay_min, detail_delay_max=detail_delay_max):
                             break
@@ -634,7 +629,7 @@ def process_video_batch(
                     break
                 batch_written = 0
         except Exception as exc:
-            log_line(log_callback, f"      跳过：{exc}")
+            log_warn(log_callback, f"      跳过：{exc}")
 
         if wait_after_detail(log_callback, stop_event, pause_event=pause_event, detail_delay_min=detail_delay_min, detail_delay_max=detail_delay_max):
             break
@@ -690,7 +685,7 @@ def run_tiktok_profile_videos_spider(
 
         profile_urls = parse_profile_urls(txt_path)
         if not profile_urls:
-            log_line(log_callback, "TXT 中没有找到有效的 TikTok 博主主页链接。")
+            log_warn(log_callback, "TXT 中没有找到有效的 TikTok 博主主页链接。")
             return
 
         limit_time_bool = (limit_time_str == "是")
@@ -728,7 +723,7 @@ def run_tiktok_profile_videos_spider(
             try:
                 _, context = connect_existing_chromium(playwright, cdp_port_or_url, log_callback=log_callback)
             except Exception as exc:
-                log_line(log_callback, f"连接失败：请确认 Chrome 已打开并已登录 TikTok。错误：{exc}")
+                log_error(log_callback, f"连接失败：请确认 Chrome 已打开并已登录 TikTok。错误：{exc}")
                 return
 
             profile_page = context.new_page()
@@ -741,7 +736,7 @@ def run_tiktok_profile_videos_spider(
                     break
                 profile_url = normalize_profile_url(raw_profile_url)
                 if not profile_url:
-                    log_line(log_callback, f"[{profile_index}/{len(profile_urls)}] 跳过无效主页：{raw_profile_url}")
+                    log_warn(log_callback, f"[{profile_index}/{len(profile_urls)}] 跳过无效主页：{raw_profile_url}")
                     continue
 
                 log_line(log_callback, f"[{profile_index}/{len(profile_urls)}] 读取主页：{profile_url}")
@@ -768,7 +763,7 @@ def run_tiktok_profile_videos_spider(
                     profile_page.goto(profile_url, wait_until="domcontentloaded", timeout=page_load_timeout)
                     interruptible_sleep(2.5, stop_event)
                 except PlaywrightTimeoutError:
-                    log_line(log_callback, "  主页加载超时，跳过。")
+                    log_warn(log_callback, "  主页加载超时，跳过。")
                     continue
 
                 seen_links: set[str] = set()
@@ -849,7 +844,7 @@ def run_tiktok_profile_videos_spider(
                                 fetch_play_counts_bool=fetch_play_counts_bool,
                             )
                             pending_links = []
-                        log_line(log_callback, "  连续多次没有新视频链接，结束当前主页。")
+                        log_warn(log_callback, "  连续多次没有新视频链接，结束当前主页。")
                         break
 
                     trigger_profile_lazy_load(profile_page, scroll_px=scroll_px_val)

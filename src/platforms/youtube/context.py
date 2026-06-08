@@ -15,7 +15,7 @@ from urllib.parse import urlparse
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from src.core import XlsxRowWriter, build_output_path, sanitize_csv_rows, should_stop, wait_if_paused
+from src.core import XlsxRowWriter, build_output_path, log_error, log_line, log_warn, sanitize_csv_rows, should_stop, wait_if_paused
 
 # 默认获取视频前后各 5 条作为上下文
 CONTEXT_SIZE = 5
@@ -273,7 +273,7 @@ def build_pair_rows(youtube, target_video_url: str, profile_url: str, channel_ca
     rows: list[dict] = []
     target_video_id = parse_video_id(target_video_url)
     if not target_video_id:
-        log_callback("  跳过：无法解析视频 ID。")
+        log_line(log_callback, "  跳过：无法解析视频 ID。")
         return rows
 
     # 通过内存字典缓存已解析的博主频道数据，减少重复 API 配额消耗
@@ -284,20 +284,20 @@ def build_pair_rows(youtube, target_video_url: str, profile_url: str, channel_ca
 
     uploads_id = channel.get("contentDetails", {}).get("relatedPlaylists", {}).get("uploads", "")
     if not uploads_id:
-        log_callback("  博主主页解析失败，改用目标视频反查频道上传列表。")
+        log_line(log_callback, "  博主主页解析失败，改用目标视频反查频道上传列表。")
         channel = resolve_channel_from_video(youtube, target_video_id)
         if channel:
             channel_cache[profile_url] = channel
         uploads_id = channel.get("contentDetails", {}).get("relatedPlaylists", {}).get("uploads", "")
         if not uploads_id:
-            log_callback("  跳过：无法解析上传列表。请检查博主主页链接是否为 YouTube 频道主页。")
+            log_line(log_callback, "  跳过：无法解析上传列表。请检查博主主页链接是否为 YouTube 频道主页。")
             return rows
 
     selected_ids, target_index, timeline_ids = find_context_video_ids(youtube, uploads_id, target_video_id, stop_event, pause_event, max_upload_pages, context_size)
     if should_stop(stop_event):
         return rows
     if target_index < 0:
-        log_callback("  跳过：目标视频不在该博主公开上传列表中。")
+        log_line(log_callback, "  跳过：目标视频不在该博主公开上传列表中。")
         return rows
 
     # 批量解析抓取的上下文视频 ID 指标
@@ -354,10 +354,10 @@ def run_youtube_paired_context_spider(api_key: str, txt_path: str, log_callback,
     try:
         pairs = parse_input_pairs(txt_path)
         if not pairs:
-            log_callback("TXT 中没有有效的'视频链接 + 博主主页链接'行。")
+            log_warn(log_callback, "TXT 中没有有效的'视频链接 + 博主主页链接'行。")
             return
         if should_stop(stop_event):
-            log_callback("任务已停止。")
+            log_line(log_callback, "任务已停止。")
             return
         output_path = build_output_path("youtube", f"youtube_context_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
         writer = XlsxRowWriter(output_path, OUTPUT_FIELDS)
@@ -366,27 +366,27 @@ def run_youtube_paired_context_spider(api_key: str, txt_path: str, log_callback,
         written_count = 0
         for index, (target_video_url, profile_url) in enumerate(pairs, 1):
             if should_stop(stop_event):
-                log_callback("任务已停止。")
+                log_line(log_callback, "任务已停止。")
                 break
             if wait_if_paused(pause_event, stop_event):
                 break
-            log_callback(f"[{index}/{len(pairs)}] 定位 YouTube 目标视频: {target_video_url}")
+            log_line(log_callback, f"[{index}/{len(pairs)}] 定位 YouTube 目标视频: {target_video_url}")
             try:
                 rows = build_pair_rows(youtube, target_video_url, profile_url, channel_cache, log_callback, stop_event, pause_event, context_size, max_upload_pages)
                 if rows:
                     writer.writerows(sanitize_csv_rows(rows))
                     written_count += len(rows)
-                log_callback(f"  完成：写入 {len(rows)} 条前后视频，累计 {written_count} 条。")
+                log_line(log_callback, f"  完成：写入 {len(rows)} 条前后视频，累计 {written_count} 条。")
             except HttpError as e:
-                log_callback(f"  YouTube API 错误：{e}")
+                log_error(log_callback, f"  YouTube API 错误：{e}")
             except Exception as e:
-                log_callback(f"  处理失败：{e}")
+                log_error(log_callback, f"  处理失败：{e}")
         writer.save()
         if written_count <= 0:
-            log_callback("没有提取到数据。")
-        log_callback(f"完成，已保存：{output_path}")
+            log_warn(log_callback, "没有提取到数据。")
+        log_line(log_callback, f"完成，已保存：{output_path}")
     except Exception as exc:
-        log_callback(f"运行失败：{exc}")
+        log_error(log_callback, f"运行失败：{exc}")
         output_path = None
     finally:
         finish_callback(output_path)

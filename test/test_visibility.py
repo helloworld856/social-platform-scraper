@@ -10,7 +10,7 @@ from src.platforms.x_twitter.windows import XKeywordWindow, XTweetMetricsWindow,
 from src.platforms.youtube.windows import YouTubeKeywordWindow, YouTubeChannelWorksWindow
 
 def test_visibility():
-    app = QApplication(sys.argv)
+    app = QApplication.instance() or QApplication(sys.argv)
     
     windows = [
         ("TikTokKeywordWindow", TikTokKeywordWindow()),

@@ -6,6 +6,9 @@ import re
 from src.core import (
     expand_compact_number,
     interruptible_sleep,
+    log_error,
+    log_line,
+    log_warn,
     sanitize_csv_cell,
     should_stop,
     wait_if_paused,
@@ -16,9 +19,6 @@ SCROLL_PAUSE = 4.0
 NO_NEW_SCROLL_LIMIT = 5
 PROMOTED_MARKERS = ("promoted", "ad", "广告", "推广", "スポンサー", "pr", "赞助")
 
-def log_line(log_callback, text: str):
-    if log_callback:
-        log_callback(text)
 
 def format_comment_time(raw_time: str) -> str:
     value = (raw_time or "").strip()
@@ -344,7 +344,7 @@ def extract_comments(page, tweet_url: str, max_count: int = DEFAULT_SCAN_LIMIT, 
                 )
                 log_line(log_callback, f"    [{len(comments)}/{max_count}] {author_handle}: {content[:40]}")
             except Exception as exc:
-                log_line(log_callback, f"    解析评论时出错：{exc}")
+                log_warn(log_callback, f"    解析评论时出错：{exc}")
 
         if new_found == 0:
             if show_replies_tried < 3:
@@ -359,7 +359,7 @@ def extract_comments(page, tweet_url: str, max_count: int = DEFAULT_SCAN_LIMIT, 
                     continue
             no_new_count += 1
             if no_new_count >= no_new_scroll_limit:
-                log_line(log_callback, f"  连续 {no_new_scroll_limit} 次滚动没有发现新评论，停止。")
+                log_warn(log_callback, f"  连续 {no_new_scroll_limit} 次滚动没有发现新评论，停止。")
                 break
         else:
             no_new_count = 0
@@ -409,7 +409,7 @@ def run_x_top_comments_spider(
 
         tweet_urls = parse_tweet_urls(txt_path)
         if not tweet_urls:
-            log_line(log_callback, "TXT 中没有有效的推文链接。")
+            log_warn(log_callback, "TXT 中没有有效的推文链接。")
             return
 
         scan_limit = max(int(max_scan_comments), comment_top_limit)
@@ -424,8 +424,8 @@ def run_x_top_comments_spider(
             try:
                 _, context = connect_existing_chromium(playwright, cdp_port_or_url)
             except Exception as exc:
-                log_line(log_callback, f"无法连接 Chrome 浏览器：{exc}")
-                log_line(log_callback, "连接失败：请确认 Chrome 已自动打开并已成功登录 X/Twitter 账号。")
+                log_error(log_callback, f"无法连接 Chrome 浏览器：{exc}")
+                log_error(log_callback, "连接失败：请确认 Chrome 已自动打开并已成功登录 X/Twitter 账号。")
                 return
 
             page = context.new_page()
@@ -477,9 +477,9 @@ def run_x_top_comments_spider(
                     writer.save()
                     log_line(log_callback, f"  完成：成功扫描评论 {len(comments)} 条，已写入数据并保存。")
                 except PlaywrightTimeoutError:
-                    log_line(log_callback, "  错误：页面加载超时。")
+                    log_error(log_callback, "  错误：页面加载超时。")
                 except Exception as exc:
-                    log_line(log_callback, f"  错误：处理失败，{exc}")
+                    log_error(log_callback, f"  错误：处理失败，{exc}")
 
                 if index < len(tweet_urls) and index % 3 == 0:
                     if random_cooldown(log_callback, stop_event, 3.0, 8.0):

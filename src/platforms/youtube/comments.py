@@ -16,7 +16,7 @@ import concurrent.futures
 
 from googleapiclient.discovery import build
 
-from src.core import MultiSheetXlsxWriter, XlsxRowWriter, build_output_path, sanitize_csv_row, sanitize_csv_rows, should_stop, wait_if_paused
+from src.core import MultiSheetXlsxWriter, XlsxRowWriter, build_output_path, log_error, log_line, log_warn, sanitize_csv_row, sanitize_csv_rows, should_stop, wait_if_paused
 
 # Excel 表头定义
 VIDEO_FIELDS = ["编号", "视频链接", "博主主页链接", "标题", "频道名称", "发布日期", "视频类型", "视频时长", "视频简介", "播放量", "点赞数", "评论数"]
@@ -323,8 +323,7 @@ def fetch_top_level_comments(youtube, video_id: str, max_scan_comments: int, log
 
     while len(comments) < max_scan_comments:
         if should_stop(stop_event):
-            if log_callback:
-                log_callback("  任务已停止。")
+            log_line(log_callback, "  任务已停止。")
             break
         if wait_if_paused(pause_event, stop_event):
             break
@@ -358,15 +357,16 @@ def fetch_top_level_comments(youtube, video_id: str, max_scan_comments: int, log
                 }
             )
             if len(comments) >= max_scan_comments:
+                log_line(log_callback, f"  已达扫描上限 {max_scan_comments} 条，停止翻页。")
                 break
 
         if len(comments) % 200 == 0 or len(comments) < 100:
-            if log_callback:
-                log_callback(f"  已扫描主楼评论 {len(comments)} 条。")
+            log_line(log_callback, f"  已扫描主楼评论 {len(comments)} 条。")
 
         # 检查是否还有下一页
         next_page_token = response.get("nextPageToken")
         if not next_page_token:
+            log_line(log_callback, f"  评论已翻到底，共 {len(comments)} 条。")
             break
 
     return comments
@@ -433,11 +433,11 @@ def run_youtube_video_metrics_spider(api_key: str, txt_path: str, get_comments: 
     try:
         entries = parse_video_entries(txt_path)
         if not entries:
-            log_callback("TXT 中没有找到有效的 YouTube 视频链接。")
+            log_warn(log_callback, "TXT 中没有找到有效的 YouTube 视频链接。")
             return
         valid_line_count = int(entries[0].get("有效行数", len(entries)))
         duplicate_count = int(entries[0].get("重复行数", 0))
-        log_callback(f"读取到 {valid_line_count} 行有效视频链接，去重后唯一视频 {len(entries)} 个，重复链接 {duplicate_count} 行。")
+        log_line(log_callback, f"读取到 {valid_line_count} 行有效视频链接，去重后唯一视频 {len(entries)} 个，重复链接 {duplicate_count} 行。")
 
         # 初始化 Google API 代理服务
         youtube = build("youtube", "v3", developerKey=api_key)
@@ -452,25 +452,25 @@ def run_youtube_video_metrics_spider(api_key: str, txt_path: str, get_comments: 
         video_ids = [str(e["视频ID"]) for e in entries]
         
         try:
-            log_callback(f"正在批量获取 {len(video_ids)} 个视频的热度数据...")
+            log_line(log_callback, f"正在批量获取 {len(video_ids)} 个视频的热度数据...")
             metrics_map = fetch_video_metrics(youtube, video_ids)
         except Exception as exc:
             import googleapiclient.errors
             if isinstance(exc, googleapiclient.errors.HttpError) and exc.resp.status in [403]:
-                log_callback("API 配额已耗尽，或无权访问，请更换 API Key。")
+                log_error(log_callback, "API 配额已耗尽，或无权访问，请更换 API Key。")
                 return
             else:
-                log_callback(f"获取视频热度失败: {exc}")
+                log_error(log_callback, f"获取视频热度失败: {exc}")
                 return
                 
         type_map = {}
         if check_type_bool:
-            log_callback(f"正在精确检测 {len(video_ids)} 个视频的长短类型 (网络请求可能较慢)...")
+            log_line(log_callback, f"正在精确检测 {len(video_ids)} 个视频的长短类型 (网络请求可能较慢)...")
             type_map = check_video_type_bulk(video_ids)
 
         for progress_index, entry in enumerate(entries, 1):
             if should_stop(stop_event):
-                log_callback("任务已停止。")
+                log_line(log_callback, "任务已停止。")
                 break
             if wait_if_paused(pause_event, stop_event):
                 break
@@ -478,7 +478,7 @@ def run_youtube_video_metrics_spider(api_key: str, txt_path: str, get_comments: 
             video_url = str(entry["视频链接"])
             video_id = str(entry["视频ID"])
 
-            log_callback(f"[{progress_index}/{len(entries)}] 处理编号 {video_index}：{video_url}")
+            log_line(log_callback, f"[{progress_index}/{len(entries)}] 处理编号 {video_index}：{video_url}")
             
             v_info = metrics_map.get(video_id)
             detected_type = ""
@@ -528,24 +528,24 @@ def run_youtube_video_metrics_spider(api_key: str, txt_path: str, get_comments: 
                     for r in sanitize_csv_rows(rows):
                         writer.writerow("评论信息", r)
                     written_comments = len([row for row in rows if row["评论内容"]])
-                    log_callback(f"  完成：播放 {v_info.get('播放量')}，点赞 {v_info.get('点赞数')}，评论 {v_info.get('评论数')}。写入热评 {written_comments} 条。")
+                    log_line(log_callback, f"  完成：播放 {v_info.get('播放量')}，点赞 {v_info.get('点赞数')}，评论 {v_info.get('评论数')}。写入热评 {written_comments} 条。")
                 except Exception as exc:
                     if isinstance(exc, googleapiclient.errors.HttpError) and exc.resp.status in [403]:
-                        log_callback(f"  停止任务：API 配额耗尽 ({exc})，请更换 API Key。")
+                        log_error(log_callback, f"  停止任务：API 配额耗尽 ({exc})，请更换 API Key。")
                         break
                     else:
                         writer.writerow("评论信息", sanitize_csv_row(empty_video_row(video_index, final_video_url)))
-                        log_callback(f"  抓取评论失败：{exc}，已写入空评论占位行。")
+                        log_warn(log_callback, f"  抓取评论失败：{exc}，已写入空评论占位行。")
             else:
                 writer.writerow(sanitize_csv_row(row_video))
-                log_callback(f"  完成：播放 {v_info.get('播放量')}，点赞 {v_info.get('点赞数')}，评论 {v_info.get('评论数')}。")
+                log_line(log_callback, f"  完成：播放 {v_info.get('播放量')}，点赞 {v_info.get('点赞数')}，评论 {v_info.get('评论数')}。")
 
         writer.save()
 
-        log_callback(f"完成，已保存：{output_path}")
+        log_line(log_callback, f"完成，已保存：{output_path}")
         completed_path = output_path
     except Exception as exc:
-        log_callback(f"运行失败：{exc}")
+        log_error(log_callback, f"运行失败：{exc}")
         output_path = None
         completed_path = None
     finally:

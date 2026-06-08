@@ -4,6 +4,7 @@ from pathlib import Path
 
 from src.core.output import build_output_path
 from src.core.timing import should_stop
+from src.core import log_error, log_line, log_warn
 
 
 def run_anomaly_detection(values, config, log_callback, finish_callback, stop_event, pause_event=None):
@@ -12,7 +13,7 @@ def run_anomaly_detection(values, config, log_callback, finish_callback, stop_ev
     """
     input_file = values.get("input_xlsx")
     if not input_file or not Path(input_file).is_file():
-        log_callback("错误：输入文件不存在或无效")
+        log_warn(log_callback, "输入文件不存在或无效")
         finish_callback(None)
         return
 
@@ -23,14 +24,14 @@ def run_anomaly_detection(values, config, log_callback, finish_callback, stop_ev
     abnormal_ratio_min_trigger = int(config.get("abnormal_ratio_min_trigger", 5))
     strict_zero_check = config.get("strict_zero_check", True)
 
-    log_callback(f"加载数据：{input_file}")
+    log_line(log_callback, f"加载数据：{input_file}")
     if should_stop(stop_event):
         return
         
     try:
         df = pd.read_excel(input_file)
     except Exception as e:
-        log_callback(f"读取 Excel 失败: {e}")
+        log_error(log_callback, f"读取 Excel 失败: {e}")
         finish_callback(None)
         return
 
@@ -45,7 +46,7 @@ def run_anomaly_detection(values, config, log_callback, finish_callback, stop_ev
             df[f'is_na_{m}'] = True
             df[m] = 0
 
-    log_callback("开始执行异常检测判定...")
+    log_line(log_callback, "开始执行异常检测判定...")
 
     def evaluate_row(row):
         reasons = []
@@ -112,7 +113,7 @@ def run_anomaly_detection(values, config, log_callback, finish_callback, stop_ev
     df = df.drop(columns=[f'is_na_{m}' for m in metrics], errors='ignore')
     
     anomaly_count = len(df[df['data_status'] == '异常'])
-    log_callback(f"判定完成，共发现 {anomaly_count} 条异常记录。")
+    log_line(log_callback, f"判定完成，共发现 {anomaly_count} 条异常记录。")
 
     if should_stop(stop_event):
         return
@@ -122,12 +123,12 @@ def run_anomaly_detection(values, config, log_callback, finish_callback, stop_ev
     out_filename = f"{input_stem}_检测结果.xlsx"
     out_path = build_output_path("processing", out_filename)
     
-    log_callback(f"正在保存至：{out_path}")
+    log_line(log_callback, f"正在保存至：{out_path}")
     try:
         # 创建父目录
         Path(out_path).parent.mkdir(parents=True, exist_ok=True)
         df.to_excel(out_path, index=False)
         finish_callback(out_path)
     except Exception as e:
-        log_callback(f"保存 Excel 失败: {e}")
+        log_error(log_callback, f"保存 Excel 失败: {e}")
         finish_callback(None)

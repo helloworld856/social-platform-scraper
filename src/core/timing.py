@@ -7,6 +7,8 @@ from __future__ import annotations
 import random
 import time
 
+from src.core.app_logging import log_line
+
 
 def should_stop(stop_event=None) -> bool:
     """
@@ -42,8 +44,21 @@ def random_cooldown(log_callback=None, stop_event=None, min_seconds: float = 3.0
     生成随机冷却等待时间，模仿人类阅读或浏览轨迹，降低因高频请求被平台封禁 IP 的几率。
     """
     seconds = random.uniform(min_seconds, max_seconds)
-    if log_callback:
-        log_callback(f"  随机等待 {seconds:.1f} 秒，{reason}。")
+    log_line(log_callback, f"  随机等待 {seconds:.1f} 秒，{reason}。")
+    return interruptible_sleep(seconds, stop_event)
+
+
+def interruptible_random_sleep(min_seconds: float, max_seconds: float, log_callback=None, stop_event=None, reason: str = "降低访问频率"):
+    """
+    带随机区间的可中断休眠，支持自定义日志原因。
+    自动钳位保证 min/max 合法，返回 True 表示被中断。
+    """
+    min_seconds = max(0.0, float(min_seconds or 0))
+    max_seconds = max(min_seconds, float(max_seconds or min_seconds))
+    seconds = random.uniform(min_seconds, max_seconds)
+    if seconds <= 0:
+        return False
+    log_line(log_callback, f"    {reason}，随机等待 {seconds:.1f} 秒。")
     return interruptible_sleep(seconds, stop_event)
 
 

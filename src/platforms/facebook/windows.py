@@ -67,6 +67,7 @@ class FacebookProfileWorksWindow(SimpleToolWindow):
             values.get("end_date", DEFAULT_END_DATE),
             values["force_exact_time"],
             log_callback,
+            finish_callback,
             stop_event,
             pause_event,
             **config
@@ -126,6 +127,7 @@ class FacebookKeywordSearchWindow(SimpleToolWindow):
             values.get("end_date", DEFAULT_END_DATE),
             values["sort_recent"],
             log_callback,
+            finish_callback,
             stop_event,
             pause_event,
             **config
