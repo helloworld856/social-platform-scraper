@@ -36,3 +36,4 @@ build/
 .claude
 
 config/
+!config/version.json
