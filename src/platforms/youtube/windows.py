@@ -60,7 +60,6 @@ class YouTubeKeywordWindow(SimpleToolWindow):
             ConfigParam("youtube_browser_max_scrolls", "浏览器最大滚动次数", kind="int", default=100, minimum=10, maximum=500),
             ConfigParam("youtube_browser_page_timeout", "浏览器页面加载超时(毫秒)", kind="int", default=45000, minimum=10000, maximum=120000, step=1000),
             ConfigParam("youtube_browser_no_new_limit", "浏览器无新内容停止阈值", kind="int", default=8, minimum=2, maximum=50),
-            ConfigParam("comment_top_limit", "最多输出评论数", kind="int", default=100, minimum=1, maximum=500),
         ]
 
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):

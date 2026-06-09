@@ -63,6 +63,25 @@ def format_youtube_duration(iso_duration: str) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
+def _api_execute_with_retry(request, log_callback=None, stop_event=None, max_retries=3):
+    """执行 YouTube API 请求，带瞬态错误重试。"""
+    from googleapiclient.errors import HttpError
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            return request.execute()
+        except HttpError as e:
+            if e.resp.status in (500, 503, 429):
+                if attempt < max_retries and not (stop_event and stop_event.is_set()):
+                    wait_s = 2 ** attempt
+                    if log_callback:
+                        log_callback(f"    API 瞬态错误 (HTTP {e.resp.status})，第 {attempt} 次重试，等待 {wait_s}s...")
+                    interruptible_sleep(wait_s, stop_event)
+                    continue
+            raise
+    return request.execute()  # 最后尝试
+
+
 def chunked(values: list[str], size: int) -> list[list[str]]:
     """将列表数据分块，便于批次处理。"""
     return [values[index:index + size] for index in range(0, len(values), size)]
@@ -126,7 +145,7 @@ def iter_search_video_id_batches(youtube, keyword: str, max_results: int, limit_
                     "publishedBefore": published_before,
                 }
 
-                response = youtube.search().list(**params).execute()
+                response = _api_execute_with_retry(youtube.search().list(**params), log_callback, stop_event)
 
                 batch_ids: list[str] = []
                 for item in response.get("items", []):
@@ -165,7 +184,7 @@ def iter_search_video_id_batches(youtube, keyword: str, max_results: int, limit_
                 "pageToken": next_page_token,
             }
 
-            response = youtube.search().list(**params).execute()
+            response = _api_execute_with_retry(youtube.search().list(**params), log_callback, stop_event)
 
             batch_ids: list[str] = []
             for item in response.get("items", []):
@@ -193,11 +212,14 @@ def fetch_video_rows(youtube, keyword: str, video_ids: list[str], stop_event=Non
             break
         if wait_if_paused(pause_event, stop_event):
             break
-        response = youtube.videos().list(
-            part="snippet,contentDetails,statistics",
-            id=",".join(ids),
-            maxResults=batch_size,
-        ).execute()
+        response = _api_execute_with_retry(
+            youtube.videos().list(
+                part="snippet,contentDetails,statistics",
+                id=",".join(ids),
+                maxResults=batch_size,
+            ),
+            stop_event=stop_event,
+        )
 
         for item in response.get("items", []):
             if should_stop(stop_event):
@@ -255,9 +277,9 @@ def collect_video_ids_with_playwright(page, keyword: str, max_results: int, star
     try:
         encoded_kw = urllib.parse.quote(keyword)
         url = f"https://www.youtube.com/results?search_query={encoded_kw}"
-        page.goto(url, wait_until="domcontentloaded", timeout=page_timeout)
+        page.goto(url, wait_until="load", timeout=page_timeout)
 
-        if interruptible_sleep(2.0, stop_event):
+        if interruptible_sleep(scroll_delay, stop_event):
             return []
 
         try:

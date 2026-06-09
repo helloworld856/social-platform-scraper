@@ -38,6 +38,7 @@ GLOBAL_ALIAS_MAP: dict[str, list[str]] = {
     "scroll_interval": ["youtube_browser_scroll_delay"],
     "max_scrolls": ["max_search_scrolls", "max_post_scrolls", "youtube_browser_max_scrolls", "max_scroll_rounds", "max_profile_scrolls"],
     "no_new_scroll_limit": ["youtube_browser_no_new_limit", "comment_no_new_scroll_limit"],
+    "scroll_px": ["youtube_browser_scroll_px"],
 }
 
 # ---------------------------------------------------------------------------
@@ -50,7 +51,6 @@ DEFAULT_CONFIGS: dict[str, dict] = {
         "max_results": 5000,                  # 搜索结果最大爬取数
         "youtube_search_batch_size": 50,       # 搜索 API 批量请求大小
         "youtube_video_batch_size": 50,        # 视频详情 API 批量请求大小
-        "comment_top_limit": 100,              # 每个视频提取的热门评论数上限（保留：全局同名参数也生效）
     },
     "youtube_paired_context_metrics": {
         "context_size": 5,                     # 上下文选取大小（目标视频前后各取 N 个）
