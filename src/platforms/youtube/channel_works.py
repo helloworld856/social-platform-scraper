@@ -31,6 +31,25 @@ from src.core import DEFAULT_X_CDP_URL, MultiSheetXlsxWriter, XlsxRowWriter, bui
 from src.platforms.youtube.comments import fetch_top_level_comments
 from src.platforms.youtube.keyword import parse_date_range
 
+
+def _api_execute_with_retry(request, log_callback=None, stop_event=None, max_retries=3):
+    """执行 YouTube API 请求，带瞬态错误重试。"""
+    from googleapiclient.errors import HttpError
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            return request.execute()
+        except HttpError as e:
+            if e.resp.status in (500, 503, 429):
+                if attempt < max_retries and not (stop_event and stop_event.is_set()):
+                    wait_s = 2 ** attempt
+                    if log_callback:
+                        log_callback(f"    API 瞬态错误 (HTTP {e.resp.status})，第 {attempt} 次重试，等待 {wait_s}s...")
+                    interruptible_sleep(wait_s, stop_event)
+                    continue
+            raise
+    return request.execute()  # 最后尝试
+
 # 导出到 Excel 中的表格头部字段定义
 CSV_FIELDS = [
     "序号",
@@ -230,12 +249,16 @@ def collect_upload_video_ids(youtube, uploads_playlist_id: str, max_video_items:
             break
         if wait_if_paused(pause_event, stop_event):
             break
-        response = youtube.playlistItems().list(
-            part="contentDetails",
-            playlistId=uploads_playlist_id,
-            maxResults=min(50, max_video_items - len(video_ids)),
-            pageToken=page_token,
-        ).execute()
+        response = _api_execute_with_retry(
+            youtube.playlistItems().list(
+                part="contentDetails",
+                playlistId=uploads_playlist_id,
+                maxResults=min(50, max_video_items - len(video_ids)),
+                pageToken=page_token,
+            ),
+            log_callback,
+            stop_event,
+        )
         
         stopped_by_date = False
         for item in response.get("items", []):
@@ -303,7 +326,10 @@ def video_rows_from_api(youtube, video_ids: list[str], stop_event=None, pause_ev
             break
         if wait_if_paused(pause_event, stop_event):
             break
-        response = youtube.videos().list(part="snippet,statistics,contentDetails", id=",".join(batch), maxResults=50).execute()
+        response = _api_execute_with_retry(
+            youtube.videos().list(part="snippet,statistics,contentDetails", id=",".join(batch), maxResults=50),
+            stop_event=stop_event,
+        )
         for item in response.get("items", []):
             if should_stop(stop_event):
                 break
@@ -488,12 +514,12 @@ def collect_video_tab_with_playwright(page, channel_url: str, tab: str, max_scro
     url = tab_url(channel_url, tab)
     label = "Videos" if tab == "videos" else "Shorts"
     log_line(log_callback, f"  Playwright 读取 {label}：{url}")
-    page.goto(url, wait_until="domcontentloaded", timeout=page_timeout)
+    page.goto(url, wait_until="load", timeout=page_timeout)
     if interruptible_sleep(initial_load_delay, stop_event):
         return []
     wait_selector = 'a[href*="/watch?v="]' if tab == "videos" else 'a[href*="/shorts/"]'
     try:
-        page.wait_for_selector(wait_selector, timeout=12000)
+        page.wait_for_selector(wait_selector, timeout=min(12000, page_timeout))
     except PlaywrightTimeoutError:
         log_line(log_callback, f"  未等到 {label} 链接，继续滚动尝试。")
 
@@ -709,7 +735,8 @@ def collect_posts_with_playwright(page, channel_url: str, max_post_scrolls: int,
         initial_load_delay = INITIAL_LOAD_DELAY
 
     url = posts_url(channel_url)
-    page.goto(url, wait_until="domcontentloaded", timeout=page_timeout)
+    log_line(log_callback, f"  Playwright 读取 Posts：{url}")
+    page.goto(url, wait_until="load", timeout=page_timeout)
     if interruptible_sleep(initial_load_delay, stop_event):
         return []
 
@@ -717,7 +744,6 @@ def collect_posts_with_playwright(page, channel_url: str, max_post_scrolls: int,
     seen_links = set()
     no_new_count = 0
     max_post_scrolls = max(1, int(max_post_scrolls if max_post_scrolls is not None else DEFAULT_MAX_POST_SCROLLS))
-    log_line(log_callback, f"  Playwright 读取 Posts：{url}")
 
     for scroll_index in range(max_post_scrolls):
         if should_stop(stop_event):
@@ -914,6 +940,8 @@ def run_youtube_channel_works_spider(
                     log_error(log_callback, "  缺少依赖：playwright。跳过 Posts。")
             else:
                 if do_videos and should_fallback_video_tabs and not should_stop(stop_event):
+                    if limit_time_bool:
+                        log_warn(log_callback, "  [注意] API 已降级为浏览器模式，无法按发布时间精确过滤视频/Shorts，将拉取所有可见作品。")
                     try:
                         active_page = ensure_page()
                         if active_page is not None:
@@ -926,6 +954,8 @@ def run_youtube_channel_works_spider(
                         log_warn(log_callback, f"  跳过浏览器 Videos/Shorts：{exc}")
 
                 if do_posts and not should_stop(stop_event):
+                    if limit_time_bool:
+                        log_warn(log_callback, "  [注意] 帖子采集使用浏览器模式，无法按发布时间精确过滤，将拉取所有可见帖子。")
                     try:
                         active_page = ensure_page()
                         if active_page is not None:

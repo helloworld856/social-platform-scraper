@@ -1,0 +1,5 @@
+{
+  "max_results": 5000,
+  "youtube_search_batch_size": 50,
+  "youtube_video_batch_size": 50
+}
