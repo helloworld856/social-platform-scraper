@@ -325,6 +325,8 @@ def collect_profile_tweets(
     initial_load_delay=None,
     consecutive_date_limit=None,
     guarantee_min_scrolls=None,
+    page_already_loaded: bool = False,
+    date_window_size: int = 20,
 ) -> list[dict[str, str]] | tuple[list[dict[str, str]], int, int]:
     if page_timeout is None:
         page_timeout = PAGE_LOAD_TIMEOUT
@@ -342,8 +344,6 @@ def collect_profile_tweets(
         cooldown_min = COOLDOWN_MIN_SECONDS
     if cooldown_max is None:
         cooldown_max = COOLDOWN_MAX_SECONDS
-    if consecutive_date_limit is None:
-        consecutive_date_limit = DEFAULT_CONSECUTIVE_DATE_LIMIT
     if guarantee_min_scrolls is None:
         guarantee_min_scrolls = GUARANTEE_MIN_SCROLLS
 
@@ -363,15 +363,25 @@ def collect_profile_tweets(
     written_count = 0
     seen_ids = set()
     no_new_count = 0
-    consecutive_oor_count = 0  # 连续超时间范围的原创帖计数
     stopped_by_date = False
     max_scrolls = max(1, int(max_scrolls or DEFAULT_MAX_SCROLLS))
     prev_page_height = 0  # 上一次滚动后的页面高度
     dom_changed_streak = 0  # DOM持续变化但无新帖文的连续计数
+    # 滑动窗口：记录最近 N 条帖子是否在时间范围内
+    date_window: list[bool] = []  # True=在范围内, False=在范围外
 
     try:
-        page.goto(target_url, wait_until="domcontentloaded", timeout=page_timeout)
-        page.wait_for_selector('article[data-testid="tweet"], article', timeout=page_timeout)
+        if not page_already_loaded:
+            page.goto(target_url, wait_until="domcontentloaded", timeout=page_timeout)
+            page.wait_for_selector('article[data-testid="tweet"], article', timeout=page_timeout)
+            interruptible_sleep(initial_load_delay, stop_event)
+        else:
+            # 页面已由调用方加载，只需等待渲染完成
+            try:
+                page.wait_for_selector('article[data-testid="tweet"], article', timeout=page_timeout)
+            except PlaywrightTimeoutError:
+                pass
+            interruptible_sleep(initial_load_delay, stop_event)
     except PlaywrightTimeoutError:
         if keyword:
             log_warn(log_callback, f"    搜索无结果或加载超时，跳过关键词 '{keyword}'。")
@@ -379,8 +389,6 @@ def collect_profile_tweets(
                 return tweets, row_offset, written_count
             return tweets
         raise
-
-    interruptible_sleep(initial_load_delay, stop_event)
     log_line(log_callback, f"  开始采集 @{username} 主页帖子，最多滚动 {max_scrolls} 次。")
 
     for scroll_index in range(max_scrolls):
@@ -410,25 +418,45 @@ def collect_profile_tweets(
             normalized_tweet = normalize_tweet(tweet)
             is_repost = tweet.get("isRepost", False)
 
-            # 时间过滤仅对目标博主的原创帖生效，转推不受时间范围限制
-            if limit_time_bool and not is_repost:
+            # 时间过滤：滑动窗口策略
+            # 只要最近 date_window_size 条帖子中有一条在时间范围内，就继续滚动
+            if limit_time_bool:
                 pub_time = normalized_tweet.get("published_at")
-                if not pub_time:
-                    continue
-                try:
-                    pub_dt = datetime.strptime(pub_time, "%Y-%m-%d %H:%M:%S")
-                    if pub_dt.date() < start_dt.date():
-                        consecutive_oor_count += 1
-                        if consecutive_oor_count >= consecutive_date_limit:
-                            stopped_by_date = True
-                            break
-                        continue
-                    if pub_dt.date() > end_dt.date():
-                        continue
-                    # 在范围内的原创帖重置连续超时计数
-                    consecutive_oor_count = 0
-                except (ValueError, TypeError):
-                    continue
+                in_range = False
+                if pub_time:
+                    try:
+                        pub_dt = datetime.strptime(pub_time, "%Y-%m-%d %H:%M:%S")
+                        in_range = start_dt.date() <= pub_dt.date() <= end_dt.date()
+                        if pub_dt.date() < start_dt.date() and not is_repost:
+                            # 原创帖早于开始日期，跳过不采集
+                            date_window.append(False)
+                            if len(date_window) > date_window_size:
+                                date_window.pop(0)
+                            if len(date_window) >= date_window_size and not any(date_window):
+                                stopped_by_date = True
+                                break
+                            continue
+                        if pub_dt.date() > end_dt.date():
+                            # 晚于结束日期，跳过
+                            date_window.append(False)
+                            if len(date_window) > date_window_size:
+                                date_window.pop(0)
+                            if len(date_window) >= date_window_size and not any(date_window):
+                                stopped_by_date = True
+                                break
+                            continue
+                    except (ValueError, TypeError):
+                        pass
+                # 转推不受时间限制，始终计入窗口
+                if is_repost:
+                    date_window.append(True)  # 转推视为"继续滚动"的信号
+                else:
+                    date_window.append(in_range)
+                if len(date_window) > date_window_size:
+                    date_window.pop(0)
+                if len(date_window) >= date_window_size and not any(date_window):
+                    stopped_by_date = True
+                    break
                     
             normalized_tweet["profile_url"] = profile_url
             tweets.append(normalized_tweet)
@@ -473,7 +501,7 @@ def collect_profile_tweets(
                 break
 
         if stopped_by_date:
-            log_line(log_callback, f"  连续 {consecutive_date_limit} 条原创帖早于开始日期，停止滚动。")
+            log_line(log_callback, f"  最近 {date_window_size} 条帖子均不在时间范围内，停止滚动。")
             break
 
         # ---------- DOM 高度变化检测 ----------
@@ -574,6 +602,7 @@ def run_x_profile_tweets_spider(
     truncate_threshold = int(config.get("truncate_threshold", 1000))
     consecutive_date_limit_val = int(config.get("consecutive_date_limit", DEFAULT_CONSECUTIVE_DATE_LIMIT))
     guarantee_min_scrolls_val = int(config.get("guarantee_min_scrolls", GUARANTEE_MIN_SCROLLS))
+    date_window_size = int(config.get("date_window_size", 20))
 
     completed_path = None
     page = None
@@ -652,16 +681,16 @@ def run_x_profile_tweets_spider(
 
                     if post_count is None or post_count <= truncate_threshold:
                         _, row_offset, written_count = collect_profile_tweets(
-                            page, detail_page, profile_url, max_scrolls, limit_time_bool, start_dt, end_dt, get_comments_bool, max_comments_val, log_callback, stop_event, writer=writer, row_offset=row_offset, page_timeout=page_load_timeout_val, scroll_delay=scroll_delay_val, no_new_scroll_limit=no_new_scroll_limit_val, save_batch_size=save_batch_size_val, cooldown_min=cooldown_min_val, cooldown_max=cooldown_max_val, scroll_px=scroll_px_val, initial_load_delay=initial_load_delay_val, pause_event=pause_event, keyword=None, max_collect=None, consecutive_date_limit=consecutive_date_limit_val, guarantee_min_scrolls=guarantee_min_scrolls_val
+                            page, detail_page, profile_url, max_scrolls, limit_time_bool, start_dt, end_dt, get_comments_bool, max_comments_val, log_callback, stop_event, writer=writer, row_offset=row_offset, page_timeout=page_load_timeout_val, scroll_delay=scroll_delay_val, no_new_scroll_limit=no_new_scroll_limit_val, save_batch_size=save_batch_size_val, cooldown_min=cooldown_min_val, cooldown_max=cooldown_max_val, scroll_px=scroll_px_val, initial_load_delay=initial_load_delay_val, pause_event=pause_event, keyword=None, max_collect=None, consecutive_date_limit=consecutive_date_limit_val, guarantee_min_scrolls=guarantee_min_scrolls_val, page_already_loaded=True, date_window_size=date_window_size
                         )
                         log_line(log_callback, f"  完成 @{username} 全量采集：写入 {written_count} 条帖子。")
                     else:
                         log_line(log_callback, f"  帖文数大于 {truncate_threshold}，首先采集前 {truncate_threshold} 条帖子...")
                         _, row_offset, written_count = collect_profile_tweets(
-                            page, detail_page, profile_url, max_scrolls, limit_time_bool, start_dt, end_dt, get_comments_bool, max_comments_val, log_callback, stop_event, writer=writer, row_offset=row_offset, page_timeout=page_load_timeout_val, scroll_delay=scroll_delay_val, no_new_scroll_limit=no_new_scroll_limit_val, save_batch_size=save_batch_size_val, cooldown_min=cooldown_min_val, cooldown_max=cooldown_max_val, scroll_px=scroll_px_val, initial_load_delay=initial_load_delay_val, pause_event=pause_event, keyword=None, max_collect=truncate_threshold, consecutive_date_limit=consecutive_date_limit_val, guarantee_min_scrolls=guarantee_min_scrolls_val
+                            page, detail_page, profile_url, max_scrolls, limit_time_bool, start_dt, end_dt, get_comments_bool, max_comments_val, log_callback, stop_event, writer=writer, row_offset=row_offset, page_timeout=page_load_timeout_val, scroll_delay=scroll_delay_val, no_new_scroll_limit=no_new_scroll_limit_val, save_batch_size=save_batch_size_val, cooldown_min=cooldown_min_val, cooldown_max=cooldown_max_val, scroll_px=scroll_px_val, initial_load_delay=initial_load_delay_val, pause_event=pause_event, keyword=None, max_collect=truncate_threshold, consecutive_date_limit=consecutive_date_limit_val, guarantee_min_scrolls=guarantee_min_scrolls_val, page_already_loaded=True, date_window_size=date_window_size
                         )
                         log_line(log_callback, f"  完成截断采集：新增写入 {written_count} 条帖子。")
-                        
+
                         if keyword_list:
                             log_line(log_callback, f"  开始按关键词进行补充采集 (共 {len(keyword_list)} 个关键词)...")
                             for kw in keyword_list:
@@ -669,7 +698,7 @@ def run_x_profile_tweets_spider(
                                     break
                                 log_line(log_callback, f"  -> 补充采集关键词: {kw}")
                                 _, row_offset, kw_written = collect_profile_tweets(
-                                    page, detail_page, profile_url, max_scrolls, limit_time_bool, start_dt, end_dt, get_comments_bool, max_comments_val, log_callback, stop_event, writer=writer, row_offset=row_offset, page_timeout=page_load_timeout_val, scroll_delay=scroll_delay_val, no_new_scroll_limit=no_new_scroll_limit_val, save_batch_size=save_batch_size_val, cooldown_min=cooldown_min_val, cooldown_max=cooldown_max_val, scroll_px=scroll_px_val, initial_load_delay=initial_load_delay_val, pause_event=pause_event, keyword=kw, max_collect=None, consecutive_date_limit=consecutive_date_limit_val, guarantee_min_scrolls=guarantee_min_scrolls_val
+                                    page, detail_page, profile_url, max_scrolls, limit_time_bool, start_dt, end_dt, get_comments_bool, max_comments_val, log_callback, stop_event, writer=writer, row_offset=row_offset, page_timeout=page_load_timeout_val, scroll_delay=scroll_delay_val, no_new_scroll_limit=no_new_scroll_limit_val, save_batch_size=save_batch_size_val, cooldown_min=cooldown_min_val, cooldown_max=cooldown_max_val, scroll_px=scroll_px_val, initial_load_delay=initial_load_delay_val, pause_event=pause_event, keyword=kw, max_collect=None, consecutive_date_limit=consecutive_date_limit_val, guarantee_min_scrolls=guarantee_min_scrolls_val, page_already_loaded=False, date_window_size=date_window_size
                                 )
                                 log_line(log_callback, f"  完成关键词 '{kw}' 采集：新增写入 {kw_written} 条。")
                         else:

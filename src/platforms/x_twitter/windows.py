@@ -190,9 +190,19 @@ class XProfileTweetsWindow(SimpleToolWindow):
             ConfigParam("max_scrolls", "最大滚动次数", kind="int", default=300, minimum=10, maximum=2000),
             ConfigParam("truncate_threshold", "帖文截断阈值", kind="int", default=1000, minimum=100, maximum=10000,
                         tooltip="帖文数超过此值时，先截断采集前 N 条，再用关键词补充采集。"),
-            ConfigParam("consecutive_date_limit", "超时原创帖停止阈值", kind="int", default=3, minimum=1, maximum=20,
-                        tooltip="连续几条原创帖早于开始日期时停止滚动。转推不受此限制。"),
+            ConfigParam("date_window_size", "时间窗口大小", kind="int", default=20, minimum=5, maximum=100,
+                        tooltip="滑动窗口大小：最近 N 条帖子中只要有一条在时间范围内就继续滚动，否则停止。"),
             ConfigParam("initial_load_delay", "初始加载等待(秒)", kind="float", default=2.0, minimum=0.5, maximum=10.0, step=0.1, decimals=1),
+            ConfigParam("page_load_timeout", "页面加载超时(ms)", kind="int", default=30000, minimum=5000, maximum=120000, step=1000),
+            ConfigParam("scroll_interval", "滚动间隔(秒)", kind="float", default=3.2, minimum=0.5, maximum=10.0, step=0.1, decimals=1),
+            ConfigParam("scroll_px", "每次滚动像素", kind="int", default=2800, minimum=500, maximum=10000, step=100),
+            ConfigParam("no_new_scroll_limit", "连续无新增停止阈值", kind="int", default=10, minimum=3, maximum=50,
+                        tooltip="连续多少次滚动无新增帖子时停止。"),
+            ConfigParam("save_batch_size", "批量保存条数", kind="int", default=10, minimum=1, maximum=100),
+            ConfigParam("cooldown_min", "冷却最小秒数", kind="float", default=6.0, minimum=0, maximum=30.0, step=0.5, decimals=1),
+            ConfigParam("cooldown_max", "冷却最大秒数", kind="float", default=15.0, minimum=0, maximum=60.0, step=0.5, decimals=1),
+            ConfigParam("guarantee_min_scrolls", "保底滚动次数", kind="int", default=15, minimum=1, maximum=100,
+                        tooltip="即使无新内容也至少滚动这么多次。"),
         ]
 
     def __init__(self) -> None:
@@ -225,7 +235,7 @@ class XProfileTweetsWindow(SimpleToolWindow):
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
         from src.platforms.x_twitter.profile_tweets import run_x_profile_tweets_spider
 
-        config = {k: v for k, v in values.items() if k in ("page_load_timeout", "scroll_interval", "no_new_scroll_limit", "max_scrolls", "save_batch_size", "cooldown_min", "cooldown_max", "scroll_px", "initial_load_delay", "truncate_threshold", "consecutive_date_limit", "guarantee_min_scrolls")}
+        config = {k: v for k, v in values.items() if k in ("page_load_timeout", "scroll_interval", "no_new_scroll_limit", "max_scrolls", "save_batch_size", "cooldown_min", "cooldown_max", "scroll_px", "initial_load_delay", "truncate_threshold", "consecutive_date_limit", "guarantee_min_scrolls", "date_window_size")}
         return run_x_profile_tweets_spider(
             values["profile_urls"],
             values["keywords"],

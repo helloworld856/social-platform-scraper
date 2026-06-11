@@ -49,7 +49,7 @@ class YouTubeClientPool:
         return True
 
 
-def execute_with_retry(request, log_callback=None):
+def execute_with_retry(request, log_callback=None, stop_event=None):
     """执行 API 请求，遇 429/500/503 自动重试（最多 3 次）。
 
     不处理 403（配额耗尽），由调用方通过 client_pool.next_client() 处理。
@@ -64,7 +64,7 @@ def execute_with_retry(request, log_callback=None):
                 wait = 2 ** attempt
                 if log_callback:
                     log_line(log_callback, f"  [API] HTTP {e.resp.status}，{wait}秒后重试...")
-                time.sleep(wait)
+                interruptible_sleep(wait, stop_event)
                 continue
             raise
 
@@ -80,6 +80,7 @@ CSV_FIELDS = [
     "发布时间",
     "视频链接",
     "作者主页链接",
+    "查询时间",
 ]
 
 
@@ -124,6 +125,21 @@ def safe_filename_part(value: str) -> str:
     cleaned = re.sub(r'[\\/*?:"<>|]', "", value or "").strip()
     cleaned = re.sub(r"\s+", "_", cleaned)
     return cleaned[:80] or "keyword"
+
+
+def _search_with_rotation(client_pool, params: dict, log_callback, stop_event=None):
+    """执行搜索 API 请求，遇 403 自动切换 Key。"""
+    import googleapiclient.errors
+    while True:
+        try:
+            return execute_with_retry(client_pool.client.search().list(**params), log_callback, stop_event)
+        except googleapiclient.errors.HttpError as e:
+            if e.resp.status in [403, 429]:
+                if client_pool.next_client():
+                    log_line(log_callback, f"  [API] 搜索额度受限 ({e.resp.status})，切换 Key ({client_pool.current_idx + 1}/{len(client_pool.api_keys)})...")
+                    continue
+                log_line(log_callback, f"  [API] 所有 API Key 配额均已耗尽 ({e.resp.status})，终止搜索。")
+            raise
 
 
 def iter_search_video_id_batches(client_pool, keyword: str, max_results: int, limit_time_bool: bool, start_dt: datetime | None, end_dt: datetime | None, log_callback, stop_event=None, pause_event=None, batch_size: int = 50, date_chunk_days: int = 7, date_chunk_hours: int = 0):
@@ -179,7 +195,7 @@ def iter_search_video_id_batches(client_pool, keyword: str, max_results: int, li
                     "publishedBefore": published_before,
                 }
 
-                response = execute_with_retry(client_pool.client.search().list(**params), log_callback)
+                response = _search_with_rotation(client_pool, params, log_callback, stop_event)
 
                 batch_ids: list[str] = []
                 for item in response.get("items", []):
@@ -218,7 +234,7 @@ def iter_search_video_id_batches(client_pool, keyword: str, max_results: int, li
                 "pageToken": next_page_token,
             }
 
-            response = execute_with_retry(client_pool.client.search().list(**params), log_callback)
+            response = _search_with_rotation(client_pool, params, log_callback, stop_event)
 
             batch_ids: list[str] = []
             for item in response.get("items", []):
@@ -240,14 +256,15 @@ def iter_search_video_id_batches(client_pool, keyword: str, max_results: int, li
 
 def fetch_video_rows(client_pool, keyword: str, video_ids: list[str], stop_event=None, pause_event=None, batch_size: int = 50, log_callback=None) -> list[dict]:
     """批量获取指定视频 ID 的详情指标（播放量、点赞数等），封装为导出格式。"""
+    import googleapiclient.errors
     from src.platforms.youtube.comments import format_youtube_datetime
-    
+
     rows: list[dict] = []
     exhausted = False
     for ids in chunked(video_ids, batch_size):
         if should_stop(stop_event) or wait_if_paused(pause_event, stop_event) or exhausted:
             break
-        
+
         while True:
             try:
                 response = execute_with_retry(
@@ -257,11 +274,11 @@ def fetch_video_rows(client_pool, keyword: str, video_ids: list[str], stop_event
                         maxResults=batch_size,
                         fields="items(id,snippet(title,channelId,publishedAt),contentDetails(duration),statistics(viewCount,likeCount))"
                     ),
-                    log_callback
+                    log_callback,
+                    stop_event
                 )
                 break
             except Exception as e:
-                import googleapiclient.errors
                 if isinstance(e, googleapiclient.errors.HttpError) and e.resp.status in [403, 429]:
                     if client_pool.next_client():
                         if log_callback:
@@ -402,12 +419,10 @@ def collect_video_ids_with_playwright(page, keyword: str, max_results: int, star
 
 
 def run_youtube_spider(api_keys: list[str], keywords_list, max_results, limit_time_str, start_date, end_date, get_comments_str, max_comments, log_callback, finish_callback, stop_event=None, config=None, pause_event=None):
-    from src.platforms.youtube.comments import extract_video_id, fetch_top_level_comments
-
     """运行 YouTube 关键词视频采集与评论导出任务的主驱动函数。
 
     Args:
-        api_key: API Key。
+        api_keys: API Key 列表（支持多 Key 轮换）。
         keywords_list: 关键词列表（行划分）。
         max_results: 每个词的最大搜集数量。
         limit_time_str: 是否限制发布时间窗口（"是"/"否"）。
@@ -421,6 +436,8 @@ def run_youtube_spider(api_keys: list[str], keywords_list, max_results, limit_ti
         config: 高阶环境配置字典。
         pause_event: 暂停事件。
     """
+    from src.platforms.youtube.comments import extract_video_id, fetch_top_level_comments
+
     if config is None:
         config = {}
     search_batch_size = int(config.get("youtube_search_batch_size", 50))
@@ -477,6 +494,7 @@ def run_youtube_spider(api_keys: list[str], keywords_list, max_results, limit_ti
             if enable_timer:
                 log_line(log_callback, f"=== 开始执行第 {current_run} 次任务 ===")
             run_stamp = time.strftime("%Y%m%d_%H%M%S")
+            output_paths.clear()
 
             for index, keyword in enumerate(keywords_list, 1):
                 if should_stop(stop_event):
