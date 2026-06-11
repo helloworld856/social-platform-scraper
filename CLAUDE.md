@@ -55,7 +55,8 @@ Discovery happens at startup and on "reload tools" button press. See `src/studio
 - Each tool has a `DEFAULT_CONFIGS` entry with type-safe defaults
 - Config values are loaded with automatic type coercion from JSON
 - Supports **named profiles** (e.g., `tool_id_profileName.json`)
-- **Global config** (`__global__`) provides shared parameters with alias mapping across tools
+- **Global config** (`__global__`) provides 9 shared parameters (`page_load_timeout`, `scroll_interval`, `no_new_scroll_limit`, `max_scrolls`, `scroll_px`, `cooldown_min`, `cooldown_max`, `save_batch_size`, `comment_top_limit`) with alias mapping across tools (e.g., `page_load_timeout` → `youtube_browser_page_timeout`)
+- **Merge priority**: tool JSON > global JSON > tool defaults. Alias params: if user hasn't modified the alias key in the tool dialog, the global value takes effect; if user explicitly set a different value, tool value wins.
 
 ### Browser Automation
 
@@ -75,9 +76,11 @@ Discovery happens at startup and on "reload tools" button press. See `src/studio
 
 - **Linter**: `ruff` with `line-length = 150`, ignoring `E402` and `F841`
 - **UI Framework**: PyQt5 (no Qt Designer files)
-- **Browser**: Playwright with persistent contexts; always use sync_playwright pattern
+- **Browser**: Playwright with persistent contexts; always use `sync_playwright` pattern; prefer `wait_until="load"` over `"domcontentloaded"` for SPA pages
 - **Data Input**: TXT files, one record per line, skip `#` lines and empty lines
-- **Data Output**: `.xlsx` files in `output/` subdirectories
+- **Data Output**: `.xlsx` files in `output/` subdirectories; use `autosave_every` parameter on `XlsxRowWriter`/`MultiSheetXlsxWriter` to control save frequency
+- **YouTube API**: Use `_api_execute_with_retry()` helper (found in `keyword.py` and `channel_works.py`) to wrap `.execute()` calls with exponential backoff retry for transient 500/503/429 errors
+- **Config**: Use `config.get("key", DEFAULT)` to read parameters, never use module-level constants directly. Use `interruptible_sleep` not `time.sleep`. Use `random_cooldown` for rate limiting.
 
 ## Adding a New Tool
 
