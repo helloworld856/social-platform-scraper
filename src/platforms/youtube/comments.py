@@ -14,7 +14,8 @@ import urllib.request
 import urllib.error
 import concurrent.futures
 
-from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+from src.platforms.youtube.keyword import YouTubeClientPool, execute_with_retry
 
 from src.core import MultiSheetXlsxWriter, XlsxRowWriter, build_output_path, log_error, log_line, log_warn, sanitize_csv_row, sanitize_csv_rows, should_stop, wait_if_paused
 
@@ -258,7 +259,7 @@ def check_video_type_bulk(video_ids: list[str]) -> dict[str, str]:
     return results
 
 
-def fetch_video_metrics(youtube, video_ids: list[str]) -> dict[str, dict]:
+def fetch_video_metrics(client_pool, video_ids: list[str]) -> dict[str, dict]:
     """调用 API 批量拉取视频的基本指标参数信息，单批上限 50 个。
 
     Args:
@@ -271,10 +272,21 @@ def fetch_video_metrics(youtube, video_ids: list[str]) -> dict[str, dict]:
     result = {}
     for i in range(0, len(video_ids), 50):
         batch = video_ids[i:i+50]
-        response = youtube.videos().list(
-            part="snippet,statistics,contentDetails",
-            id=",".join(batch)
-        ).execute()
+        while True:
+            try:
+                response = execute_with_retry(
+                    client_pool.client.videos().list(
+                        part="snippet,statistics,contentDetails",
+                        id=",".join(batch)
+                    ),
+                    None
+                )
+                break
+            except HttpError as e:
+                if e.resp.status in [403, 429]:
+                    if client_pool.next_client():
+                        continue
+                raise e
         for item in response.get("items", []):
             vid = item.get("id")
             snippet = item.get("snippet", {})
@@ -302,7 +314,7 @@ def fetch_video_metrics(youtube, video_ids: list[str]) -> dict[str, dict]:
     return result
 
 
-def fetch_top_level_comments(youtube, video_id: str, max_scan_comments: int, log_callback, stop_event=None, pause_event=None, api_page_size: int = 100) -> list[dict]:
+def fetch_top_level_comments(client_pool, video_id: str, max_scan_comments: int, log_callback, stop_event=None, pause_event=None, api_page_size: int = 100) -> list[dict]:
     """调用 YouTube API 分页获取指定视频下相关性排序的首层主楼评论。
 
     Args:
@@ -329,14 +341,27 @@ def fetch_top_level_comments(youtube, video_id: str, max_scan_comments: int, log
             break
         
         # 请求 API 获取评论线程列表
-        response = youtube.commentThreads().list(
-            part="snippet",
-            videoId=video_id,
-            maxResults=min(page_size, max_scan_comments - len(comments)),
-            pageToken=next_page_token,
-            order="relevance",
-            textFormat="plainText",
-        ).execute()
+        while True:
+            try:
+                response = execute_with_retry(
+                    client_pool.client.commentThreads().list(
+                        part="snippet",
+                        videoId=video_id,
+                        maxResults=min(page_size, max_scan_comments - len(comments)),
+                        pageToken=next_page_token,
+                        order="relevance",
+                        textFormat="plainText",
+                    ),
+                    log_callback
+                )
+                break
+            except HttpError as e:
+                if e.resp.status in [403, 429]:
+                    if client_pool.next_client():
+                        log_line(log_callback, f"  [API] 评论获取额度受限 ({e.resp.status})，切换 Key ({client_pool.current_idx + 1}/{len(client_pool.api_keys)})...")
+                        continue
+                    log_line(log_callback, f"  [API] 所有 API Key 配额均已耗尽 ({e.resp.status})，终止评论获取。")
+                raise e
 
         for item in response.get("items", []):
             if should_stop(stop_event):
@@ -372,9 +397,9 @@ def fetch_top_level_comments(youtube, video_id: str, max_scan_comments: int, log
     return comments
 
 
-def top_comment_rows(youtube, video_index: int, video_url: str, video_id: str, max_scan_comments: int, log_callback, stop_event=None, pause_event=None, top_comment_limit: int = TOP_COMMENT_LIMIT, api_page_size: int = 100) -> list[dict[str, str]]:
+def top_comment_rows(client_pool, video_index: int, video_url: str, video_id: str, max_scan_comments: int, log_callback, stop_event=None, pause_event=None, top_comment_limit: int = TOP_COMMENT_LIMIT, api_page_size: int = 100) -> list[dict[str, str]]:
     """提取视频评论并进行点赞排序，返回格式化好的前 N 条评论数据列表。"""
-    comments = fetch_top_level_comments(youtube, video_id, max_scan_comments, log_callback, stop_event, pause_event, api_page_size=api_page_size)
+    comments = fetch_top_level_comments(client_pool, video_id, max_scan_comments, log_callback, stop_event, pause_event, api_page_size=api_page_size)
     # 按点赞数降序排序
     comments.sort(key=lambda item: item["like_count"], reverse=True)
 
@@ -403,7 +428,7 @@ def empty_video_row(video_index: int, video_url: str) -> dict[str, str]:
     }
 
 
-def run_youtube_video_metrics_spider(api_key: str, txt_path: str, get_comments: str, check_type: str, max_scan_comments: int, log_callback, finish_callback, stop_event=None, config=None, pause_event=None):
+def run_youtube_video_metrics_spider(api_keys: list[str], txt_path: str, get_comments: str, check_type: str, max_scan_comments: int, log_callback, finish_callback, stop_event=None, config=None, pause_event=None):
     """运行 YouTube 视频数据与评论采集任务的主驱动函数。
 
     根据 TXT 文件输入批量获取视频基本热度、判定是否为 Shorts，
@@ -440,7 +465,7 @@ def run_youtube_video_metrics_spider(api_key: str, txt_path: str, get_comments: 
         log_line(log_callback, f"读取到 {valid_line_count} 行有效视频链接，去重后唯一视频 {len(entries)} 个，重复链接 {duplicate_count} 行。")
 
         # 初始化 Google API 代理服务
-        youtube = build("youtube", "v3", developerKey=api_key)
+        client_pool = YouTubeClientPool(api_keys)
         output_path = build_output_path("youtube", f"youtube_video_metrics_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
         
         if get_comments_bool:
@@ -453,7 +478,7 @@ def run_youtube_video_metrics_spider(api_key: str, txt_path: str, get_comments: 
         
         try:
             log_line(log_callback, f"正在批量获取 {len(video_ids)} 个视频的热度数据...")
-            metrics_map = fetch_video_metrics(youtube, video_ids)
+            metrics_map = fetch_video_metrics(client_pool, video_ids)
         except Exception as exc:
             import googleapiclient.errors
             if isinstance(exc, googleapiclient.errors.HttpError) and exc.resp.status in [403]:
@@ -522,7 +547,7 @@ def run_youtube_video_metrics_spider(api_key: str, txt_path: str, get_comments: 
                 writer.writerow("视频信息", sanitize_csv_row(row_video))
                 
                 try:
-                    rows = top_comment_rows(youtube, video_index, final_video_url, video_id, max_scan_comments, log_callback, stop_event, pause_event, top_comment_limit, api_page_size)
+                    rows = top_comment_rows(client_pool, video_index, final_video_url, video_id, max_scan_comments, log_callback, stop_event, pause_event, top_comment_limit, api_page_size)
                     if not rows:
                         rows = [empty_video_row(video_index, final_video_url)]
                     for r in sanitize_csv_rows(rows):

@@ -1,9 +1,7 @@
 {
-  "page_load_timeout": 30000,
-  "scroll_interval": 3.2,
-  "no_new_scroll_limit": 10,
-  "max_scrolls": 200,
-  "save_batch_size": 10,
-  "cooldown_min": 6.0,
-  "cooldown_max": 15.0
+  "max_scrolls": 300,
+  "truncate_threshold": 1000,
+  "consecutive_date_limit": 5,
+  "initial_load_delay": 5.0,
+  "guarantee_min_scrolls": 15
 }

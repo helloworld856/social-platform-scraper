@@ -30,3 +30,7 @@ jobs:
     - name: Run UI Logic Tests
       run: |
         python test/test_visibility.py
+
+    - name: Run Keyword Fixes Tests
+      run: |
+        python test/test_keyword_fixes.py

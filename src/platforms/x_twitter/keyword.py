@@ -104,7 +104,8 @@ def is_repost_context(text: str) -> bool:
         token in lowered
         for token in [
             "reposted", "repost", "retweeted", "retweet",
-            "republished", "reposted by", "转推", "转发", "リポスト",
+            "republished", "reposted by", "quoted", "quote",
+            "转推", "转发", "引用", "リポスト",
             "リツイート", "再投稿", "已轉推",
         ]
     )

@@ -19,18 +19,22 @@ class YouTubeKeywordWindow(SimpleToolWindow):
         super().__init__(
             "YouTube 关键词搜索",
             [
-                FieldSpec("api_key", "Google API Key", required=True),
+                FieldSpec("api_key", "Google API Key(s) (支持多行或导入txt)", kind="text_or_file", required=True, placeholder="支持每行填写一个API Key，耗尽自动轮询"),
                 FieldSpec("limit_time", "是否限制时间？", kind="combo", options=("是", "否"), default="是"),
                 FieldSpec("start_date", "开始日期 YYYY-MM-DD", default=DEFAULT_START_DATE),
                 FieldSpec("end_date", "结束日期 YYYY-MM-DD", default=DEFAULT_END_DATE),
                 FieldSpec("keywords", "关键词，每行一个", kind="text_or_file", required=True, placeholder="每行一个关键词"),
                 FieldSpec("get_comments", "是否获取视频评论信息？", kind="combo", options=("是", "否"), default="否"),
                 FieldSpec("max_comments", "最多获取评论数", kind="int", default=100, minimum=10, maximum=10000),
+                FieldSpec("enable_timer", "是否开启定时重复运行？", kind="combo", options=("否", "是"), default="否"),
+                FieldSpec("timer_interval_minutes", "运行间隔 (分钟)", kind="int", default=60, minimum=1, maximum=10080),
+                FieldSpec("timer_max_runs", "最大运行次数", kind="int", default=3, minimum=2, maximum=10000),
             ],
             height=760,
         )
         self.bind_field_visibility("limit_time", "是", ["start_date", "end_date"])
         self.bind_field_visibility("get_comments", "是", ["max_comments"])
+        self.bind_field_visibility("enable_timer", "是", ["timer_interval_minutes", "timer_max_runs"])
 
     def validate_values(self, values):
         from src.platforms.youtube.keyword import parse_date_range
@@ -54,6 +58,8 @@ class YouTubeKeywordWindow(SimpleToolWindow):
             ConfigParam("youtube_search_batch_size", "搜索每页条数", kind="int", default=50, minimum=1, maximum=50),
             ConfigParam("youtube_date_chunk_days", "日期切分粒度(天)", kind="int", default=7, minimum=1, maximum=30,
                         tooltip="YouTube API 单次搜索最多返回约 500 条。开启时间过滤时，会将日期范围按此天数切分为多个小区间分别检索，绕过 500 条上限。越小越精确但消耗更多配额。"),
+            ConfigParam("youtube_date_chunk_hours", "日期切分粒度(小时)，留空则使用上方天数", kind="int", default=0, minimum=0, maximum=720,
+                        tooltip="若填写（如 1），则按小时切分时间区间，优先级高于上方的天数粒度。适合短时间范围内大量视频的精确采集。0 或留空表示使用天数粒度。"),
             ConfigParam("youtube_video_batch_size", "视频详情每批条数", kind="int", default=50, minimum=1, maximum=50),
             ConfigParam("youtube_browser_scroll_px", "浏览器每次滚动像素", kind="int", default=2500, minimum=500, maximum=10000, step=100),
             ConfigParam("youtube_browser_scroll_delay", "浏览器滚动间隔(秒)", kind="float", default=1.0, minimum=0.2, maximum=5.0, step=0.1, decimals=1),
@@ -66,9 +72,9 @@ class YouTubeKeywordWindow(SimpleToolWindow):
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
         from src.platforms.youtube.keyword import run_youtube_spider
 
-        config = {k: v for k, v in values.items() if k.startswith("youtube_") or k in ("max_results", "comment_top_limit")}
+        config = {k: v for k, v in values.items() if k.startswith("youtube_") or k in ("max_results", "comment_top_limit", "enable_timer", "timer_interval_minutes", "timer_max_runs")}
         return run_youtube_spider(
-            values["api_key"],
+            _lines(values["api_key"]),
             _lines(values["keywords"]),
             int(values.get("max_results", 5000)),
             values["limit_time"],
@@ -89,7 +95,7 @@ class YouTubeProfilesWindow(SimpleToolWindow):
         super().__init__(
             "YouTube 博主信息",
             [
-                FieldSpec("api_key", "Google API Key", required=True),
+                FieldSpec("api_key", "Google API Key(s) (支持多行或导入txt)", kind="text_or_file", required=True, placeholder="支持每行填写一个API Key，耗尽自动轮询"),
                 FieldSpec("txt_path", "博主主页链接，每行一个", kind="text_or_file", required=True, placeholder="https://www.youtube.com/@username"),
             ],
         )
@@ -97,7 +103,7 @@ class YouTubeProfilesWindow(SimpleToolWindow):
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
         from src.platforms.youtube.profiles import run_channel_spider
 
-        return run_channel_spider(values["api_key"], self._text_to_tempfile(values["txt_path"]), log_callback, finish_callback, stop_event, pause_event=pause_event)
+        return run_channel_spider(_lines(values["api_key"]), self._text_to_tempfile(values["txt_path"]), log_callback, finish_callback, stop_event, pause_event=pause_event)
 
 
 class YouTubeContextWindow(SimpleToolWindow):
@@ -107,7 +113,7 @@ class YouTubeContextWindow(SimpleToolWindow):
         super().__init__(
             "YouTube 视频上下文数据",
             [
-                FieldSpec("api_key", "Google API Key", required=True),
+                FieldSpec("api_key", "Google API Key(s) (支持多行或导入txt)", kind="text_or_file", required=True, placeholder="支持每行填写一个API Key，耗尽自动轮询"),
                 FieldSpec("txt_path", "视频链接 + 博主主页，每行一对", kind="text_or_file", required=True, placeholder="视频链接 博主主页链接"),
             ],
         )
@@ -122,7 +128,7 @@ class YouTubeContextWindow(SimpleToolWindow):
         from src.platforms.youtube.context import run_youtube_paired_context_spider
 
         config = {k: v for k, v in values.items() if k in ("context_size", "max_upload_pages")}
-        return run_youtube_paired_context_spider(values["api_key"], self._text_to_tempfile(values["txt_path"]), log_callback, finish_callback, stop_event, config=config, pause_event=pause_event)
+        return run_youtube_paired_context_spider(_lines(values["api_key"]), self._text_to_tempfile(values["txt_path"]), log_callback, finish_callback, stop_event, config=config, pause_event=pause_event)
 
 
 class YouTubeChannelWorksWindow(SimpleToolWindow):
@@ -132,7 +138,7 @@ class YouTubeChannelWorksWindow(SimpleToolWindow):
         super().__init__(
             "YouTube 博主作品采集",
             [
-                FieldSpec("api_key", "Google API Key", required=True),
+                FieldSpec("api_key", "Google API Key(s) (支持多行或导入txt)", kind="text_or_file", required=True, placeholder="支持每行填写一个API Key，耗尽自动轮询"),
                 FieldSpec(
                     "channel_urls",
                     "博主主页链接，每行一个",
@@ -146,11 +152,14 @@ class YouTubeChannelWorksWindow(SimpleToolWindow):
                 FieldSpec("end_date", "结束日期 YYYY-MM-DD", default=DEFAULT_END_DATE),
                 FieldSpec("get_comments", "是否获取视频评论信息？", kind="combo", options=("是", "否"), default="否"),
                 FieldSpec("max_comments", "最多获取评论数", kind="int", default=100, minimum=10, maximum=10000),
+                FieldSpec("verify_video_type", "是否精确验证视频长短类型？", kind="combo", options=("是", "否"), default="是"),
+                FieldSpec("verify_max_scrolls", "验证最大滚动次数", kind="int", default=20, minimum=1, maximum=500),
             ],
-            height=760,
+            height=820,
         )
         self.bind_field_visibility("limit_time", "是", ["start_date", "end_date"])
         self.bind_field_visibility("get_comments", "是", ["max_comments"])
+        self.bind_field_visibility("verify_video_type", "是", ["verify_max_scrolls"])
 
     def validate_values(self, values):
         if not _lines(values["channel_urls"]):
@@ -169,9 +178,9 @@ class YouTubeChannelWorksWindow(SimpleToolWindow):
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
         from src.platforms.youtube.channel_works import run_youtube_channel_works_spider
 
-        config = {k: v for k, v in values.items() if k in ("max_video_items", "page_load_timeout", "scroll_interval", "no_new_scroll_limit", "scroll_px", "max_post_scrolls", "save_batch_size", "initial_load_delay")}
+        config = {k: v for k, v in values.items() if k in ("max_video_items", "page_load_timeout", "scroll_interval", "no_new_scroll_limit", "scroll_px", "max_post_scrolls", "save_batch_size", "initial_load_delay", "verify_video_type", "verify_max_scrolls")}
         return run_youtube_channel_works_spider(
-            values["api_key"],
+            _lines(values["api_key"]),
             values["channel_urls"],
             values.get("collect_target", "全部"),
             int(values.get("max_video_items", 5000)),
@@ -196,7 +205,7 @@ class YouTubeCommentsWindow(SimpleToolWindow):
         super().__init__(
             "YouTube 视频数据与评论采集",
             [
-                FieldSpec("api_key", "Google API Key", required=True),
+                FieldSpec("api_key", "Google API Key(s) (支持多行或导入txt)", kind="text_or_file", required=True, placeholder="支持每行填写一个API Key，耗尽自动轮询"),
                 FieldSpec("txt_path", "视频链接，每行一个", kind="text_or_file", required=True, placeholder="https://www.youtube.com/watch?v=xxxx"),
                 FieldSpec("get_comments", "是否获取视频评论信息？", kind="combo", options=("是", "否"), default="否"),
                 FieldSpec("max_scan_comments", "最多获取评论数", kind="int", default=500, minimum=100, maximum=10000),
@@ -215,7 +224,7 @@ class YouTubeCommentsWindow(SimpleToolWindow):
 
         config = {k: v for k, v in values.items() if k.startswith("youtube_") or k in ("comment_top_limit",)}
         return run_youtube_video_metrics_spider(
-            values["api_key"],
+            _lines(values["api_key"]),
             self._text_to_tempfile(values["txt_path"]),
             values.get("get_comments", "否"),
             values.get("check_type", "否"),

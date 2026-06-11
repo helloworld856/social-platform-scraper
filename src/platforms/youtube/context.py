@@ -12,8 +12,8 @@ import re
 import time
 from urllib.parse import urlparse
 
-from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from src.platforms.youtube.keyword import YouTubeClientPool, execute_with_retry
 
 from src.core import XlsxRowWriter, build_output_path, log_error, log_line, log_warn, sanitize_csv_rows, should_stop, wait_if_paused
 
@@ -97,19 +97,28 @@ def extract_channel_hint(profile_url: str) -> tuple[str, str]:
     return "search", first.lstrip("@")
 
 
-def resolve_channel(youtube, profile_url: str) -> dict:
+def resolve_channel(client_pool, profile_url: str, log_callback=None) -> dict:
     """调用 API 解析获取博主的频道信息（snippet 及 contentDetails 的上传播放列表 ID）。"""
     hint_type, hint_value = extract_channel_hint(profile_url)
     if not hint_value:
         return {}
 
+    def _execute_req(build_req):
+        while True:
+            try:
+                return execute_with_retry(build_req(), log_callback)
+            except HttpError as e:
+                if e.resp.status in [403, 429]:
+                    if client_pool.next_client():
+                        continue
+                raise e
+
     try:
         if hint_type == "id":
-            res = youtube.channels().list(part="snippet,contentDetails", id=hint_value).execute()
+            res = _execute_req(lambda: client_pool.client.channels().list(part="snippet,contentDetails", id=hint_value))
         elif hint_type == "username":
-            res = youtube.channels().list(part="snippet,contentDetails", forUsername=hint_value).execute()
+            res = _execute_req(lambda: client_pool.client.channels().list(part="snippet,contentDetails", forUsername=hint_value))
         elif hint_type == "handle":
-            # 针对 forHandle 参数，尝试兼容加上 @ 及去掉 @ 的两种情况
             res = {"items": []}
             handle_variants = []
             clean_handle = hint_value.lstrip("@")
@@ -117,7 +126,7 @@ def resolve_channel(youtube, profile_url: str) -> dict:
             handle_variants.append(clean_handle)
             for handle in handle_variants:
                 try:
-                    res = youtube.channels().list(part="snippet,contentDetails", forHandle=handle).execute()
+                    res = _execute_req(lambda h=handle: client_pool.client.channels().list(part="snippet,contentDetails", forHandle=h))
                 except TypeError:
                     res = {"items": []}
                 if res.get("items"):
@@ -133,21 +142,31 @@ def resolve_channel(youtube, profile_url: str) -> dict:
     return items[0] if items else {}
 
 
-def resolve_channel_from_video(youtube, video_id: str) -> dict:
+def resolve_channel_from_video(client_pool, video_id: str, log_callback=None) -> dict:
     """兜底降级方法：当通过频道主页 URL 无法解析时，通过视频 ID 直接反查其所属频道并获取上传播放列表 ID。"""
-    res = youtube.videos().list(part="snippet", id=video_id, maxResults=1).execute()
+    def _execute_req(build_req):
+        while True:
+            try:
+                return execute_with_retry(build_req(), log_callback)
+            except HttpError as e:
+                if e.resp.status in [403, 429]:
+                    if client_pool.next_client():
+                        continue
+                raise e
+
+    res = _execute_req(lambda: client_pool.client.videos().list(part="snippet", id=video_id, maxResults=1))
     items = res.get("items", [])
     if not items:
         return {}
     channel_id = items[0].get("snippet", {}).get("channelId", "")
     if not channel_id:
         return {}
-    channel_res = youtube.channels().list(part="snippet,contentDetails", id=channel_id).execute()
+    channel_res = _execute_req(lambda: client_pool.client.channels().list(part="snippet,contentDetails", id=channel_id))
     channel_items = channel_res.get("items", [])
     return channel_items[0] if channel_items else {}
 
 
-def find_context_video_ids(youtube, uploads_playlist_id: str, target_video_id: str, stop_event=None, pause_event=None, max_pages: int = 200, context_size: int = CONTEXT_SIZE) -> tuple[list[str], int, list[str]]:
+def find_context_video_ids(client_pool, uploads_playlist_id: str, target_video_id: str, stop_event=None, pause_event=None, max_pages: int = 200, context_size: int = CONTEXT_SIZE, log_callback=None) -> tuple[list[str], int, list[str]]:
     """分页拉取频道上传播放列表，定位目标视频，并过滤出前后各 N 个视频的 ID。
 
     Args:
@@ -174,12 +193,22 @@ def find_context_video_ids(youtube, uploads_playlist_id: str, target_video_id: s
             return [], -1, video_ids
         
         # 批量获取播放列表内容项
-        res = youtube.playlistItems().list(
-            part="contentDetails",
-            playlistId=uploads_playlist_id,
-            maxResults=50,
-            pageToken=next_page_token,
-        ).execute()
+        while True:
+            try:
+                res = execute_with_retry(
+                    client_pool.client.playlistItems().list(
+                        part="contentDetails",
+                        playlistId=uploads_playlist_id,
+                        maxResults=50,
+                        pageToken=next_page_token,
+                    ), log_callback
+                )
+                break
+            except HttpError as e:
+                if e.resp.status in [403, 429]:
+                    if client_pool.next_client():
+                        continue
+                raise e
 
         for item in res.get("items", []):
             vid = item.get("contentDetails", {}).get("videoId", "")
@@ -206,7 +235,7 @@ def find_context_video_ids(youtube, uploads_playlist_id: str, target_video_id: s
     return [video_ids[idx] for idx in selected_indices], target_index, video_ids
 
 
-def fetch_video_details(youtube, video_ids: list[str], stop_event=None, pause_event=None) -> dict[str, dict]:
+def fetch_video_details(client_pool, video_ids: list[str], stop_event=None, pause_event=None, log_callback=None) -> dict[str, dict]:
     """批量获取指定视频列表的精细元数据。"""
     details: dict[str, dict] = {}
     from src.platforms.youtube.keyword import format_youtube_duration as kw_format
@@ -219,11 +248,21 @@ def fetch_video_details(youtube, video_ids: list[str], stop_event=None, pause_ev
         chunk = video_ids[start:start + 50]
         if not chunk:
             continue
-        res = youtube.videos().list(
-            part="snippet,statistics,contentDetails",
-            id=",".join(chunk),
-            maxResults=50,
-        ).execute()
+        while True:
+            try:
+                res = execute_with_retry(
+                    client_pool.client.videos().list(
+                        part="snippet,statistics,contentDetails",
+                        id=",".join(chunk),
+                        maxResults=50,
+                    ), log_callback
+                )
+                break
+            except HttpError as e:
+                if e.resp.status in [403, 429]:
+                    if client_pool.next_client():
+                        continue
+                raise e
         for item in res.get("items", []):
             stats = item.get("statistics", {})
             snippet = item.get("snippet", {})
@@ -268,7 +307,7 @@ OUTPUT_FIELDS = [
 ]
 
 
-def build_pair_rows(youtube, target_video_url: str, profile_url: str, channel_cache: dict[str, dict], log_callback, stop_event=None, pause_event=None, context_size: int = CONTEXT_SIZE, max_upload_pages: int = 200) -> list[dict]:
+def build_pair_rows(client_pool, target_video_url: str, profile_url: str, channel_cache: dict[str, dict], log_callback, stop_event=None, pause_event=None, context_size: int = CONTEXT_SIZE, max_upload_pages: int = 200) -> list[dict]:
     """针对单对“目标视频 + 博主主页”解析其前后关联的上下文数据行。"""
     rows: list[dict] = []
     target_video_id = parse_video_id(target_video_url)
@@ -279,13 +318,13 @@ def build_pair_rows(youtube, target_video_url: str, profile_url: str, channel_ca
     # 通过内存字典缓存已解析的博主频道数据，减少重复 API 配额消耗
     channel = channel_cache.get(profile_url)
     if channel is None:
-        channel = resolve_channel(youtube, profile_url)
+        channel = resolve_channel(client_pool, profile_url, log_callback)
         channel_cache[profile_url] = channel
 
     uploads_id = channel.get("contentDetails", {}).get("relatedPlaylists", {}).get("uploads", "")
     if not uploads_id:
         log_line(log_callback, "  博主主页解析失败，改用目标视频反查频道上传列表。")
-        channel = resolve_channel_from_video(youtube, target_video_id)
+        channel = resolve_channel_from_video(client_pool, target_video_id, log_callback)
         if channel:
             channel_cache[profile_url] = channel
         uploads_id = channel.get("contentDetails", {}).get("relatedPlaylists", {}).get("uploads", "")
@@ -293,7 +332,7 @@ def build_pair_rows(youtube, target_video_url: str, profile_url: str, channel_ca
             log_line(log_callback, "  跳过：无法解析上传列表。请检查博主主页链接是否为 YouTube 频道主页。")
             return rows
 
-    selected_ids, target_index, timeline_ids = find_context_video_ids(youtube, uploads_id, target_video_id, stop_event, pause_event, max_upload_pages, context_size)
+    selected_ids, target_index, timeline_ids = find_context_video_ids(client_pool, uploads_id, target_video_id, stop_event, pause_event, max_upload_pages, context_size, log_callback)
     if should_stop(stop_event):
         return rows
     if target_index < 0:
@@ -301,7 +340,7 @@ def build_pair_rows(youtube, target_video_url: str, profile_url: str, channel_ca
         return rows
 
     # 批量解析抓取的上下文视频 ID 指标
-    details = fetch_video_details(youtube, selected_ids, stop_event, pause_event)
+    details = fetch_video_details(client_pool, selected_ids, stop_event, pause_event, log_callback)
     from src.platforms.youtube.comments import format_youtube_datetime
     for vid in selected_ids:
         current_index = timeline_ids.index(vid)
@@ -333,7 +372,7 @@ def build_pair_rows(youtube, target_video_url: str, profile_url: str, channel_ca
     return rows
 
 
-def run_youtube_paired_context_spider(api_key: str, txt_path: str, log_callback, finish_callback, stop_event=None, config=None, pause_event=None):
+def run_youtube_paired_context_spider(api_keys: list[str], txt_path: str, log_callback, finish_callback, stop_event=None, config=None, pause_event=None):
     """运行 YouTube 关联上下文视频挖掘主驱动函数。
 
     Args:
@@ -361,7 +400,7 @@ def run_youtube_paired_context_spider(api_key: str, txt_path: str, log_callback,
             return
         output_path = build_output_path("youtube", f"youtube_context_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
         writer = XlsxRowWriter(output_path, OUTPUT_FIELDS)
-        youtube = build("youtube", "v3", developerKey=api_key)
+        client_pool = YouTubeClientPool(api_keys)
         channel_cache: dict[str, dict] = {}
         written_count = 0
         for index, (target_video_url, profile_url) in enumerate(pairs, 1):
@@ -372,7 +411,7 @@ def run_youtube_paired_context_spider(api_key: str, txt_path: str, log_callback,
                 break
             log_line(log_callback, f"[{index}/{len(pairs)}] 定位 YouTube 目标视频: {target_video_url}")
             try:
-                rows = build_pair_rows(youtube, target_video_url, profile_url, channel_cache, log_callback, stop_event, pause_event, context_size, max_upload_pages)
+                rows = build_pair_rows(client_pool, target_video_url, profile_url, channel_cache, log_callback, stop_event, pause_event, context_size, max_upload_pages)
                 if rows:
                     writer.writerows(sanitize_csv_rows(rows))
                     written_count += len(rows)

@@ -10,7 +10,8 @@ from __future__ import annotations
 import time
 from urllib.parse import urlparse
 
-from googleapiclient.discovery import build
+from src.platforms.youtube.keyword import YouTubeClientPool, execute_with_retry
+from googleapiclient.errors import HttpError
 
 from src.core import XlsxRowWriter, build_output_path, log_error, log_line, log_warn, sanitize_csv_row, should_stop, wait_if_paused
 
@@ -67,14 +68,14 @@ def parse_channel_url(url: str) -> tuple[str, str]:
         return "search", parts[1]
     return "search", first.lstrip("@")
 
-def resolve_channel(youtube, profile_url: str) -> dict:
+def resolve_channel(client_pool, profile_url: str) -> dict:
     """调用 YouTube API 解析并获取频道的原始元数据。
 
     根据 URL 特征匹配调用相应的 API 参数（id / forUsername / forHandle）；
-    若非标准结构则采用搜索 API（youtube.search）进行模糊检索定位。
+    若非标准结构则采用搜索 API 进行模糊检索定位。
 
     Args:
-        youtube: 已初始化的 Google API 客户端实例。
+        client_pool: YouTubeClientPool 实例。
         profile_url: 频道的 URL。
 
     Returns:
@@ -84,27 +85,37 @@ def resolve_channel(youtube, profile_url: str) -> dict:
     if not hint_value:
         return {}
 
+    def _execute_req(build_req):
+        while True:
+            try:
+                return execute_with_retry(build_req(), None)
+            except HttpError as e:
+                if e.resp.status in [403, 429]:
+                    if client_pool.next_client():
+                        continue
+                raise e
+
     if hint_type == "id":
-        response = youtube.channels().list(part="snippet,statistics", id=hint_value).execute()
+        response = _execute_req(lambda: client_pool.client.channels().list(part="snippet,statistics", id=hint_value))
     elif hint_type == "username":
-        response = youtube.channels().list(part="snippet,statistics", forUsername=hint_value).execute()
+        response = _execute_req(lambda: client_pool.client.channels().list(part="snippet,statistics", forUsername=hint_value))
     elif hint_type == "handle":
-        response = youtube.channels().list(part="snippet,statistics", forHandle=hint_value).execute()
+        response = _execute_req(lambda: client_pool.client.channels().list(part="snippet,statistics", forHandle=hint_value))
     else:
         # 针对自定义别名等非标准路径进行频道搜索
-        search_response = youtube.search().list(
+        search_response = _execute_req(lambda: client_pool.client.search().list(
             part="id",
             q=hint_value,
             type="channel",
             maxResults=1,
-        ).execute()
+        ))
         items = search_response.get("items", [])
         if not items:
             return {}
         channel_id = items[0].get("id", {}).get("channelId", "")
         if not channel_id:
             return {}
-        response = youtube.channels().list(part="snippet,statistics", id=channel_id).execute()
+        response = _execute_req(lambda: client_pool.client.channels().list(part="snippet,statistics", id=channel_id))
 
     items = response.get("items", [])
     return items[0] if items else {}
@@ -131,7 +142,7 @@ def channel_row(profile_url: str, item: dict) -> dict:
         "作者简介": description,
     }
 
-def run_channel_spider(api_key, txt_file_path, log_callback, finish_callback, stop_event=None, config=None, pause_event=None):
+def run_channel_spider(api_keys: list[str], txt_file_path, log_callback, finish_callback, stop_event=None, config=None, pause_event=None):
     """运行 YouTube 频道/博主元数据获取任务的驱动入口函数。
 
     Args:
@@ -154,7 +165,7 @@ def run_channel_spider(api_key, txt_file_path, log_callback, finish_callback, st
             return
 
         # 实例化 YouTube V3 API 服务客户端
-        youtube = build("youtube", "v3", developerKey=api_key)
+        client_pool = YouTubeClientPool(api_keys)
         output_path = build_output_path("youtube", f"youtube_profiles_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
 
         writer = XlsxRowWriter(output_path, CSV_FIELDS)
@@ -166,7 +177,7 @@ def run_channel_spider(api_key, txt_file_path, log_callback, finish_callback, st
                 break
             log_line(log_callback, f"[{index}/{len(profile_urls)}] 解析作者：{profile_url}")
             try:
-                item = resolve_channel(youtube, profile_url)
+                item = resolve_channel(client_pool, profile_url)
                 if not item:
                     log_warn(log_callback, "  未找到作者信息")
                     writer.writerow(

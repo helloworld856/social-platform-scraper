@@ -1,8 +1,9 @@
 {
   "max_results": 5000,
-  "youtube_search_method": "浏览器优先（省配额）",
+  "youtube_search_method": "仅API（消耗配额）",
   "youtube_search_batch_size": 50,
   "youtube_date_chunk_days": 2,
+  "youtube_date_chunk_hours": 2,
   "youtube_video_batch_size": 50,
   "youtube_browser_scroll_px": 2500,
   "youtube_browser_scroll_delay": 1.0,

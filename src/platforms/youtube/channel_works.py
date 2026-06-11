@@ -16,6 +16,8 @@ from urllib.parse import urlparse
 # 尝试导入 Google API Client，如果环境未安装则标记为 None（后续降级到浏览器提取）
 try:
     from googleapiclient.discovery import build
+    from src.platforms.youtube.keyword import YouTubeClientPool, execute_with_retry
+    from googleapiclient.errors import HttpError
 except ModuleNotFoundError:
     build = None
 
@@ -184,7 +186,7 @@ def chunked(values: list[str], size: int) -> list[list[str]]:
 
 
 
-def fetch_channel_item(youtube, channel_url: str) -> dict:
+def fetch_channel_item(client_pool, channel_url: str) -> dict:
     """
     使用 YouTube Data API v3 获取频道的详情信息。
     根据 parse_channel_url 返回的定位类型，依次调用 channels().list，
@@ -195,26 +197,37 @@ def fetch_channel_item(youtube, channel_url: str) -> dict:
     if not hint_value:
         return {}
 
+    def _execute_req(build_req):
+        while True:
+            try:
+                return execute_with_retry(build_req(), None)
+            except HttpError as e:
+                if e.resp.status in [403, 429]:
+                    if client_pool.next_client():
+                        continue
+                raise e
+
     if hint_type == "id":
-        response = youtube.channels().list(part="snippet,contentDetails", id=hint_value).execute()
+        response = _execute_req(lambda: client_pool.client.channels().list(part="snippet,contentDetails", id=hint_value))
     elif hint_type == "username":
-        response = youtube.channels().list(part="snippet,contentDetails", forUsername=hint_value).execute()
+        response = _execute_req(lambda: client_pool.client.channels().list(part="snippet,contentDetails", forUsername=hint_value))
     elif hint_type == "handle":
-        response = youtube.channels().list(part="snippet,contentDetails", forHandle=hint_value).execute()
+        response = _execute_req(lambda: client_pool.client.channels().list(part="snippet,contentDetails", forHandle=hint_value))
     else:
         # 自定义名或未定结构采用搜索接口进行模糊查找
-        search_response = youtube.search().list(part="id", q=hint_value, type="channel", maxResults=1).execute()
+        search_response = _execute_req(lambda: client_pool.client.search().list(part="id", q=hint_value, type="channel", maxResults=1))
         items = search_response.get("items", [])
         channel_id = items[0].get("id", {}).get("channelId", "") if items else ""
         if not channel_id:
             return {}
-        response = youtube.channels().list(part="snippet,contentDetails", id=channel_id).execute()
+        response = _execute_req(lambda: client_pool.client.channels().list(part="snippet,contentDetails", id=channel_id))
 
     items = response.get("items", [])
     return items[0] if items else {}
 
 
-def collect_upload_video_ids(youtube, uploads_playlist_id: str, max_video_items: int, limit_time_bool: bool, start_dt, end_dt, log_callback, stop_event=None, pause_event=None) -> list[str]:
+
+def collect_upload_video_ids(client_pool, uploads_playlist_id: str, max_video_items: int, limit_time_bool: bool, start_dt, end_dt, log_callback, stop_event=None, pause_event=None) -> list[str]:
     """
     从指定的 uploads 播放列表中分页拉取所有视频的 videoId。
     - limit_time_bool: 为真时，若视频发布日期早于 start_dt，自动触发 date 拦截，停止向后加载更多历史页面；若晚于 end_dt，则跳过此项视频继续往下。
@@ -230,12 +243,22 @@ def collect_upload_video_ids(youtube, uploads_playlist_id: str, max_video_items:
             break
         if wait_if_paused(pause_event, stop_event):
             break
-        response = youtube.playlistItems().list(
-            part="contentDetails",
-            playlistId=uploads_playlist_id,
-            maxResults=min(50, max_video_items - len(video_ids)),
-            pageToken=page_token,
-        ).execute()
+        while True:
+            try:
+                response = execute_with_retry(
+                    client_pool.client.playlistItems().list(
+                        part="contentDetails",
+                        playlistId=uploads_playlist_id,
+                        maxResults=min(50, max_video_items - len(video_ids)),
+                        pageToken=page_token,
+                    ), log_callback
+                )
+                break
+            except HttpError as e:
+                if e.resp.status in [403, 429]:
+                    if client_pool.next_client():
+                        continue
+                raise e
         
         stopped_by_date = False
         for item in response.get("items", []):
@@ -270,7 +293,7 @@ def collect_upload_video_ids(youtube, uploads_playlist_id: str, max_video_items:
     return video_ids
 
 
-def video_rows_from_api(youtube, video_ids: list[str], stop_event=None, pause_event=None) -> list[dict[str, str]]:
+def video_rows_from_api(client_pool, video_ids: list[str], stop_event=None, pause_event=None, log_callback=None) -> list[dict[str, str]]:
     """
     根据视频 ID 列表，分页批量抓取视频详情元数据。
     调用 videos().list 获取 snippet (标题、描述、发布时间、频道)、statistics (播放、点赞、评论数) 和 contentDetails (时长)。
@@ -303,7 +326,18 @@ def video_rows_from_api(youtube, video_ids: list[str], stop_event=None, pause_ev
             break
         if wait_if_paused(pause_event, stop_event):
             break
-        response = youtube.videos().list(part="snippet,statistics,contentDetails", id=",".join(batch), maxResults=50).execute()
+        while True:
+            try:
+                response = execute_with_retry(
+                    client_pool.client.videos().list(part="snippet,statistics,contentDetails", id=",".join(batch), maxResults=50),
+                    log_callback
+                )
+                break
+            except HttpError as e:
+                if e.resp.status in [403, 429]:
+                    if client_pool.next_client():
+                        continue
+                raise e
         for item in response.get("items", []):
             if should_stop(stop_event):
                 break
@@ -345,12 +379,12 @@ def video_rows_from_api(youtube, video_ids: list[str], stop_event=None, pause_ev
     return rows
 
 
-def collect_video_works_with_api(youtube, channel_url: str, max_video_items: int, limit_time_bool: bool, start_dt, end_dt, log_callback, stop_event=None, pause_event=None) -> list[dict[str, str]]:
+def collect_video_works_with_api(client_pool, channel_url: str, max_video_items: int, limit_time_bool: bool, start_dt, end_dt, log_callback, stop_event=None, pause_event=None) -> list[dict[str, str]]:
     """
     完整的 API 模式博主视频采集。
     获取频道的 uploads 播放列表 -> 获取列表下符合时间条件的视频 ID -> 批量拉取视频统计详情。
     """
-    channel_item = fetch_channel_item(youtube, channel_url)
+    channel_item = fetch_channel_item(client_pool, channel_url)
     if not channel_item:
         log_warn(log_callback, "  API 未找到频道信息。")
         return []
@@ -367,8 +401,8 @@ def collect_video_works_with_api(youtube, channel_url: str, max_video_items: int
     title = channel_item.get("snippet", {}).get("title", "")
     if title:
         log_line(log_callback, f"  API 识别频道：{title}")
-    video_ids = collect_upload_video_ids(youtube, uploads_playlist_id, max_video_items, limit_time_bool, start_dt, end_dt, log_callback, stop_event, pause_event)
-    rows = video_rows_from_api(youtube, video_ids, stop_event, pause_event)
+    video_ids = collect_upload_video_ids(client_pool, uploads_playlist_id, max_video_items, limit_time_bool, start_dt, end_dt, log_callback, stop_event, pause_event)
+    rows = video_rows_from_api(client_pool, video_ids, stop_event, pause_event, log_callback)
     log_line(log_callback, f"  API 视频类作品完成：{len(rows)} 条。")
     return rows
 
@@ -560,6 +594,100 @@ def collect_video_tab_with_playwright(page, channel_url: str, tab: str, max_scro
 
     return works
 
+
+def _extract_video_id_from_href(href: str) -> str:
+    """
+    从 YouTube 链接中提取 video ID。
+    支持 watch?v= 和 /shorts/ 两种格式。
+    """
+    match = re.search(r'(?:watch\?v=|shorts/)([a-zA-Z0-9_-]{11})', href or '')
+    return match.group(1) if match else ''
+
+
+def verify_video_types_with_playwright(
+    page, channel_url: str, video_ids: list[str], max_scrolls: int,
+    log_callback, stop_event=None, pause_event=None,
+    page_timeout=None, scroll_delay=None, no_new_limit=None, scroll_px=None,
+    initial_load_delay=None,
+) -> tuple[set[str], set[str]]:
+    """
+    使用 Playwright 分别访问频道的 Videos 和 Shorts 页面，通过滚动收集视频 ID，
+    以此准确判断每个视频属于长视频（Long）还是短视频（Short）。
+
+    若连续 no_new_limit 次滚动无新链接则自动停止。
+
+    Returns:
+        (videos_page_ids, shorts_page_ids) 两个集合。
+    """
+    if page_timeout is None:
+        page_timeout = PAGE_LOAD_TIMEOUT
+    if scroll_delay is None:
+        scroll_delay = POST_SCROLL_DELAY
+    if no_new_limit is None:
+        no_new_limit = NO_NEW_POST_LIMIT
+    if scroll_px is None:
+        scroll_px = POST_SCROLL_PX
+    if initial_load_delay is None:
+        initial_load_delay = INITIAL_LOAD_DELAY
+
+    def scroll_and_collect(tab: str, link_selector: str, label: str) -> set[str]:
+        """滚动指定标签页并收集视频 ID。"""
+        collected: set[str] = set()
+        no_new_count = 0
+        url = tab_url(channel_url, tab)
+        log_line(log_callback, f"  验证 {label} 页面：{url}")
+        try:
+            page.goto(url, wait_until='domcontentloaded', timeout=page_timeout)
+            if interruptible_sleep(initial_load_delay, stop_event):
+                return collected
+            wait_selector = link_selector
+            try:
+                page.wait_for_selector(wait_selector, timeout=12000)
+            except PlaywrightTimeoutError:
+                log_line(log_callback, f"  未等到 {label} 链接，继续滚动尝试。")
+
+            for _ in range(max_scrolls):
+                if should_stop(stop_event):
+                    break
+                if wait_if_paused(pause_event, stop_event):
+                    break
+                before_count = len(collected)
+                anchors = page.query_selector_all(link_selector)
+                for anchor in anchors:
+                    href = anchor.get_attribute('href') or ''
+                    vid = _extract_video_id_from_href(href)
+                    if vid:
+                        collected.add(vid)
+                new_found = len(collected) - before_count
+                if new_found == 0:
+                    no_new_count += 1
+                    if no_new_count >= no_new_limit:
+                        log_line(log_callback, f"  {label} 页面连续 {no_new_limit} 次无新链接，停止滚动。")
+                        break
+                else:
+                    no_new_count = 0
+                page.evaluate(f'window.scrollBy(0, {scroll_px})')
+                if interruptible_sleep(scroll_delay, stop_event):
+                    break
+        except Exception as exc:
+            log_warn(log_callback, f"  {label} 页面验证出错：{exc}")
+        return collected
+
+    target_ids = set(video_ids)
+
+    videos_page_ids = scroll_and_collect(
+        'videos', 'a[href*="watch?v="]', 'Videos',
+    )
+    shorts_page_ids = scroll_and_collect(
+        'shorts', 'a[href*="/shorts/"]', 'Shorts',
+    )
+
+    # 只保留目标视频 ID 中实际出现在对应页面的
+    videos_page_ids = videos_page_ids & target_ids
+    shorts_page_ids = shorts_page_ids & target_ids
+
+    log_line(log_callback, f"  Playwright 验证完成：Videos {len(videos_page_ids)} 条，Shorts {len(shorts_page_ids)} 条。")
+    return videos_page_ids, shorts_page_ids
 
 
 def extract_visible_posts(page) -> list[dict[str, str]]:
@@ -797,7 +925,7 @@ def row_from_work(index: int, work: dict[str, str], channel_url: str = "") -> di
 
 
 def run_youtube_channel_works_spider(
-    api_key: str,
+    api_keys: list[str],
     channel_urls_text: str,
     collect_target: str = "全部",
     max_video_items: int = DEFAULT_MAX_VIDEO_ITEMS,
@@ -833,6 +961,8 @@ def run_youtube_channel_works_spider(
     scroll_px_val = int(config.get("scroll_px", POST_SCROLL_PX))
     max_post_scrolls = int(config.get("max_post_scrolls", max_post_scrolls))
     initial_load_delay_val = float(config.get("initial_load_delay", INITIAL_LOAD_DELAY))
+    verify_video_type_bool = config.get("verify_video_type", "是") == "是"
+    verify_max_scrolls = int(config.get("verify_max_scrolls", 20))
 
     completed_path = None
     browser = None
@@ -844,12 +974,12 @@ def run_youtube_channel_works_spider(
             log_line(log_callback, "未读取到有效的 YouTube 作者主页链接。")
             return
 
-        youtube = None
+        client_pool = None
         if build is None:
             log_line(log_callback, "缺少依赖：google-api-python-client。Videos/Shorts 将尝试浏览器 fallback。")
         else:
             try:
-                youtube = build("youtube", "v3", developerKey=api_key, cache_discovery=False)
+                client_pool = YouTubeClientPool(api_keys)
             except Exception as exc:
                 log_warn(log_callback, f"YouTube API 初始化失败，Videos/Shorts 将尝试浏览器 fallback：{exc}")
 
@@ -892,17 +1022,50 @@ def run_youtube_channel_works_spider(
             do_posts = collect_target in ("全部", "仅帖子 (Posts)")
 
             if do_videos:
-                if youtube is None:
+                if client_pool is None:
                     should_fallback_video_tabs = True
                     log_line(log_callback, "  YouTube API 不可用，尝试用浏览器读取 Videos/Shorts。")
                 else:
                     try:
-                        video_works = collect_video_works_with_api(youtube, channel_url, max_video_items, limit_time_bool, start_dt, end_dt, log_callback, stop_event, pause_event)
+                        video_works = collect_video_works_with_api(client_pool, channel_url, max_video_items, limit_time_bool, start_dt, end_dt, log_callback, stop_event, pause_event)
                         if not video_works:
                             should_fallback_video_tabs = True
                             log_line(log_callback, "  API 未返回 Videos/Shorts，尝试用浏览器读取。")
                         else:
                             works.extend(video_works)
+                            # 使用 Playwright 验证视频类型（长视频 vs Shorts），修正 API 仅按时长判断的不准确之处
+                            if verify_video_type_bool and sync_playwright is not None and not should_stop(stop_event):
+                                try:
+                                    active_page = ensure_page()
+                                    if active_page is not None:
+                                        log_line(log_callback, "  使用 Playwright 验证视频类型（长视频/Shorts）...")
+                                        api_video_ids = [w.get('link', '') for w in video_works]
+                                        parsed_ids = []
+                                        for link in api_video_ids:
+                                            if 'watch?v=' in link:
+                                                parsed_ids.append(link.split('v=')[1].split('&')[0])
+                                            elif 'shorts/' in link:
+                                                parsed_ids.append(link.split('shorts/')[1].split('?')[0])
+                                        if parsed_ids:
+                                            vid_set, short_set = verify_video_types_with_playwright(
+                                                active_page, channel_url, parsed_ids, verify_max_scrolls,
+                                                log_callback, stop_event, pause_event,
+                                                page_timeout, scroll_interval_val, no_new_limit, scroll_px_val, initial_load_delay_val,
+                                            )
+                                            for w in video_works:
+                                                wlink = w.get('link', '')
+                                                w_id = ''
+                                                if 'watch?v=' in wlink:
+                                                    w_id = wlink.split('v=')[1].split('&')[0]
+                                                elif 'shorts/' in wlink:
+                                                    w_id = wlink.split('shorts/')[1].split('?')[0]
+                                                if w_id in short_set:
+                                                    w['video_type'] = 'Shorts'
+                                                elif w_id in vid_set:
+                                                    w['video_type'] = '普通视频'
+                                                # 若两个页面都没找到，保持 API 原始判断
+                                except Exception as exc:
+                                    log_warn(log_callback, f"  Playwright 视频类型验证失败（保留 API 判断）：{exc}")
                     except Exception as exc:
                         should_fallback_video_tabs = True
                         log_warn(log_callback, f"  YouTube API 读取失败，尝试用浏览器读取 Videos/Shorts：{exc}")
@@ -957,7 +1120,7 @@ def run_youtube_channel_works_spider(
                     break
                 rows_buffer.append(row_from_work(serial_number, work, channel_url))
 
-                if get_comments_bool and youtube is not None:
+                if get_comments_bool and client_pool is not None:
                     try:
                         work_link = work.get("link", "")
                         video_id = ""
@@ -967,7 +1130,7 @@ def run_youtube_channel_works_spider(
                             video_id = work_link.split("shorts/")[1].split("?")[0]
 
                         if video_id:
-                            comments = fetch_top_level_comments(youtube, video_id, max_comments, log_callback, stop_event, pause_event)
+                            comments = fetch_top_level_comments(client_pool, video_id, max_comments, log_callback, stop_event, pause_event)
                             comments.sort(key=lambda item: item["like_count"], reverse=True)
                             for comment in comments[:max_comments]:
                                 comment_row = {

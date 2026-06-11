@@ -1,7 +1,5 @@
 """Run X keyword scraper end-to-end and verify output has data."""
 import sys
-import io
-sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
 from pathlib import Path
 project_root = Path(__file__).parent.parent

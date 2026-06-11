@@ -187,6 +187,11 @@ class XProfileTweetsWindow(SimpleToolWindow):
 
     def tool_config_params(self):
         return [
+            ConfigParam("max_scrolls", "最大滚动次数", kind="int", default=300, minimum=10, maximum=2000),
+            ConfigParam("truncate_threshold", "帖文截断阈值", kind="int", default=1000, minimum=100, maximum=10000,
+                        tooltip="帖文数超过此值时，先截断采集前 N 条，再用关键词补充采集。"),
+            ConfigParam("consecutive_date_limit", "超时原创帖停止阈值", kind="int", default=3, minimum=1, maximum=20,
+                        tooltip="连续几条原创帖早于开始日期时停止滚动。转推不受此限制。"),
             ConfigParam("initial_load_delay", "初始加载等待(秒)", kind="float", default=2.0, minimum=0.5, maximum=10.0, step=0.1, decimals=1),
         ]
 
@@ -220,7 +225,7 @@ class XProfileTweetsWindow(SimpleToolWindow):
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
         from src.platforms.x_twitter.profile_tweets import run_x_profile_tweets_spider
 
-        config = {k: v for k, v in values.items() if k in ("page_load_timeout", "scroll_interval", "no_new_scroll_limit", "max_scrolls", "save_batch_size", "cooldown_min", "cooldown_max", "scroll_px", "initial_load_delay")}
+        config = {k: v for k, v in values.items() if k in ("page_load_timeout", "scroll_interval", "no_new_scroll_limit", "max_scrolls", "save_batch_size", "cooldown_min", "cooldown_max", "scroll_px", "initial_load_delay", "truncate_threshold", "consecutive_date_limit", "guarantee_min_scrolls")}
         return run_x_profile_tweets_spider(
             values["profile_urls"],
             values["keywords"],
@@ -230,7 +235,7 @@ class XProfileTweetsWindow(SimpleToolWindow):
             values["get_comments"],
             int(values["max_comments"]),
             DEFAULT_X_CDP_URL,
-            int(values.get("max_scrolls", 200)),
+            int(values.get("max_scrolls", 300)),
             log_callback,
             finish_callback,
             stop_event,

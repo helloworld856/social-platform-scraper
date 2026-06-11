@@ -93,7 +93,7 @@ def extract_profile_row(page, profile_url: str, page_load_timeout: int = 35000, 
     如果账号不存在或已注销，进行优雅的错误处理并返回标识字段。
     """
     page.goto(profile_url, wait_until="domcontentloaded", timeout=page_load_timeout)
-    time.sleep(random.uniform(1.4, 2.2))
+    time.sleep(random.uniform(3.4, 6.2))
 
     try:
         # 检测是否弹出人机验证页面，若有则睡眠指定秒数供人工操作
