@@ -243,17 +243,20 @@ def extract_visible_profile_tweets(page, username: str) -> list[dict[str, str]]:
                 return '';
             };
 
-            // Phase 1: collect matching articles
+            // Phase 1: collect all articles on profile timeline
             const articles = [];
             for (const article of document.querySelectorAll('article[data-testid="tweet"], article')) {
                 try {
                     if (isPromoted(article)) continue;
                     const info = ownStatus(article);
-                    if (!info.postId || normalize(info.handle) !== username) continue;
+                    if (!info.postId) continue;
 
                     const socialEl = article.querySelector('[data-testid="socialContext"]');
                     const socialText = socialEl ? (socialEl.innerText || socialEl.textContent || '').trim().toLowerCase() : '';
                     const isRepost = /repost|reposted|retweet|retweeted|republished|转推|转发|リポスト|リツイート|再投稿|已轉推/.test(socialText);
+
+                    // 在主页时间线上：非转推帖子必须是博主本人的，转推帖子可以是任意作者的
+                    if (!isRepost && normalize(info.handle) !== username) continue;
 
                     const timeEl = article.querySelector('time');
                     const publishedAt = timeEl ? (timeEl.getAttribute('datetime') || '') : '';
