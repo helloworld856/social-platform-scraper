@@ -423,40 +423,31 @@ def collect_profile_tweets(
             if limit_time_bool:
                 pub_time = normalized_tweet.get("published_at")
                 in_range = False
+                skip_collect = False
                 if pub_time:
                     try:
                         pub_dt = datetime.strptime(pub_time, "%Y-%m-%d %H:%M:%S")
                         in_range = start_dt.date() <= pub_dt.date() <= end_dt.date()
-                        if pub_dt.date() < start_dt.date() and not is_repost:
-                            # 原创帖早于开始日期，跳过不采集
-                            date_window.append(False)
-                            if len(date_window) > date_window_size:
-                                date_window.pop(0)
-                            if len(date_window) >= date_window_size and not any(date_window):
-                                stopped_by_date = True
-                                break
-                            continue
-                        if pub_dt.date() > end_dt.date():
-                            # 晚于结束日期，跳过
-                            date_window.append(False)
-                            if len(date_window) > date_window_size:
-                                date_window.pop(0)
-                            if len(date_window) >= date_window_size and not any(date_window):
-                                stopped_by_date = True
-                                break
-                            continue
+                        if not in_range and not is_repost:
+                            skip_collect = True  # 原创帖不在范围内，跳过采集
                     except (ValueError, TypeError):
                         pass
-                # 转推不受时间限制，始终计入窗口
-                if is_repost:
-                    date_window.append(True)  # 转推视为"继续滚动"的信号
                 else:
+                    # 无法解析日期的原创帖，视为范围外
+                    if not is_repost:
+                        skip_collect = True
+
+                # 所有非转推帖子都进窗口（转推不进窗口，它们不限于时间范围）
+                if not is_repost:
                     date_window.append(in_range)
-                if len(date_window) > date_window_size:
-                    date_window.pop(0)
-                if len(date_window) >= date_window_size and not any(date_window):
-                    stopped_by_date = True
-                    break
+                    if len(date_window) > date_window_size:
+                        date_window.pop(0)
+                    if len(date_window) >= date_window_size and not any(date_window):
+                        stopped_by_date = True
+                        break
+
+                if skip_collect:
+                    continue
                     
             normalized_tweet["profile_url"] = profile_url
             tweets.append(normalized_tweet)
@@ -521,12 +512,58 @@ def collect_profile_tweets(
             dom_changed_streak = 0
         elif page_height_changed and prev_page_height > 0:
             # 页面高度变化说明有新内容正在加载，但本次尚未提取到新帖文
-            # 不算入连续无新增，给予额外等待
-            log_line(log_callback, f"  滚动 {scroll_index + 1}/{max_scrolls}：页面有新内容加载中（高度 {prev_page_height}→{current_page_height}），暂无新增，继续等待...")
-            # 不重置 no_new_count，但也不递增
-            # 额外等待让 React 有时间渲染
-            interruptible_sleep(1.5, stop_event)
-            if dom_changed_streak >= 5:
+            # 不算入连续无新增，给予额外等待后重新提取
+            log_line(log_callback, f"  滚动 {scroll_index + 1}/{max_scrolls}：页面有新内容加载中（高度 {prev_page_height}→{current_page_height}），等待渲染后重新提取...")
+            interruptible_sleep(3.0, stop_event)
+            # 重新提取一次，React 渲染可能需要更多时间
+            retry_tweets = extract_visible_profile_tweets(page, username)
+            retry_added = 0
+            for tweet in retry_tweets:
+                post_id = str(tweet.get("postId") or "")
+                if not post_id or post_id in seen_ids:
+                    continue
+                seen_ids.add(post_id)
+                normalized_tweet = normalize_tweet(tweet)
+                is_repost = tweet.get("isRepost", False)
+                if limit_time_bool:
+                    pub_time = normalized_tweet.get("published_at")
+                    in_range = False
+                    skip_collect = False
+                    if pub_time:
+                        try:
+                            pub_dt = datetime.strptime(pub_time, "%Y-%m-%d %H:%M:%S")
+                            in_range = start_dt.date() <= pub_dt.date() <= end_dt.date()
+                            if not in_range and not is_repost:
+                                skip_collect = True
+                        except (ValueError, TypeError):
+                            pass
+                    else:
+                        if not is_repost:
+                            skip_collect = True
+                    if not is_repost:
+                        date_window.append(in_range)
+                        if len(date_window) > date_window_size:
+                            date_window.pop(0)
+                        if len(date_window) >= date_window_size and not any(date_window):
+                            stopped_by_date = True
+                            break
+                    if skip_collect:
+                        continue
+                normalized_tweet["profile_url"] = profile_url
+                tweets.append(normalized_tweet)
+                retry_added += 1
+                if writer:
+                    row_offset += 1
+                    row = row_from_tweet(row_offset, normalized_tweet)
+                    pending_rows.append(row)
+            if stopped_by_date:
+                log_line(log_callback, f"  最近 {date_window_size} 条帖子均不在时间范围内，停止滚动。")
+                break
+            if retry_added:
+                log_line(log_callback, f"  重新提取成功：新增 {retry_added} 条，累计 {len(tweets)} 条。")
+                no_new_count = 0
+                dom_changed_streak = 0
+            elif dom_changed_streak >= 5:
                 log_warn(log_callback, f"  注意：页面连续 {dom_changed_streak} 次滚动均有高度变化但未提取到新帖文，可能存在渲染异常。")
         else:
             no_new_count += 1
