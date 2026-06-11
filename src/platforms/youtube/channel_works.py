@@ -27,9 +27,60 @@ except ModuleNotFoundError:
     PlaywrightTimeoutError = TimeoutError
     sync_playwright = None
 
+import re as _re
+from datetime import datetime, timedelta, timezone
+
 from src.core import DEFAULT_X_CDP_URL, MultiSheetXlsxWriter, XlsxRowWriter, build_output_path, connect_existing_chromium, interruptible_sleep, log_error, log_line, log_warn, sanitize_csv_cell, should_stop, wait_if_paused
 from src.platforms.youtube.comments import fetch_top_level_comments
 from src.platforms.youtube.keyword import parse_date_range
+
+# 用于解析浏览器 DOM 中 YouTube 相对时间的正则（如 "3 days ago"、"1か月前" 等）
+_RELATIVE_TIME_RE = _re.compile(
+    r"(?P<num>\d+)\s*"
+    r"(?P<unit>"
+    r"months?\s*ago|month\s*ago|"
+    r"years?\s*ago|year\s*ago|"
+    r"weeks?\s*ago|week\s*ago|"
+    r"days?\s*ago|day\s*ago|"
+    r"hours?\s*ago|hour\s*ago|"
+    r"minutes?\s*ago|minute\s*ago|"
+    r"seconds?\s*ago|second\s*ago|"
+    r"か月前|ヶ月前|年前|週間前|日前|時間前|分前|秒前|"
+    r"개월\s*전|년\s*전|주\s*전|일\s*전|시간\s*전|분\s*전|초\s*전"
+    r")",
+    _re.IGNORECASE,
+)
+
+
+def _parse_browser_time(time_text: str) -> datetime | None:
+    """将浏览器 DOM 中的 YouTube 相对时间文本解析为近似 UTC datetime。匹配不上返回 None。"""
+    if not time_text:
+        return None
+    match = _RELATIVE_TIME_RE.search(time_text)
+    if not match:
+        return None
+    try:
+        num = int(match.group("num"))
+    except ValueError:
+        return None
+    unit_text = match.group("unit").lower()
+    now = datetime.now(timezone.utc)
+
+    if any(kw in unit_text for kw in ("month", "か月", "ヶ月", "개월")):
+        return now - timedelta(days=num * 30)
+    if any(kw in unit_text for kw in ("year", "年", "년")):
+        return now - timedelta(days=num * 365)
+    if any(kw in unit_text for kw in ("week", "週間", "주")):
+        return now - timedelta(weeks=num)
+    if any(kw in unit_text for kw in ("day", "日", "일")):
+        return now - timedelta(days=num)
+    if any(kw in unit_text for kw in ("hour", "時間", "시간")):
+        return now - timedelta(hours=num)
+    if any(kw in unit_text for kw in ("minute", "分", "분")):
+        return now - timedelta(minutes=num)
+    if any(kw in unit_text for kw in ("second", "秒", "초")):
+        return now - timedelta(seconds=num)
+    return None
 
 
 def _api_execute_with_retry(request, log_callback=None, stop_event=None, max_retries=3):
@@ -53,9 +104,7 @@ def _api_execute_with_retry(request, log_callback=None, stop_event=None, max_ret
 # 导出到 Excel 中的表格头部字段定义
 CSV_FIELDS = [
     "序号",
-    "编号",
     "视频链接",
-    "作品链接",
     "博主主页链接",
     "作者主页链接",
     "标题",
@@ -66,7 +115,6 @@ CSV_FIELDS = [
     "视频时长",
     "视频简介",
     "播放量",
-    "浏览量",
     "点赞数",
     "评论数",
 ]
@@ -281,9 +329,10 @@ def collect_upload_video_ids(youtube, uploads_playlist_id: str, max_video_items:
                 seen.add(video_id)
                 video_ids.append(video_id)
 
-        log_line(log_callback, f"  API 已读取视频类作品 {len(video_ids)} 条。")
+        if len(video_ids) > 0 and len(video_ids) % 100 == 0:
+            log_line(log_callback, f"    playlistItems 已翻页: {len(video_ids)} 个ID")
         if stopped_by_date:
-            log_line(log_callback, "  API 已读取到早于开始日期的视频，停止加载更多。")
+            log_line(log_callback, f"    playlistItems 已到开始日期，停止翻页 ({len(video_ids)} 个ID)")
             break
             
         page_token = response.get("nextPageToken")
@@ -378,7 +427,7 @@ def collect_video_works_with_api(youtube, channel_url: str, max_video_items: int
     """
     channel_item = fetch_channel_item(youtube, channel_url)
     if not channel_item:
-        log_warn(log_callback, "  API 未找到频道信息。")
+        log_warn(log_callback, "  [API] 未找到频道信息")
         return []
 
     uploads_playlist_id = (
@@ -387,15 +436,16 @@ def collect_video_works_with_api(youtube, channel_url: str, max_video_items: int
         .get("uploads", "")
     )
     if not uploads_playlist_id:
-        log_warn(log_callback, "  API 未找到 uploads 播放列表。")
+        log_warn(log_callback, "  [API] 未找到 uploads 播放列表")
         return []
 
     title = channel_item.get("snippet", {}).get("title", "")
     if title:
-        log_line(log_callback, f"  API 识别频道：{title}")
+        log_line(log_callback, f"  频道: {title}")
     video_ids = collect_upload_video_ids(youtube, uploads_playlist_id, max_video_items, limit_time_bool, start_dt, end_dt, log_callback, stop_event, pause_event)
+    log_line(log_callback, f"  正在批量获取 {len(video_ids)} 个视频详情...")
     rows = video_rows_from_api(youtube, video_ids, stop_event, pause_event)
-    log_line(log_callback, f"  API 视频类作品完成：{len(rows)} 条。")
+    log_line(log_callback, f"  完成: {len(rows)} 条视频")
     return rows
 
 
@@ -477,12 +527,23 @@ def extract_visible_video_cards(page, tab: str) -> list[dict[str, str]]:
                 const card = link.closest(cardSelector) || link;
                 const title = titleFrom(card, link);
                 if (!title) continue;
+                const timeTextFrom = root => {
+                    const lines = (root.innerText || '').split('\\n').filter(Boolean);
+                    for (const line of lines) {
+                        const t = line.trim();
+                        if (/(\\d+)\\s*(second|minute|hour|day|week|month|year|秒|分|时间|日|週間|週|月|年|개월|년|주|일|시간|분|초)/i.test(t)) {
+                            return t;
+                        }
+                    }
+                    return '';
+                };
                 results.push({
                     link: href,
                     content: `${title}[视频]`,
                     views: metricLine(card),
                     comments: '',
                     likes: '',
+                    timeText: timeTextFrom(card),
                 });
             }
             return results;
@@ -493,12 +554,14 @@ def extract_visible_video_cards(page, tab: str) -> list[dict[str, str]]:
 
 def collect_video_tab_with_playwright(page, channel_url: str, tab: str, max_scrolls: int, log_callback, stop_event=None, pause_event=None,
                                       page_timeout=None, scroll_delay=None, no_new_limit=None, scroll_px=None,
-                                      initial_load_delay=None) -> list[dict[str, str]]:
+                                      initial_load_delay=None, limit_time_bool: bool = False,
+                                      start_dt: datetime | None = None, end_dt: datetime | None = None) -> list[dict[str, str]]:
     """
     使用 Playwright 模拟用户滚动获取视频（Videos）或短视频（Shorts）列表。
     - 拼接标签页 URL 自动跳转，并等待首个视频卡片加载。
     - 循环执行模拟页面滚动，获取当前 DOM 树中的可见卡片进行去重去空累加。
     - 若连续滚动 no_new_limit 次未发现任何新作品，认为已加载至列表最底端，自动退出。
+    - 浏览器只能获取相对时间文本（如 "3 days ago"），解析后做近似日期过滤。
     """
     if page_timeout is None:
         page_timeout = PAGE_LOAD_TIMEOUT
@@ -513,7 +576,7 @@ def collect_video_tab_with_playwright(page, channel_url: str, tab: str, max_scro
 
     url = tab_url(channel_url, tab)
     label = "Videos" if tab == "videos" else "Shorts"
-    log_line(log_callback, f"  Playwright 读取 {label}：{url}")
+    log_line(log_callback, f"  [浏览器] {label}: 开始滚动...")
     page.goto(url, wait_until="load", timeout=page_timeout)
     if interruptible_sleep(initial_load_delay, stop_event):
         return []
@@ -521,7 +584,7 @@ def collect_video_tab_with_playwright(page, channel_url: str, tab: str, max_scro
     try:
         page.wait_for_selector(wait_selector, timeout=min(12000, page_timeout))
     except PlaywrightTimeoutError:
-        log_line(log_callback, f"  未等到 {label} 链接，继续滚动尝试。")
+        log_line(log_callback, f"  [浏览器] {label}: 等待超时，继续尝试")
 
     works: list[dict[str, str]] = []
     seen_links = set()
@@ -572,17 +635,35 @@ def collect_video_tab_with_playwright(page, channel_url: str, tab: str, max_scro
             added += 1
 
         if added:
-            log_line(log_callback, f"    {label} 滚动 {scroll_index + 1}/{max_scrolls}：新增 {added} 条，累计 {len(works)} 条。")
+            progress = f"{len(works)}条" if len(works) < 200 else f"{len(works)}条"
+            log_line(log_callback, f"  [浏览器] {label}: 滚动 {scroll_index + 1}/{max_scrolls} +{added} → {progress}")
             no_new_count = 0
         else:
             no_new_count += 1
             if no_new_count >= no_new_limit:
-                log_warn(log_callback, f"    连续 {no_new_limit} 次没有新增，停止 {label}。")
+                log_line(log_callback, f"  [浏览器] {label}: 连续 {no_new_limit} 次无新增，已到底 → {len(works)}条")
                 break
 
         page.evaluate(f"window.scrollBy(0, {scroll_px})")
         if interruptible_sleep(scroll_delay, stop_event):
             break
+
+    # 浏览器模式的时间过滤：解析 DOM 中的相对时间文本，近似过滤
+    if limit_time_bool and start_dt and end_dt and works:
+        before_count = len(works)
+        filtered: list[dict[str, str]] = []
+        for w in works:
+            time_text = w.pop("timeText", "")
+            approx_dt = _parse_browser_time(time_text)
+            if approx_dt is None:
+                # 解析不到相对时间（如 "Streamed live"、"Premiered" 等），保留（视作 1 天内）
+                filtered.append(w)
+            elif start_dt <= approx_dt <= end_dt:
+                filtered.append(w)
+        dropped = before_count - len(filtered)
+        if dropped > 0:
+            log_line(log_callback, f"  [浏览器] {label}: 时间过滤后 {len(filtered)}条（丢弃 {dropped}条）")
+        return filtered
 
     return works
 
@@ -701,12 +782,23 @@ def extract_visible_posts(page) -> list[dict[str, str]]:
                 if (nonAvatarImages(post).length) parts.push('[图片]');
                 const content = parts.join('\\n').trim();
                 if (!content) continue;
+                const timeTextFromPost = root => {
+                    const lines = (root.innerText || '').split('\\n').filter(Boolean);
+                    for (const line of lines) {
+                        const t = line.trim();
+                        if (/(\\d+)\\s*(second|minute|hour|day|week|month|year|秒|分|时间|日|週間|週|月|年|개월|년|주|일|시간|분|초)/i.test(t)) {
+                            return t;
+                        }
+                    }
+                    return '';
+                };
                 results.push({
                     link: findPostLink(post),
                     content,
                     views: extractMetric(post, 'views'),
                     comments: extractMetric(post, 'comments'),
                     likes: extractMetric(post, 'likes'),
+                    timeText: timeTextFromPost(post),
                 });
             }
             return results;
@@ -716,12 +808,14 @@ def extract_visible_posts(page) -> list[dict[str, str]]:
 
 def collect_posts_with_playwright(page, channel_url: str, max_post_scrolls: int, log_callback, stop_event=None, pause_event=None,
                                    page_timeout=None, scroll_delay=None, no_new_limit=None, scroll_px=None,
-                                   initial_load_delay=None) -> list[dict[str, str]]:
+                                   initial_load_delay=None, limit_time_bool: bool = False,
+                                   start_dt: datetime | None = None, end_dt: datetime | None = None) -> list[dict[str, str]]:
     """
     使用 Playwright 模拟用户滚动获取社区帖子（Posts）列表。
     - 自动打开 Posts 标签页，并获取当前 DOM 中已加载的帖子并清洗。
     - 循环执行模拟页面滚动，获取当前 DOM 树中的可见帖子并累加。
     - 若连续滚动 no_new_limit 次未发现任何新帖子，认为已加载至列表最底端，自动退出。
+    - 浏览器只能获取相对时间文本（如 "3 days ago"），解析后做近似日期过滤。
     """
     if page_timeout is None:
         page_timeout = PAGE_LOAD_TIMEOUT
@@ -735,7 +829,7 @@ def collect_posts_with_playwright(page, channel_url: str, max_post_scrolls: int,
         initial_load_delay = INITIAL_LOAD_DELAY
 
     url = posts_url(channel_url)
-    log_line(log_callback, f"  Playwright 读取 Posts：{url}")
+    log_line(log_callback, "  [浏览器] Posts: 开始滚动...")
     page.goto(url, wait_until="load", timeout=page_timeout)
     if interruptible_sleep(initial_load_delay, stop_event):
         return []
@@ -778,19 +872,109 @@ def collect_posts_with_playwright(page, channel_url: str, max_post_scrolls: int,
             added += 1
 
         if added:
-            log_line(log_callback, f"    Posts 滚动 {scroll_index + 1}/{max_post_scrolls}：新增 {added} 条，累计 {len(posts)} 条。")
+            log_line(log_callback, f"  [浏览器] Posts: 滚动 {scroll_index + 1}/{max_post_scrolls} +{added} → {len(posts)}条")
             no_new_count = 0
         else:
             no_new_count += 1
             if no_new_count >= no_new_limit:
-                log_warn(log_callback, f"    连续 {no_new_limit} 次没有新增，停止 Posts。")
+                log_line(log_callback, f"  [浏览器] Posts: 连续 {no_new_limit} 次无新增，已到底 → {len(posts)}条")
                 break
 
         page.evaluate(f"window.scrollBy(0, {scroll_px})")
         if interruptible_sleep(scroll_delay, stop_event):
             break
 
+    # 浏览器模式的时间过滤：解析 DOM 中的相对时间文本，近似过滤
+    if limit_time_bool and start_dt and end_dt and posts:
+        before_count = len(posts)
+        filtered: list[dict[str, str]] = []
+        for p in posts:
+            time_text = p.pop("timeText", "")
+            approx_dt = _parse_browser_time(time_text)
+            if approx_dt is None:
+                filtered.append(p)
+            elif start_dt <= approx_dt <= end_dt:
+                filtered.append(p)
+        dropped = before_count - len(filtered)
+        if dropped > 0:
+            log_line(log_callback, f"  [浏览器] Posts: 时间过滤后 {len(filtered)}条（丢弃 {dropped}条）")
+        return filtered
+
     return posts
+
+
+def collect_post_comments_with_playwright(page, post_url: str, max_comments: int, log_callback, stop_event=None, pause_event=None,
+                                           page_timeout=PAGE_LOAD_TIMEOUT, scroll_delay=None, no_new_limit=None, scroll_px=None):
+    """浏览器采集 YouTube 帖子评论。帖子没有 API，只能从 DOM 抓取。"""
+    if scroll_delay is None:
+        scroll_delay = POST_SCROLL_DELAY
+    if no_new_limit is None:
+        no_new_limit = NO_NEW_POST_LIMIT
+    if scroll_px is None:
+        scroll_px = POST_SCROLL_PX
+
+    page.goto(post_url, wait_until="load", timeout=page_timeout)
+    if interruptible_sleep(scroll_delay, stop_event):
+        return []
+
+    # 尝试等评论区域出现
+    try:
+        page.wait_for_selector('ytd-comment-thread-renderer, #comments, ytd-comments', timeout=min(8000, page_timeout))
+    except Exception:
+        pass
+
+    comments: list[dict] = []
+    seen_texts = set()
+    no_new_count = 0
+
+    for _ in range(20):
+        if should_stop(stop_event):
+            break
+        if wait_if_paused(pause_event, stop_event):
+            break
+
+        added = 0
+        for el in page.locator('ytd-comment-thread-renderer').all():
+            try:
+                content_el = el.locator('#content-text, #content').first
+                content = (content_el.inner_text() or "").strip()
+            except Exception:
+                content = ""
+
+            try:
+                likes_text = ""
+                for vote_el in el.locator('#vote-count-middle, [aria-label*="like"], [aria-label*="高評価"]').all():
+                    t = (vote_el.inner_text() or vote_el.get_attribute("aria-label") or "").strip()
+                    if t:
+                        likes_text = t
+                        break
+            except Exception:
+                likes_text = ""
+
+            if not content:
+                continue
+            if content in seen_texts:
+                continue
+            seen_texts.add(content)
+            comments.append({"text": content, "like_count": normalize_metric_text(likes_text), "published_at": ""})
+            added += 1
+
+        if added:
+            no_new_count = 0
+            if len(comments) >= max_comments:
+                break
+        else:
+            no_new_count += 1
+            if no_new_count >= no_new_limit:
+                break
+
+        page.evaluate(f"window.scrollBy(0, {scroll_px})")
+        if interruptible_sleep(scroll_delay, stop_event):
+            break
+
+    comments.sort(key=lambda c: int(c["like_count"] or 0), reverse=True)
+    log_line(log_callback, f"    帖子评论: {len(comments)}条")
+    return comments[:max_comments]
 
 
 def row_from_work(index: int, work: dict[str, str], channel_url: str = "") -> dict[str, str]:
@@ -803,9 +987,7 @@ def row_from_work(index: int, work: dict[str, str], channel_url: str = "") -> di
     
     return {
         "序号": str(index),
-        "编号": str(index),
         "视频链接": work.get("link", ""),
-        "作品链接": work.get("link", ""),
         "博主主页链接": ch_url,
         "作者主页链接": channel_url,
         "标题": work.get("title", ""),
@@ -816,7 +998,6 @@ def row_from_work(index: int, work: dict[str, str], channel_url: str = "") -> di
         "视频时长": work.get("duration", ""),
         "视频简介": work.get("description", ""),
         "播放量": work.get("views", ""),
-        "浏览量": work.get("views", ""),
         "点赞数": work.get("likes", ""),
         "评论数": work.get("comments", ""),
     }
@@ -872,12 +1053,12 @@ def run_youtube_channel_works_spider(
 
         youtube = None
         if build is None:
-            log_line(log_callback, "缺少依赖：google-api-python-client。Videos/Shorts 将尝试浏览器 fallback。")
+            log_line(log_callback, "  google-api-python-client 未安装，Video/Shorts 将使用浏览器")
         else:
             try:
                 youtube = build("youtube", "v3", developerKey=api_key, cache_discovery=False)
             except Exception as exc:
-                log_warn(log_callback, f"YouTube API 初始化失败，Videos/Shorts 将尝试浏览器 fallback：{exc}")
+                log_warn(log_callback, f"YouTube API 初始化失败，Video/Shorts 将使用浏览器: {exc}")
 
         limit_time_bool = limit_time_str == "是"
         get_comments_bool = get_comments_str == "是"
@@ -886,11 +1067,12 @@ def run_youtube_channel_works_spider(
             start_dt, end_dt = parse_date_range(start_date, end_date)
             
         output_path = build_output_path("youtube", f"youtube_channel_works_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
+        save_batch = int(config.get("save_batch_size", SAVE_BATCH_SIZE))
         if get_comments_bool:
-            comment_fields = ["序号", "编号", "视频链接", "作品链接", "评论的点赞量", "评论内容", "发布时间", "评论发布时间"]
-            writer = MultiSheetXlsxWriter(output_path, {"作品信息": CSV_FIELDS, "评论信息": comment_fields})
+            comment_fields = ["序号", "视频链接", "评论的点赞量", "评论内容", "发布时间", "评论发布时间"]
+            writer = MultiSheetXlsxWriter(output_path, {"作品信息": CSV_FIELDS, "评论信息": comment_fields}, autosave_every=save_batch)
         else:
-            writer = XlsxRowWriter(output_path, CSV_FIELDS)
+            writer = XlsxRowWriter(output_path, CSV_FIELDS, autosave_every=save_batch)
         serial_number = 1
 
         def ensure_page():
@@ -898,7 +1080,7 @@ def run_youtube_channel_works_spider(
             if sync_playwright is None:
                 return None
             if playwright_context is None:
-                log_line(log_callback, "  开始接管本地 Chrome 读取页面...")
+                log_line(log_callback, "  正在连接本地 Chrome...")
                 playwright_context = sync_playwright().start()
                 browser, context = connect_existing_chromium(playwright_context, DEFAULT_X_CDP_URL, log_callback=log_callback)
                 page = context.new_page()
@@ -911,8 +1093,16 @@ def run_youtube_channel_works_spider(
             if wait_if_paused(pause_event, stop_event):
                 break
 
-            log_line(log_callback, f"[{channel_index}/{len(channel_urls)}] 读取作者主页：{channel_url}")
+            # ── 频道头部 ──
+            log_line(log_callback, f"[{channel_index}/{len(channel_urls)}] {channel_url}")
+            if limit_time_bool:
+                log_line(log_callback, f"  时间范围: {start_date} ~ {end_date}")
+            log_line(log_callback, f"  采集目标: {collect_target}")
+
             works: list[dict[str, str]] = []
+            api_video_count = 0
+            browser_video_count = 0
+            post_count = 0
             should_fallback_video_tabs = False
             do_videos = collect_target in ("全部", "仅视频与Shorts")
             do_posts = collect_target in ("全部", "仅帖子 (Posts)")
@@ -920,50 +1110,51 @@ def run_youtube_channel_works_spider(
             if do_videos:
                 if youtube is None:
                     should_fallback_video_tabs = True
-                    log_line(log_callback, "  YouTube API 不可用，尝试用浏览器读取 Videos/Shorts。")
+                    log_line(log_callback, "  ── API 不可用，Video/Shorts 将使用浏览器 ──")
                 else:
                     try:
                         video_works = collect_video_works_with_api(youtube, channel_url, max_video_items, limit_time_bool, start_dt, end_dt, log_callback, stop_event, pause_event)
+                        api_video_count = len(video_works)
                         if not video_works:
                             should_fallback_video_tabs = True
-                            log_line(log_callback, "  API 未返回 Videos/Shorts，尝试用浏览器读取。")
+                            log_line(log_callback, "  ── API 无结果，回退浏览器 ──")
                         else:
                             works.extend(video_works)
                     except Exception as exc:
                         should_fallback_video_tabs = True
-                        log_warn(log_callback, f"  YouTube API 读取失败，尝试用浏览器读取 Videos/Shorts：{exc}")
+                        log_warn(log_callback, f"  ── API 异常，回退浏览器: {exc} ──")
 
             if sync_playwright is None:
                 if should_fallback_video_tabs and do_videos:
-                    log_error(log_callback, "  缺少依赖：playwright。无法浏览器 fallback Videos/Shorts。")
+                    log_error(log_callback, "  ✗ playwright 未安装，无法回退浏览器")
                 if do_posts:
-                    log_error(log_callback, "  缺少依赖：playwright。跳过 Posts。")
+                    log_error(log_callback, "  ✗ playwright 未安装，跳过帖子")
             else:
                 if do_videos and should_fallback_video_tabs and not should_stop(stop_event):
-                    if limit_time_bool:
-                        log_warn(log_callback, "  [注意] API 已降级为浏览器模式，无法按发布时间精确过滤视频/Shorts，将拉取所有可见作品。")
                     try:
                         active_page = ensure_page()
                         if active_page is not None:
-                            works.extend(collect_video_tab_with_playwright(active_page, channel_url, "videos", max_post_scrolls, log_callback, stop_event, pause_event, page_timeout, scroll_interval_val, no_new_limit, scroll_px_val, initial_load_delay_val))
+                            before_count = len(works)
+                            works.extend(collect_video_tab_with_playwright(active_page, channel_url, "videos", max_post_scrolls, log_callback, stop_event, pause_event, page_timeout, scroll_interval_val, no_new_limit, scroll_px_val, initial_load_delay_val, limit_time_bool=limit_time_bool, start_dt=start_dt, end_dt=end_dt))
                             if not should_stop(stop_event):
-                                works.extend(collect_video_tab_with_playwright(active_page, channel_url, "shorts", max_post_scrolls, log_callback, stop_event, pause_event, page_timeout, scroll_interval_val, no_new_limit, scroll_px_val, initial_load_delay_val))
+                                works.extend(collect_video_tab_with_playwright(active_page, channel_url, "shorts", max_post_scrolls, log_callback, stop_event, pause_event, page_timeout, scroll_interval_val, no_new_limit, scroll_px_val, initial_load_delay_val, limit_time_bool=limit_time_bool, start_dt=start_dt, end_dt=end_dt))
+                            browser_video_count = len(works) - before_count
                     except PlaywrightTimeoutError:
-                        log_warn(log_callback, "  跳过浏览器 Videos/Shorts：页面加载超时。")
+                        log_warn(log_callback, "  ✗ 浏览器 Video/Shorts: 页面加载超时")
                     except Exception as exc:
-                        log_warn(log_callback, f"  跳过浏览器 Videos/Shorts：{exc}")
+                        log_warn(log_callback, f"  ✗ 浏览器 Video/Shorts: {exc}")
 
                 if do_posts and not should_stop(stop_event):
-                    if limit_time_bool:
-                        log_warn(log_callback, "  [注意] 帖子采集使用浏览器模式，无法按发布时间精确过滤，将拉取所有可见帖子。")
                     try:
                         active_page = ensure_page()
                         if active_page is not None:
-                            works.extend(collect_posts_with_playwright(active_page, channel_url, max_post_scrolls, log_callback, stop_event, pause_event, page_timeout, scroll_interval_val, no_new_limit, scroll_px_val, initial_load_delay_val))
+                            before_count = len(works)
+                            works.extend(collect_posts_with_playwright(active_page, channel_url, max_post_scrolls, log_callback, stop_event, pause_event, page_timeout, scroll_interval_val, no_new_limit, scroll_px_val, initial_load_delay_val, limit_time_bool=limit_time_bool, start_dt=start_dt, end_dt=end_dt))
+                            post_count = len(works) - before_count
                     except PlaywrightTimeoutError:
-                        log_warn(log_callback, "  跳过 Posts：页面加载超时。")
+                        log_warn(log_callback, "  ✗ 帖子: 页面加载超时")
                     except Exception as exc:
-                        log_warn(log_callback, f"  跳过 Posts：{exc}")
+                        log_warn(log_callback, f"  ✗ 帖子: {exc}")
 
             base_save_batch_size = int(config.get("save_batch_size", SAVE_BATCH_SIZE))
             channel_written = 0
@@ -978,7 +1169,6 @@ def run_youtube_channel_works_spider(
                         writer.writerow("作品信息", r)
                 else:
                     writer.writerows(rows_buffer)
-                writer.save()
                 channel_written += len(rows_buffer)
                 rows_buffer.clear()
 
@@ -987,7 +1177,7 @@ def run_youtube_channel_works_spider(
                     break
                 rows_buffer.append(row_from_work(serial_number, work, channel_url))
 
-                if get_comments_bool and youtube is not None:
+                if get_comments_bool:
                     try:
                         work_link = work.get("link", "")
                         video_id = ""
@@ -996,15 +1186,30 @@ def run_youtube_channel_works_spider(
                         elif "shorts/" in work_link:
                             video_id = work_link.split("shorts/")[1].split("?")[0]
 
-                        if video_id:
+                        if video_id and youtube is not None:
+                            # 视频 / Shorts：使用 API 获取评论
                             comments = fetch_top_level_comments(youtube, video_id, max_comments, log_callback, stop_event, pause_event)
-                            comments.sort(key=lambda item: item["like_count"], reverse=True)
+                        elif work.get("video_type") == "帖子":
+                            # 帖子：没有 API，使用浏览器抓取评论
+                            comment_page = ensure_page()
+                            if comment_page is not None:
+                                comments = collect_post_comments_with_playwright(
+                                    comment_page, work_link, max_comments, log_callback,
+                                    stop_event, pause_event, page_timeout,
+                                    scroll_delay=scroll_interval_val,
+                                    no_new_limit=no_new_limit, scroll_px=scroll_px_val,
+                                )
+                            else:
+                                comments = []
+                        else:
+                            comments = []
+
+                        if comments:
+                            comments.sort(key=lambda item: int(item.get("like_count", "0") or 0), reverse=True)
                             for comment in comments[:max_comments]:
                                 comment_row = {
                                     "序号": str(serial_number),
-                                    "编号": str(serial_number),
                                     "视频链接": work_link,
-                                    "作品链接": work_link,
                                     "评论的点赞量": str(comment["like_count"]),
                                     "评论内容": comment["text"],
                                     "发布时间": comment.get("published_at", ""),
@@ -1012,7 +1217,7 @@ def run_youtube_channel_works_spider(
                                 }
                                 writer.writerow("评论信息", comment_row)
                     except Exception as exc:
-                        log_warn(log_callback, f"    提取评论失败：{exc}")
+                        log_warn(log_callback, f"    评论提取失败: {exc}")
 
                 serial_number += 1
 
@@ -1021,7 +1226,16 @@ def run_youtube_channel_works_spider(
                     _flush_rows()
 
             _flush_rows()
-            log_line(log_callback, f"  作者主页完成：写入 {channel_written} 条。")
+            parts = []
+            if api_video_count:
+                parts.append(f"API {api_video_count}条")
+            if browser_video_count:
+                parts.append(f"浏览器 {browser_video_count}条")
+            if post_count:
+                parts.append(f"帖子 {post_count}条")
+            if not parts:
+                parts.append("0条")
+            log_line(log_callback, f"  → {channel_written}条 ({', '.join(parts)})")
 
         if page and not page.is_closed():
             page.close()
