@@ -41,6 +41,8 @@ class YouTubeKeywordWindow(SimpleToolWindow):
 
         if not _lines(values["keywords"]):
             raise ValueError("至少需要输入一个关键词。")
+        if values.get("enable_timer") == "是" and values.get("limit_time") != "是":
+            raise ValueError("定时模式必须开启时间过滤，否则每轮采集结果完全相同。")
         if values.get("limit_time") == "是":
             parse_date_range(values["start_date"], values["end_date"])
 

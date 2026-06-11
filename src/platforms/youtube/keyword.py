@@ -60,7 +60,7 @@ def execute_with_retry(request, log_callback=None, stop_event=None):
         try:
             return request.execute()
         except googleapiclient.errors.HttpError as e:
-            if e.resp.status in [429, 500, 503] and attempt < max_retries - 1:
+            if e.resp.status in [500, 503] and attempt < max_retries - 1:
                 wait = 2 ** attempt
                 if log_callback:
                     log_line(log_callback, f"  [API] HTTP {e.resp.status}，{wait}秒后重试...")
@@ -127,19 +127,37 @@ def safe_filename_part(value: str) -> str:
     return cleaned[:80] or "keyword"
 
 
-def _search_with_rotation(client_pool, params: dict, log_callback, stop_event=None):
-    """执行搜索 API 请求，遇 403 自动切换 Key。"""
+def _api_call_with_rotation(client_pool, build_request, log_callback, stop_event=None):
+    """执行 API 请求，遇 403/429 自动切换 Key。所有 Key 耗尽则抛出原始异常。
+
+    Args:
+        client_pool: YouTubeClientPool 实例。
+        build_request: 零参可调用对象，返回待执行的 API request。
+                       必须是 callable 而非已构建的 request，因为 Key 切换后需要用新 client 重建。
+        log_callback: 日志回调。
+        stop_event: 中断事件。
+    """
     import googleapiclient.errors
     while True:
         try:
-            return execute_with_retry(client_pool.client.search().list(**params), log_callback, stop_event)
+            return execute_with_retry(build_request(), log_callback, stop_event)
         except googleapiclient.errors.HttpError as e:
             if e.resp.status in [403, 429]:
                 if client_pool.next_client():
-                    log_line(log_callback, f"  [API] 搜索额度受限 ({e.resp.status})，切换 Key ({client_pool.current_idx + 1}/{len(client_pool.api_keys)})...")
+                    log_line(log_callback, f"  [API] 额度受限 ({e.resp.status})，切换 Key ({client_pool.current_idx + 1}/{len(client_pool.api_keys)})...")
                     continue
-                log_line(log_callback, f"  [API] 所有 API Key 配额均已耗尽 ({e.resp.status})，终止搜索。")
+                log_line(log_callback, f"  [API] 所有 API Key 配额均已耗尽 ({e.resp.status})。")
             raise
+
+
+def _search_with_rotation(client_pool, params: dict, log_callback, stop_event=None):
+    """执行搜索 API 请求，遇 403/429 自动切换 Key。"""
+    return _api_call_with_rotation(
+        client_pool,
+        lambda: client_pool.client.search().list(**params),
+        log_callback,
+        stop_event,
+    )
 
 
 def iter_search_video_id_batches(client_pool, keyword: str, max_results: int, limit_time_bool: bool, start_dt: datetime | None, end_dt: datetime | None, log_callback, stop_event=None, pause_event=None, batch_size: int = 50, date_chunk_days: int = 7, date_chunk_hours: int = 0):
@@ -260,38 +278,26 @@ def fetch_video_rows(client_pool, keyword: str, video_ids: list[str], stop_event
     from src.platforms.youtube.comments import format_youtube_datetime
 
     rows: list[dict] = []
-    exhausted = False
     for ids in chunked(video_ids, batch_size):
-        if should_stop(stop_event) or wait_if_paused(pause_event, stop_event) or exhausted:
+        if should_stop(stop_event) or wait_if_paused(pause_event, stop_event):
             break
 
-        while True:
-            try:
-                response = execute_with_retry(
-                    client_pool.client.videos().list(
-                        part="snippet,contentDetails,statistics",
-                        id=",".join(ids),
-                        maxResults=batch_size,
-                        fields="items(id,snippet(title,channelId,publishedAt),contentDetails(duration),statistics(viewCount,likeCount))"
-                    ),
-                    log_callback,
-                    stop_event
-                )
-                break
-            except Exception as e:
-                if isinstance(e, googleapiclient.errors.HttpError) and e.resp.status in [403, 429]:
-                    if client_pool.next_client():
-                        if log_callback:
-                            log_line(log_callback, f"  [API] 详情获取额度受限 ({e.resp.status})，切换 Key ({client_pool.current_idx + 1}/{len(client_pool.api_keys)})...")
-                        continue
-                    if log_callback:
-                        log_line(log_callback, f"  [API] 所有 API Key 配额均已耗尽 ({e.resp.status})，终止详情获取。")
-                    exhausted = True
-                    break
-                raise e
-
-        if exhausted:
-            break
+        try:
+            response = _api_call_with_rotation(
+                client_pool,
+                lambda ids=ids: client_pool.client.videos().list(
+                    part="snippet,contentDetails,statistics",
+                    id=",".join(ids),
+                    maxResults=batch_size,
+                    fields="items(id,snippet(title,channelId,publishedAt),contentDetails(duration),statistics(viewCount,likeCount))"
+                ),
+                log_callback,
+                stop_event,
+            )
+        except googleapiclient.errors.HttpError as e:
+            if e.resp.status in [403, 429]:
+                break  # 所有 Key 配额耗尽，_api_call_with_rotation 已打印日志
+            raise
 
         for item in response.get("items", []):
             if should_stop(stop_event):
@@ -350,7 +356,7 @@ def collect_video_ids_with_playwright(page, keyword: str, max_results: int, star
     try:
         encoded_kw = urllib.parse.quote(keyword)
         url = f"https://www.youtube.com/results?search_query={encoded_kw}"
-        page.goto(url, wait_until="domcontentloaded", timeout=page_timeout)
+        page.goto(url, wait_until="load", timeout=page_timeout)
 
         if interruptible_sleep(2.0, stop_event):
             return []
@@ -469,6 +475,10 @@ def run_youtube_spider(api_keys: list[str], keywords_list, max_results, limit_ti
 
         client_pool = YouTubeClientPool(api_keys)
 
+        if not keywords_list:
+            log_warn(log_callback, "关键词列表为空，无任务可执行。")
+            return
+
         # 浏览器模式无法在 YouTube 搜索结果 URL 中注入自定义日期范围参数，
         # 只能按相关性收集视频 ID，无法区分发布日期。因此当用户启用了时间过滤时，
         # 强制走 API 模式，利用 publishedAfter / publishedBefore 在搜索阶段精确过滤。
@@ -487,12 +497,34 @@ def run_youtube_spider(api_keys: list[str], keywords_list, max_results, limit_ti
             except Exception as e:
                 log_warn(log_callback, f"  [浏览器优先] 浏览器启动失败 ({e})，将使用 API 模式。")
                 use_browser = False
+                if playwright_context:
+                    try:
+                        playwright_context.stop()
+                    except Exception:
+                        pass
+                    playwright_context = None
 
         current_run = 0
+        tz_local = timezone(timedelta(hours=8))
+        if enable_timer and limit_time_bool and start_dt and end_dt:
+            # 用户输入的日期视为北京时间 (UTC+8) 的 0 点，而非 UTC 的 0 点
+            start_dt = start_dt.replace(tzinfo=tz_local)
+            end_dt = end_dt.replace(tzinfo=tz_local)
         while True:
             current_run += 1
+            if enable_timer and limit_time_bool:
+                now = datetime.now(tz_local)
+                if current_run == 1:
+                    # 第1轮：结束时间截断为当前时刻（不抓未来不存在的数据）
+                    end_dt = min(end_dt, now)
+                else:
+                    # 后续轮次：抓取上次结束到当前时刻的增量数据
+                    start_dt = end_dt
+                    end_dt = now
             if enable_timer:
                 log_line(log_callback, f"=== 开始执行第 {current_run} 次任务 ===")
+                if limit_time_bool:
+                    log_line(log_callback, f"  定时模式：本次时间范围 {start_dt.strftime('%Y-%m-%d %H:%M')} 至 {end_dt.strftime('%Y-%m-%d %H:%M')}")
             run_stamp = time.strftime("%Y%m%d_%H%M%S")
             output_paths.clear()
 
@@ -517,7 +549,7 @@ def run_youtube_spider(api_keys: list[str], keywords_list, max_results, limit_ti
                 log_line(log_callback, f"[{index}/{len(keywords_list)}] 搜索关键词：{keyword}")
                 log_line(log_callback, f"  输出文件：{output_path}")
                 if limit_time_bool:
-                    log_line(log_callback, f"  日期范围：{start_date} 至 {end_date}")
+                    log_line(log_callback, f"  日期范围：{start_dt.strftime('%Y-%m-%d %H:%M')} 至 {end_dt.strftime('%Y-%m-%d %H:%M')}")
                 else:
                     log_line(log_callback, "  日期范围：不限时间")
 
@@ -616,9 +648,10 @@ def run_youtube_spider(api_keys: list[str], keywords_list, max_results, limit_ti
             for path in output_paths:
                 log_line(log_callback, f"  {path}")
 
-            if not enable_timer or current_run >= timer_max_runs:
-                break
+
             if should_stop(stop_event):
+                break
+            if not enable_timer or current_run >= timer_max_runs:
                 break
             log_line(log_callback, f"=== 本次执行完毕。等待 {timer_interval_minutes} 分钟后进行下一次执行 ===")
             if interruptible_sleep(timer_interval_minutes * 60, stop_event):
