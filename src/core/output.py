@@ -20,8 +20,16 @@ PLATFORM_DIRS = {
 def get_workspace_root() -> Path:
     """
     自动推导项目的根目录（即包含 requirements.txt 和 main.py 的那级目录）。
+    支持 PyInstaller 打包后的 EXE 环境。
     """
-    # __file__ 是 src/core/output.py，parents[2] 代表向上跳三级（0: core, 1: src, 2: 项目根目录）
+    import sys
+
+    # PyInstaller 打包环境：以 EXE 所在目录为工作空间根目录
+    if getattr(sys, 'frozen', False):
+        root = Path(sys.executable).resolve().parent
+        return root
+
+    # 源码环境：__file__ 是 src/core/output.py，向上两级到项目根
     root = Path(__file__).resolve().parents[2]
     if not (root / "requirements.txt").exists() and not (root / "main.py").exists():
         raise RuntimeError(f"Workspace root not found at {root}")

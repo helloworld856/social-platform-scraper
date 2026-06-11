@@ -418,16 +418,19 @@ class SimpleToolWindow(QWidget):
             for gk, gv in global_values.items():
                 merged[gk] = gv
 
-            # 第二步：别名映射 —— 若工具使用别名，将全局标准名值复制到别名 key
+            # 第二步：加载工具自身 JSON 配置
+            tool_values = load_config(self.tool_id, defaults, self.current_profile)
+            merged.update(tool_values)
+
+            # 第三步：别名映射 —— 全局标准名值复制到工具的别名 key
+            # 仅当工具中该别名的当前值等于 ConfigParam 默认值时才注入，
+            # 如果用户已在工具对话框显式修改过，则保留工具值（用户选择优先）
             for std_name, alias_names in GLOBAL_ALIAS_MAP.items():
                 if std_name in global_values:
                     for alias in alias_names:
                         if alias in defaults:
-                            merged[alias] = global_values[std_name]
-
-            # 第三步：加载工具自身 JSON 配置（最高优先级，覆盖全局值）
-            tool_values = load_config(self.tool_id, defaults, self.current_profile)
-            merged.update(tool_values)
+                            if tool_values.get(alias) == defaults.get(alias):
+                                merged[alias] = global_values[std_name]
 
         self.config_values = merged
 

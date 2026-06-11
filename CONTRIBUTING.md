@@ -171,6 +171,7 @@ refactor/<描述>   # 重构      refactor/extract-cdp-connection
 | ✅ manifest.json | 新增工具必须创建配套 manifest 文件 |
 | ❌ 禁止 `time.sleep` | 会阻塞停止/暂停信号 |
 | ❌ 禁止硬编码密钥 | API Key、密码、Cookie、Token 等绝不写入代码 |
+| ❌ 禁止硬编码配置常量 | `COOLDOWN_MIN = 3.0` → 用 `config.get("cooldown_min", 3.0)` |
 | ❌ 禁止拼音命名 | 变量/函数名必须用表意清晰的英文 |
 
 ### 新工具注册
@@ -397,6 +398,29 @@ def run_task(values, log_callback, finish_callback, stop_event, pause_event=None
 - **必须** 使用 `interruptible_sleep(duration, stop_event)` 做可中断延时
 - **建议** 使用 `random_cooldown(min_sec, max_sec, stop_event, pause_event)` 在请求间隙模拟随机停顿
 
+**YouTube API 调用（建议）**：
+
+```python
+# 在实现文件中定义 retry wrapper，包裹 .execute()
+def _api_execute_with_retry(request, log_callback=None, stop_event=None, max_retries=3):
+    from googleapiclient.errors import HttpError
+    for attempt in range(1, max_retries + 1):
+        try:
+            return request.execute()
+        except HttpError as e:
+            if e.resp.status in (500, 503, 429):
+                if attempt < max_retries and not (stop_event and stop_event.is_set()):
+                    interruptible_sleep(2 ** attempt, stop_event)
+                    continue
+            raise
+    return request.execute()
+
+response = _api_execute_with_retry(youtube.search().list(**params), log_callback, stop_event)
+```
+
+- 禁止直接 `.execute()` 而不加重试——一个瞬态 500 会丢掉整页数据。
+- 优先用 `playlistItems.list`（频道上传列表）而非 `search.list`：前者是确定性接口，不受搜索索引时间衰减影响。
+
 **输出路径（必须）**：
 
 ```python
@@ -453,18 +477,27 @@ class YouTubeKeywordWindow(SimpleToolWindow):
 
 ### 配置系统
 
+工具参数分两层：
+
+**全局配置**（主窗口「全局配置」按钮）— 9 个跨工具共享参数：
+`page_load_timeout`、`scroll_interval`、`no_new_scroll_limit`、`max_scrolls`、`scroll_px`、`cooldown_min`、`cooldown_max`、`save_batch_size`、`comment_top_limit`。修改后所有工具默认继承，工具可单独覆盖。
+
+**工具特有参数**（工具窗口「参数配置」按钮）：
+
 ```python
 def tool_config_params(self):
     return [
-        ConfigParam("max_videos_per_keyword", "每个关键词最多视频数", "int", default=5000),
-        ConfigParam("scroll_interval", "滚动间隔(秒)", "range_float", default=(1.0, 3.0)),
-        # range_int/range_float 生成 {key}_min 和 {key}_max
+        ConfigParam("max_results", "最多搜索结果数", kind="int", default=5000, minimum=1, maximum=999999),
+        ConfigParam("page_ready_wait", "页面就绪等待(秒)", kind="float", default=2.5, minimum=0.5, maximum=15.0, step=0.1, decimals=1),
     ]
 ```
 
 - `ConfigParam` 定义的参数自动渲染为配置对话框表单
-- 用户修改后自动持久化到 `self.config_values`
+- 用户修改后自动持久化到 `config/{tool_id}.json`
+- **合并优先级**：工具 JSON > 全局 JSON > 工具默认值
+- **别名映射**：工具使用非标准参数名时（如 `youtube_browser_page_timeout`），通过 `GLOBAL_ALIAS_MAP` 桥接到全局标准名
 - `_run_worker` 自动将 `config_values` 合并到 `values` 再传给 `run_task`
+- 每个 `ConfigParam` 必须同时加入 `DEFAULT_CONFIGS[tool_id]` 字典
 
 ### 线程模型
 
