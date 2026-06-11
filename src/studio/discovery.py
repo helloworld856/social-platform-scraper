@@ -34,8 +34,12 @@ def discover_tools(scan_dirs: Sequence[str] | None = None) -> tuple[list[ToolSpe
     if scan_dirs is None:
         scan_dirs = SCAN_DIRS
 
-    # 路径回溯深度推导定位项目根目录（0: studio, 1: src, 2: 项目根目录）
-    project_root = Path(__file__).resolve().parents[2]
+    # 定位项目根目录
+    import sys
+    if getattr(sys, 'frozen', False):
+        project_root = Path(sys._MEIPASS)
+    else:
+        project_root = Path(__file__).resolve().parents[2]
     tools: list[ToolSpec] = []
     errors: list[str] = []
     seen_ids: set[str] = set()
