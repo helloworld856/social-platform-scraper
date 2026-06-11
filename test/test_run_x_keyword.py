@@ -1,5 +1,7 @@
 """Run X keyword scraper end-to-end and verify output has data."""
 import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
 
 from pathlib import Path
 project_root = Path(__file__).parent.parent

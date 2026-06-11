@@ -1,5 +1,7 @@
 """Verify all fixes in x_twitter/keyword.py and tiktok/keyword.py."""
 import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
 
 from pathlib import Path
 project_root = Path(__file__).parent.parent
