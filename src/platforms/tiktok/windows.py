@@ -242,3 +242,72 @@ class TikTokCommentsWindow(SimpleToolWindow):
             pause_event=pause_event,
             config=config,
         )
+
+
+class TikTokKeywordProWindow(SimpleToolWindow):
+    tool_id = "tiktok_keyword_metrics_pro"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "TikTok 关键词搜索 Pro",
+            [
+                FieldSpec("limit_time", "是否限制时间？", kind="combo", options=("是", "否"), default="是"),
+                FieldSpec("start_date", "开始日期 YYYY-MM-DD", default=DEFAULT_START_DATE),
+                FieldSpec("end_date", "结束日期 YYYY-MM-DD", default=DEFAULT_END_DATE),
+                FieldSpec("keywords", "关键词，每行一个", kind="text_or_file", required=True, placeholder="每行一个关键词"),
+                FieldSpec("get_comments", "是否获取视频评论信息？", kind="combo", options=("是", "否"), default="否"),
+                FieldSpec("max_comments", "最多获取评论数", kind="int", default=100, minimum=10, maximum=10000),
+                FieldSpec("enable_timer", "是否开启定时重复运行？", kind="combo", options=("否", "是"), default="否"),
+                FieldSpec("timer_interval_minutes", "运行间隔 (分钟)", kind="int", default=60, minimum=1, maximum=10080),
+                FieldSpec("timer_max_runs", "最大运行次数", kind="int", default=3, minimum=2, maximum=10000),
+            ],
+            height=800,
+        )
+        self.bind_field_visibility("limit_time", "是", ["start_date", "end_date"])
+        self.bind_field_visibility("get_comments", "是", ["max_comments"])
+        self.bind_field_visibility("enable_timer", "是", ["timer_interval_minutes", "timer_max_runs"])
+
+    def validate_values(self, values):
+        from src.platforms.tiktok.keyword import parse_date_range
+
+        if not _lines(values["keywords"]):
+            raise ValueError("至少需要输入一个关键词。")
+        if values.get("enable_timer") == "是" and values.get("limit_time") != "是":
+            raise ValueError("定时模式必须开启时间过滤，否则每轮采集结果完全相同。")
+        if values.get("limit_time") == "是":
+            parse_date_range(values["start_date"], values["end_date"])
+
+    def tool_config_params(self):
+        return [
+            ConfigParam("max_parallel_tabs", "关键词爬取并行tab数", kind="int", default=1, minimum=1, maximum=3,
+                        tooltip="同时处理几个关键词。1=顺序处理。最大3。"),
+            ConfigParam("max_comment_tabs", "评论爬取并行tab数", kind="int", default=1, minimum=1, maximum=3,
+                        tooltip="每个关键词同时用几个tab采集评论。1=顺序。最大3。"),
+            ConfigParam("max_queue_size", "评论队列最大长度", kind="int", default=5000, minimum=10, maximum=10000,
+                        tooltip="待爬评论链接的缓冲上限。满了则暂停采集新视频。"),
+            ConfigParam("max_videos", "最多搜索结果数", kind="int", default=1000, minimum=1, maximum=5000),
+            ConfigParam("max_candidates", "最多检查数", kind="int", default=3000, minimum=1, maximum=20000),
+            ConfigParam("max_search_scrolls", "最大滚动次数", kind="int", default=360, minimum=30, maximum=2000, step=10),
+        ]
+
+    def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
+        from src.platforms.tiktok.keyword_pro import run_tiktok_keyword_pro_spider
+
+        config = {k: v for k, v in values.items() if k.startswith("tiktok_") or k in ("max_videos", "max_candidates", "scroll_interval", "max_search_scrolls", "no_new_scroll_limit", "comment_top_limit", "max_parallel_tabs", "max_comment_tabs", "max_queue_size", "cooldown_min", "cooldown_max", "enable_timer", "timer_interval_minutes", "timer_max_runs")}
+        return run_tiktok_keyword_pro_spider(
+            _lines(values["keywords"]),
+            int(values.get("max_videos", 1000)),
+            int(values.get("max_candidates", 3000)),
+            values["limit_time"],
+            values["start_date"],
+            values["end_date"],
+            values["get_comments"],
+            int(values["max_comments"]),
+            DEFAULT_TIKTOK_CDP_URL,
+            log_callback,
+            finish_callback,
+            stop_event,
+            pause_event=pause_event,
+            config=config,
+        )
+

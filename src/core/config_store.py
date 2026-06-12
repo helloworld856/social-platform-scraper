@@ -80,6 +80,16 @@ DEFAULT_CONFIGS: dict[str, dict] = {
         "cooldown_min": 3.0,
         "cooldown_max": 8.0,
     },
+    "tiktok_keyword_metrics_pro": {
+        "max_videos": 1000,
+        "max_candidates": 3000,
+        "max_search_scrolls": 360,
+        "max_parallel_tabs": 1,
+        "max_comment_tabs": 1,
+        "max_queue_size": 5000,
+        "cooldown_min": 3.0,
+        "cooldown_max": 8.0,
+    },
     "tiktok_profile_directory": {
         "captcha_wait": 12,                    # 遇到验证码时手动滑块的等待时间（秒）
         "cooldown_every": 5,

@@ -33,6 +33,7 @@ def test_scraper():
         get_video_info_str="是",
         get_comments_str="是",
         max_comments=10,        # 为了快速测试，每个视频最多只抓10条评论
+        fetch_play_counts_str="否",
         cdp_port_or_url=DEFAULT_TIKTOK_CDP_URL,
         log_callback=log_callback,
         finish_callback=finish_callback,

@@ -41,15 +41,11 @@ class TestYouTubeMetrics(unittest.TestCase):
         finally:
             os.remove(temp_path)
 
-    @patch("src.platforms.youtube.comments.build")
-    def test_fetch_video_metrics(self, mock_build):
+    @patch("src.platforms.youtube.comments.execute_with_retry")
+    def test_fetch_video_metrics(self, mock_execute):
         mock_youtube = MagicMock()
-        mock_videos = MagicMock()
-        mock_list = MagicMock()
-        
-        mock_youtube.videos.return_value = mock_videos
-        mock_videos.list.return_value = mock_list
-        mock_list.execute.return_value = {
+        mock_youtube.client.videos.return_value.list.return_value = "mock_request"
+        mock_execute.return_value = {
             "items": [
                 {
                     "id": "vid1",
