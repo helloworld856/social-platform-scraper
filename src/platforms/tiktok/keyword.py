@@ -499,12 +499,13 @@ def _tiktok_comment_consumer(keyword, queue_obj, cdp_port_or_url, writer, writer
     """
     log = _make_keyword_log_callback(log_callback, keyword)
     comments_page = None
+    browser = None
     try:
         # 使用独立的 Playwright 实例防止多线程冲突
         with sync_playwright() as p:
             try:
                 # 连接至已有的 Chromium 浏览器实例
-                _, context = connect_existing_chromium(p, cdp_port_or_url)
+                browser, context = connect_existing_chromium(p, cdp_port_or_url)
                 comments_page = context.new_page()
             except Exception as exc:
                 log(f"    评论线程连接浏览器失败: {exc}")
@@ -566,6 +567,12 @@ def _tiktok_comment_consumer(keyword, queue_obj, cdp_port_or_url, writer, writer
                     comments_page.close()
             except Exception:
                 pass
+        # 关闭 CDP 浏览器连接，释放 Chrome 端 tab 资源
+        if browser is not None:
+            try:
+                browser.close()
+            except Exception:
+                pass
 
 
 def _scrape_single_tiktok_keyword(keyword, keyword_index, total_keywords,
@@ -588,6 +595,7 @@ def _scrape_single_tiktok_keyword(keyword, keyword_index, total_keywords,
     comment_queue = None
     comment_threads: list[threading.Thread] = []
     search_page = metrics_page = None
+    browser = None
     try:
         # 检查是否已请求停止或暂停
         if should_stop(stop_event):
@@ -608,7 +616,7 @@ def _scrape_single_tiktok_keyword(keyword, keyword_index, total_keywords,
 
         with sync_playwright() as p:
             # 连接现有的浏览器
-            _, context = connect_existing_chromium(p, cdp_port_or_url)
+            browser, context = connect_existing_chromium(p, cdp_port_or_url)
             # 创建专门用于搜索滚动和详情指标抓取的页面
             search_page = context.new_page()
             metrics_page = context.new_page()
@@ -768,6 +776,12 @@ def _scrape_single_tiktok_keyword(keyword, keyword_index, total_keywords,
                     pg.close()
                 except Exception:
                     pass
+        # 关闭 CDP 浏览器连接，释放 Chrome 端 tab 资源，防止定时模式下累积
+        if browser is not None:
+            try:
+                browser.close()
+            except Exception:
+                pass
 
 
 def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str, start_date, end_date, get_comments_str, max_comments, cdp_port_or_url, log_callback, finish_callback, stop_event=None, pause_event=None, config=None):
