@@ -93,6 +93,11 @@ class XlsxRowWriter:
             # 在某些 Windows 网络共享磁盘或者并发占用下，os.replace 可能会报 OSError，
             # 此时 fallback 回直接保存
             self.workbook.save(self.output_path)
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
         self._rows_since_save = 0
 
 
@@ -158,6 +163,11 @@ class MultiSheetXlsxWriter:
             os.replace(temp_path, self.output_path)
         except OSError:
             self.workbook.save(self.output_path)
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
         self._rows_since_save = 0
 
 

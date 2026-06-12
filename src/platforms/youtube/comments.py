@@ -295,7 +295,7 @@ def fetch_video_metrics(client_pool, video_ids: list[str]) -> dict[str, dict]:
             pub_date = str(snippet.get("publishedAt", "")).replace("T", " ").replace("Z", "")
             if "." in pub_date:
                 pub_date = pub_date.split(".")[0]
-            desc = snippet.get("description", "").replace("\n", " | ").replace("\r", "")
+            desc = (snippet.get("description") or "").replace("\n", " | ").replace("\r", "")
             # 简介截断，防止表格内容过于臃肿
             if len(desc) > 300:
                 desc = desc[:300] + "..."
@@ -356,6 +356,9 @@ def fetch_top_level_comments(client_pool, video_id: str, max_scan_comments: int,
                 )
                 break
             except HttpError as e:
+                if "commentsDisabled" in str(e) or (e.resp.status == 403 and "disabled" in str(e).lower()):
+                    log_line(log_callback, f"  [API] 视频评论被禁用 ({video_id})，跳过...")
+                    return []
                 if e.resp.status in [403, 429]:
                     if client_pool.next_client():
                         log_line(log_callback, f"  [API] 评论获取额度受限 ({e.resp.status})，切换 Key ({client_pool.current_idx + 1}/{len(client_pool.api_keys)})...")
@@ -470,9 +473,9 @@ def run_youtube_video_metrics_spider(api_keys: list[str], txt_path: str, get_com
         
         if get_comments_bool:
             # 涉及评论输出时，导出为包含“视频信息”和“评论信息”两个 Tab 页的 Excel
-            writer = MultiSheetXlsxWriter(output_path, {"视频信息": VIDEO_FIELDS, "评论信息": COMMENT_FIELDS})
+            writer = MultiSheetXlsxWriter(output_path, {"视频信息": VIDEO_FIELDS, "评论信息": COMMENT_FIELDS}, autosave_every=500)
         else:
-            writer = XlsxRowWriter(output_path, VIDEO_FIELDS)
+            writer = XlsxRowWriter(output_path, VIDEO_FIELDS, autosave_every=500)
         
         video_ids = [str(e["视频ID"]) for e in entries]
         
@@ -555,7 +558,8 @@ def run_youtube_video_metrics_spider(api_keys: list[str], txt_path: str, get_com
                     written_comments = len([row for row in rows if row["评论内容"]])
                     log_line(log_callback, f"  完成：播放 {v_info.get('播放量')}，点赞 {v_info.get('点赞数')}，评论 {v_info.get('评论数')}。写入热评 {written_comments} 条。")
                 except Exception as exc:
-                    if isinstance(exc, googleapiclient.errors.HttpError) and exc.resp.status in [403]:
+                    import googleapiclient.errors
+                    if isinstance(exc, googleapiclient.errors.HttpError) and exc.resp.status in [403, 429]:
                         log_error(log_callback, f"  停止任务：API 配额耗尽 ({exc})，请更换 API Key。")
                         break
                     else:

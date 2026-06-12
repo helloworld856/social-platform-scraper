@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from PyQt5.QtWidgets import QApplication
 from src.platforms.tiktok.windows import TikTokKeywordWindow, TikTokProfileVideosWindow
 from src.platforms.x_twitter.windows import XKeywordWindow, XTweetMetricsWindow, XProfileTweetsWindow
-from src.platforms.youtube.windows import YouTubeKeywordWindow, YouTubeChannelWorksWindow
+from src.platforms.youtube.windows import YouTubeKeywordWindow, YouTubeChannelWorksWindow, YouTubeKeywordProWindow
 
 def test_visibility():
     app = QApplication.instance() or QApplication(sys.argv)
@@ -20,6 +20,7 @@ def test_visibility():
         ("XProfileTweetsWindow", XProfileTweetsWindow()),
         ("YouTubeKeywordWindow", YouTubeKeywordWindow()),
         ("YouTubeChannelWorksWindow", YouTubeChannelWorksWindow()),
+        ("YouTubeKeywordProWindow", YouTubeKeywordProWindow()),
     ]
     
     for name, window in windows:

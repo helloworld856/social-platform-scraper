@@ -267,7 +267,7 @@ def fetch_video_details(client_pool, video_ids: list[str], stop_event=None, paus
             stats = item.get("statistics", {})
             snippet = item.get("snippet", {})
             content = item.get("contentDetails", {})
-            desc = snippet.get("description", "").replace("\n", " | ").replace("\r", "")
+            desc = (snippet.get("description") or "").replace("\n", " | ").replace("\r", "")
             if len(desc) > 300:
                 desc = desc[:300] + "..."
                 

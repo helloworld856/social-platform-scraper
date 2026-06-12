@@ -82,7 +82,91 @@ class YouTubeKeywordWindow(SimpleToolWindow):
             values["start_date"],
             values["end_date"],
             values["get_comments"],
-            int(values["max_comments"]),
+            int(values.get("max_comments", 100)),
+            log_callback,
+            finish_callback,
+            stop_event,
+            config=config,
+            pause_event=pause_event,
+        )
+
+
+class YouTubeKeywordProWindow(SimpleToolWindow):
+    tool_id = "youtube_keyword_mining_pro"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "YouTube 关键词搜索 Pro",
+            [
+                FieldSpec("api_key", "Google API Key(s) (支持多行或导入txt)", kind="text_or_file", required=True, placeholder="支持每行填写一个API Key，耗尽自动轮询"),
+                FieldSpec("limit_time", "是否限制时间？", kind="combo", options=("是", "否"), default="是"),
+                FieldSpec("start_date", "开始日期 YYYY-MM-DD", default=DEFAULT_START_DATE),
+                FieldSpec("end_date", "结束日期 YYYY-MM-DD", default=DEFAULT_END_DATE),
+                FieldSpec("keywords", "关键词，每行一个", kind="text_or_file", required=True, placeholder="每行一个关键词"),
+                FieldSpec("get_comments", "是否获取视频评论信息？", kind="combo", options=("是", "否"), default="否"),
+                FieldSpec("max_comments", "最多获取评论数", kind="int", default=100, minimum=10, maximum=10000),
+                FieldSpec("check_video_type", "是否检测长短视频类型？", kind="combo", options=("是", "否"), default="是"),
+                FieldSpec("auto_snapshot_3d", "自动生成3日快照？", kind="combo", options=("是", "否"), default="是"),
+                FieldSpec("auto_snapshot_7d", "自动生成7日快照？", kind="combo", options=("是", "否"), default="是"),
+                FieldSpec("enable_timer", "是否开启定时重复运行？", kind="combo", options=("否", "是"), default="否"),
+                FieldSpec("timer_interval_minutes", "运行间隔 (分钟)", kind="int", default=60, minimum=1, maximum=10080),
+                FieldSpec("timer_max_runs", "最大运行次数", kind="int", default=3, minimum=2, maximum=10000),
+            ],
+            height=800,
+        )
+        self.bind_field_visibility("limit_time", "是", ["start_date", "end_date"])
+        self.bind_field_visibility("get_comments", "是", ["max_comments"])
+        self.bind_field_visibility("enable_timer", "是", ["timer_interval_minutes", "timer_max_runs"])
+
+    def validate_values(self, values):
+        from src.platforms.youtube.keyword import parse_date_range
+
+        if not _lines(values["keywords"]):
+            raise ValueError("至少需要输入一个关键词。")
+        if values.get("enable_timer") == "是" and values.get("limit_time") != "是":
+            raise ValueError("定时模式必须开启时间过滤，否则每轮采集结果完全相同。")
+        if values.get("limit_time") == "是":
+            parse_date_range(values["start_date"], values["end_date"])
+
+    def tool_config_params(self):
+        return [
+            ConfigParam("max_results", "最多搜索结果数", kind="int", default=5000, minimum=1, maximum=5000),
+            ConfigParam(
+                "youtube_search_method",
+                "搜索方式",
+                kind="combo",
+                options=("浏览器优先（省配额）", "仅API（消耗配额）"),
+                default="浏览器优先（省配额）",
+                tooltip="【重要】‘浏览器优先’模式利用浏览器在后台模拟搜索获取视频链接，可节省 99% 的 YouTube API 每日配额消耗！"
+            ),
+            ConfigParam("youtube_search_batch_size", "搜索每页条数", kind="int", default=50, minimum=1, maximum=50),
+            ConfigParam("youtube_date_chunk_days", "按天切分跨度", kind="int", default=7, minimum=1, maximum=30),
+            ConfigParam("youtube_date_chunk_hours", "按小时切分跨度", kind="int", default=0, minimum=0, maximum=23),
+            ConfigParam("youtube_video_batch_size", "视频详情每页条数", kind="int", default=50, minimum=1, maximum=50),
+            ConfigParam("youtube_browser_scroll_px", "浏览器单次滚动距离 (px)", kind="int", default=2500, minimum=500, maximum=10000),
+            ConfigParam("youtube_browser_scroll_delay", "浏览器滚动等待时间 (秒)", kind="float", default=1.0, minimum=0.1, maximum=10.0),
+            ConfigParam("youtube_browser_max_scrolls", "浏览器最大滚动次数", kind="int", default=100, minimum=1, maximum=10000),
+            ConfigParam("youtube_browser_page_timeout", "浏览器页面加载超时 (ms)", kind="int", default=45000, minimum=1000, maximum=300000),
+            ConfigParam("youtube_browser_no_new_limit", "连续无新内容终止阈值", kind="int", default=8, minimum=1, maximum=50),
+            ConfigParam("comment_top_limit", "单个视频导出热度前N条评论", kind="int", default=100, minimum=1, maximum=1000),
+        ]
+
+    def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
+        from src.platforms.youtube.keyword_pro import run_youtube_keyword_pro
+        
+        config = {k: v for k, v in values.items() if k.startswith("youtube_") or k in ("max_results", "comment_top_limit", "enable_timer", "timer_interval_minutes", "timer_max_runs")}
+        return run_youtube_keyword_pro(
+            _lines(values["api_key"]),
+            _lines(values["keywords"]),
+            int(values.get("max_results", 5000)),
+            values["limit_time"],
+            values.get("start_date", ""),
+            values.get("end_date", ""),
+            values["get_comments"],
+            int(values.get("max_comments", 100)),
+            values.get("check_video_type", "是"),
+            values.get("auto_snapshot_3d", "是"),
+            values.get("auto_snapshot_7d", "是"),
             log_callback,
             finish_callback,
             stop_event,

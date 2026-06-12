@@ -355,7 +355,7 @@ def video_rows_from_api(client_pool, video_ids: list[str], stop_event=None, paus
             final_link = build_video_url(video_id, v_type)
             
             pub_date = format_youtube_datetime(snippet.get("publishedAt", ""))
-            desc = snippet.get("description", "").replace("\n", " | ").replace("\r", "")
+            desc = (snippet.get("description") or "").replace("\n", " | ").replace("\r", "")
             if len(desc) > 300:
                 desc = desc[:300] + "..."
                 

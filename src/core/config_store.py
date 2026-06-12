@@ -52,6 +52,11 @@ DEFAULT_CONFIGS: dict[str, dict] = {
         "youtube_search_batch_size": 50,       # 搜索 API 批量请求大小
         "youtube_video_batch_size": 50,        # 视频详情 API 批量请求大小
     },
+    "youtube_keyword_mining_pro": {
+        "max_results": 5000,
+        "youtube_search_batch_size": 50,
+        "youtube_video_batch_size": 50,
+    },
     "youtube_paired_context_metrics": {
         "context_size": 5,                     # 上下文选取大小（目标视频前后各取 N 个）
         "max_upload_pages": 200,               # 上传列表分页获取最大页数
