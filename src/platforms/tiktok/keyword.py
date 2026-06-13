@@ -513,67 +513,64 @@ def _tiktok_comment_consumer(keyword, queue_obj, cdp_port_or_url, writer, writer
             # 浏览器初始化完毕，通知生产者可以开始推送任务
             if consumers_ready is not None:
                 consumers_ready.set()
-            while True:
-                try:
-                    # 从任务队列获取待抓取的视频（包含序号、链接、最大扫描数）
-                    item = queue_obj.get(timeout=3)
-                except Exception:
-                    # 队列超时后检查是否需要退出或暂停
+            try:
+                while True:
+                    try:
+                        # 从任务队列获取待抓取的视频（包含序号、链接、最大扫描数）
+                        item = queue_obj.get(timeout=3)
+                    except Exception:
+                        # 队列超时后检查是否需要退出或暂停
+                        if should_stop(stop_event):
+                            break
+                        if wait_if_paused(pause_event, stop_event):
+                            break
+                        continue
+                    # None 作为哨兵值，表示结束信号
+                    if item is None:
+                        break
                     if should_stop(stop_event):
                         break
                     if wait_if_paused(pause_event, stop_event):
                         break
-                    continue
-                # None 作为哨兵值，表示结束信号
-                if item is None:
-                    break
-                if should_stop(stop_event):
-                    break
-                if wait_if_paused(pause_event, stop_event):
-                    break
-                serial_number, video_url, max_scan = item
-                try:
-                    # 执行评论采集逻辑
-                    comments = collect_video_comments(
-                        comments_page, video_url, max_scan, log,
-                        stop_event, pause_event=pause_event,
-                        comment_top_limit=comment_top_limit,
-                    )
-                    # 写文件时加锁以防止多线程并发写入冲突
-                    with writer_lock:
-                        comment_count = 0
-                        for comment in comments:
-                            comment_row = {
-                                "序号": str(serial_number),
-                                "视频链接": video_url,
-                                "评论的点赞量": comment.get("like_count", ""),
-                                "评论内容": comment.get("text", ""),
-                                "发布时间": comment.get("create_time", ""),
-                            }
-                            writer.writerow("评论信息", sanitize_csv_row(comment_row))
-                            comment_count += 1
-                            # 每写入 20 条保存一次，防止数据丢失
-                            if comment_count % 20 == 0:
-                                writer.save()
-                except Exception as exc:
-                    log(f"评论采集异常: {exc}")
+                    serial_number, video_url, max_scan = item
+                    try:
+                        # 执行评论采集逻辑
+                        comments = collect_video_comments(
+                            comments_page, video_url, max_scan, log,
+                            stop_event, pause_event=pause_event,
+                            comment_top_limit=comment_top_limit,
+                        )
+                        # 写文件时加锁以防止多线程并发写入冲突
+                        with writer_lock:
+                            comment_count = 0
+                            for comment in comments:
+                                comment_row = {
+                                    "序号": str(serial_number),
+                                    "视频链接": video_url,
+                                    "评论的点赞量": comment.get("like_count", ""),
+                                    "评论内容": comment.get("text", ""),
+                                    "发布时间": comment.get("create_time", ""),
+                                }
+                                writer.writerow("评论信息", sanitize_csv_row(comment_row))
+                                comment_count += 1
+                                # 每写入 20 条保存一次，防止数据丢失
+                                if comment_count % 20 == 0:
+                                    writer.save()
+                    except Exception as exc:
+                        log(f"评论采集异常: {exc}")
+            finally:
+                if comments_page is not None and not comments_page.is_closed():
+                    try:
+                        comments_page.close()
+                    except Exception:
+                        pass
+                if browser is not None:
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
     except Exception as exc:
         log(f"评论线程异常: {exc}")
-    finally:
-        # 关闭页面释放资源
-        if comments_page is not None:
-            try:
-                if not comments_page.is_closed():
-                    comments_page.close()
-            except Exception:
-                pass
-        # 关闭 CDP 浏览器连接，释放 Chrome 端 tab 资源
-        if browser is not None:
-            try:
-                browser.close()
-            except Exception:
-                pass
-
 
 def _scrape_single_tiktok_keyword(keyword, keyword_index, total_keywords,
                                   max_videos, max_candidates, start_dt, end_dt,
@@ -620,136 +617,149 @@ def _scrape_single_tiktok_keyword(keyword, keyword_index, total_keywords,
             # 创建专门用于搜索滚动和详情指标抓取的页面
             search_page = context.new_page()
             metrics_page = context.new_page()
+            try:
 
-            # 如果需要采集评论，初始化多表 XLSX 写入器、写锁及线程安全的任务队列
-            if get_comments_bool:
-                comment_fields = ["序号", "视频链接", "评论的点赞量", "评论内容", "发布时间"]
-                writer = MultiSheetXlsxWriter(output_path, {"视频信息": CSV_FIELDS, "评论信息": comment_fields}, autosave_every=10)
-                writer_lock = threading.Lock()
-                comment_queue = queue.Queue(maxsize=max_queue_size)
-                consumers_ready = threading.Event()
-                # 启动指定数量的评论抓取消费者线程
-                for _ in range(max_comment_tabs):
-                    t = threading.Thread(
-                        target=_tiktok_comment_consumer,
-                        args=(keyword, comment_queue, cdp_port_or_url, writer, writer_lock,
-                              log_callback, stop_event, pause_event, comment_top_limit,
-                              consumers_ready),
-                        daemon=True,
-                    )
-                    t.start()
-                    comment_threads.append(t)
-            else:
-                # 仅采集视频信息，使用普通的 XLSX 单表写入器
-                writer = XlsxRowWriter(output_path, CSV_FIELDS, autosave_every=10)
-
-            serial_number = 1
-            # 打开 TikTok 搜索页面
-            open_search_page(search_page, keyword, stop_event=stop_event)
-            # 计算动态搜索滚动次数上限，防止无限滚动
-            scroll_limit = dynamic_search_scroll_limit(max_videos, config_max_search_scrolls)
-            seen_links: set[str] = set()
-            scanned_count = 0
-            no_new_visible_rounds = 0
-            log("  开始边滚动边提取详情并按日期过滤")
-
-            written_count = 0
-            for scroll_index in range(scroll_limit):
-                if should_stop(stop_event):
-                    log("  已请求停止，结束当前关键词。")
-                    break
-                if wait_if_paused(pause_event, stop_event):
-                    break
-                # 收集当前视口中未见过的视频元素
-                new_items = collect_visible_video_items(search_page, seen_links)
-                if not new_items:
-                    no_new_visible_rounds += 1
+                # 如果需要采集评论，初始化多表 XLSX 写入器、写锁及线程安全的任务队列
+                if get_comments_bool:
+                    comment_fields = ["序号", "视频链接", "评论的点赞量", "评论内容", "发布时间"]
+                    writer = MultiSheetXlsxWriter(output_path, {"视频信息": CSV_FIELDS, "评论信息": comment_fields}, autosave_every=10)
+                    writer_lock = threading.Lock()
+                    comment_queue = queue.Queue(maxsize=max_queue_size)
+                    consumers_ready = threading.Event()
+                    # 启动指定数量的评论抓取消费者线程
+                    for _ in range(max_comment_tabs):
+                        t = threading.Thread(
+                            target=_tiktok_comment_consumer,
+                            args=(keyword, comment_queue, cdp_port_or_url, writer, writer_lock,
+                                  log_callback, stop_event, pause_event, comment_top_limit,
+                                  consumers_ready),
+                            daemon=True,
+                        )
+                        t.start()
+                        comment_threads.append(t)
                 else:
-                    no_new_visible_rounds = 0
+                    # 仅采集视频信息，使用普通的 XLSX 单表写入器
+                    writer = XlsxRowWriter(output_path, CSV_FIELDS, autosave_every=10)
 
-                for video_item in new_items:
+                serial_number = 1
+                # 打开 TikTok 搜索页面
+                open_search_page(search_page, keyword, stop_event=stop_event)
+                # 计算动态搜索滚动次数上限，防止无限滚动
+                scroll_limit = dynamic_search_scroll_limit(max_videos, config_max_search_scrolls)
+                seen_links: set[str] = set()
+                scanned_count = 0
+                no_new_visible_rounds = 0
+                log("  开始边滚动边提取详情并按日期过滤")
+
+                written_count = 0
+                for scroll_index in range(scroll_limit):
                     if should_stop(stop_event):
+                        log("  已请求停止，结束当前关键词。")
                         break
                     if wait_if_paused(pause_event, stop_event):
                         break
+                    # 收集当前视口中未见过的视频元素
+                    new_items = collect_visible_video_items(search_page, seen_links)
+                    if not new_items:
+                        no_new_visible_rounds += 1
+                    else:
+                        no_new_visible_rounds = 0
+
+                    for video_item in new_items:
+                        if should_stop(stop_event):
+                            break
+                        if wait_if_paused(pause_event, stop_event):
+                            break
+                        if written_count >= max_videos:
+                            break
+                        if scanned_count >= max_candidates:
+                            break
+                        scanned_count += 1
+                        try:
+                            video_url = video_item["视频链接"]
+                            log(f"  [候选{scanned_count}/已写{written_count}] {video_url}")
+                            # 提取视频详细的播放、点赞、收藏、评论等指标
+                            row = extract_video_row(metrics_page, keyword, video_url, video_item.get("播放量", ""), stop_event=stop_event)
+
+                            # 时间范围过滤
+                            if start_dt is not None:
+                                if not in_date_range(row["发布时间"], start_dt, end_dt):
+                                    log(f"    跳过：发布时间不在范围内（{row['发布时间'] or '未解析'}）")
+                                    continue
+
+                            row["序号"] = str(serial_number)
+
+                            # 写入数据并视情况推送评论抓取任务
+                            if get_comments_bool:
+                                with writer_lock:
+                                    writer.writerow("视频信息", sanitize_csv_row(row))
+                                # 仅对存在评论的视频任务推入消费队列
+                                if count_to_int(row.get("评论数", "0")) > 0:
+                                    # 等待消费者线程就绪，超时 0.5 秒
+                                    if consumers_ready.wait(timeout=0.5):
+                                        try:
+                                            # 阻塞式推入队列，设置 15 秒超时防止死锁悬挂
+                                            comment_queue.put(
+                                                (serial_number, video_url, max_comments),
+                                                block=True,
+                                                timeout=15,
+                                            )
+                                        except Exception:
+                                            log("    评论队列已满或消费线程异常，跳过本条评论采集。")
+                                    else:
+                                        log("    跳过评论采集：评论消费线程连接失败。")
+                            else:
+                                writer.writerow(sanitize_csv_row(row))
+
+                            serial_number += 1
+                            written_count += 1
+                        except Exception as exc:
+                            log(f"    跳过：{exc}")
+                        # 每处理 20 个候选视频进行一次随机冷却，防止风控
+                        if scanned_count and scanned_count % 20 == 0:
+                            if random_cooldown(log, stop_event, cooldown_min, cooldown_max):
+                                break
+
+                    # 各种边界条件判断，是否跳出搜索滚动循环
                     if written_count >= max_videos:
                         break
                     if scanned_count >= max_candidates:
+                        log(f"  已检查 {scanned_count} 个候选，达到候选检查上限，停止当前关键词。")
                         break
-                    scanned_count += 1
+                    if no_new_visible_rounds >= no_new_scroll_limit and scroll_index >= 20:
+                        log("  连续多轮没有新视频链接，停止当前关键词。")
+                        break
+                    if scroll_index and scroll_index % 10 == 0:
+                        log(f"  已滚动 {scroll_index}/{scroll_limit} 轮，已扫描 {scanned_count} 个候选，写入 {written_count} 条")
+
+                    # 触发惰性滚动加载
+                    trigger_search_lazy_load(search_page)
+                    interruptible_sleep(search_scroll_pause, stop_event)
+
+                log(f"  写入 {written_count} 条日期范围内的视频")
+                # 向所有消费者线程发送 None 哨兵值作为结束标记
+                if comment_threads and comment_queue is not None:
+                    for _ in comment_threads:
+                        comment_queue.put(None)
+                    # 等待所有消费者子线程结束回收，超时时间 120 秒
+                    for t in comment_threads:
+                        t.join(timeout=120)
+
+                # 保存并保存 Excel 文件
+                writer.save()
+                return output_path
+            finally:
+                for pg in (search_page, metrics_page):
+                    if pg is not None and not pg.is_closed():
+                        try:
+                            pg.close()
+                        except Exception:
+                            pass
+                if browser is not None:
                     try:
-                        video_url = video_item["视频链接"]
-                        log(f"  [候选{scanned_count}/已写{written_count}] {video_url}")
-                        # 提取视频详细的播放、点赞、收藏、评论等指标
-                        row = extract_video_row(metrics_page, keyword, video_url, video_item.get("播放量", ""), stop_event=stop_event)
-
-                        # 时间范围过滤
-                        if start_dt is not None:
-                            if not in_date_range(row["发布时间"], start_dt, end_dt):
-                                log(f"    跳过：发布时间不在范围内（{row['发布时间'] or '未解析'}）")
-                                continue
-
-                        row["序号"] = str(serial_number)
-
-                        # 写入数据并视情况推送评论抓取任务
-                        if get_comments_bool:
-                            with writer_lock:
-                                writer.writerow("视频信息", sanitize_csv_row(row))
-                            # 仅对存在评论的视频任务推入消费队列
-                            if count_to_int(row.get("评论数", "0")) > 0:
-                                # 等待消费者线程就绪，超时 0.5 秒
-                                if consumers_ready.wait(timeout=0.5):
-                                    try:
-                                        # 阻塞式推入队列，设置 15 秒超时防止死锁悬挂
-                                        comment_queue.put(
-                                            (serial_number, video_url, max_comments),
-                                            block=True,
-                                            timeout=15,
-                                        )
-                                    except Exception:
-                                        log("    评论队列已满或消费线程异常，跳过本条评论采集。")
-                                else:
-                                    log("    跳过评论采集：评论消费线程连接失败。")
-                        else:
-                            writer.writerow(sanitize_csv_row(row))
-
-                        serial_number += 1
-                        written_count += 1
-                    except Exception as exc:
-                        log(f"    跳过：{exc}")
-                    # 每处理 20 个候选视频进行一次随机冷却，防止风控
-                    if scanned_count and scanned_count % 20 == 0:
-                        if random_cooldown(log, stop_event, cooldown_min, cooldown_max):
-                            break
-
-                # 各种边界条件判断，是否跳出搜索滚动循环
-                if written_count >= max_videos:
-                    break
-                if scanned_count >= max_candidates:
-                    log(f"  已检查 {scanned_count} 个候选，达到候选检查上限，停止当前关键词。")
-                    break
-                if no_new_visible_rounds >= no_new_scroll_limit and scroll_index >= 20:
-                    log("  连续多轮没有新视频链接，停止当前关键词。")
-                    break
-                if scroll_index and scroll_index % 10 == 0:
-                    log(f"  已滚动 {scroll_index}/{scroll_limit} 轮，已扫描 {scanned_count} 个候选，写入 {written_count} 条")
-
-                # 触发惰性滚动加载
-                trigger_search_lazy_load(search_page)
-                interruptible_sleep(search_scroll_pause, stop_event)
-
-            log(f"  写入 {written_count} 条日期范围内的视频")
-            # 向所有消费者线程发送 None 哨兵值作为结束标记
-            if comment_threads and comment_queue is not None:
-                for _ in comment_threads:
-                    comment_queue.put(None)
-                # 等待所有消费者子线程结束回收，超时时间 120 秒
-                for t in comment_threads:
-                    t.join(timeout=120)
-
-            # 保存并保存 Excel 文件
-            writer.save()
-            return output_path
+                        browser.close()
+                    except Exception:
+                        pass
 
     except Exception as exc:
         log(f"运行失败：{exc}")
@@ -770,18 +780,6 @@ def _scrape_single_tiktok_keyword(keyword, keyword_index, total_keywords,
             for t in comment_threads:
                 if t.is_alive():
                     t.join(timeout=10)
-        for pg in (search_page, metrics_page):
-            if pg is not None and not pg.is_closed():
-                try:
-                    pg.close()
-                except Exception:
-                    pass
-        # 关闭 CDP 浏览器连接，释放 Chrome 端 tab 资源，防止定时模式下累积
-        if browser is not None:
-            try:
-                browser.close()
-            except Exception:
-                pass
 
 
 def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str, start_date, end_date, get_comments_str, max_comments, cdp_port_or_url, log_callback, finish_callback, stop_event=None, pause_event=None, config=None):
