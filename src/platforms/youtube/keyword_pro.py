@@ -187,8 +187,6 @@ def run_youtube_keyword_pro(api_keys: list[str], keywords_list, max_results, lim
         if limit_time_bool:
             start_dt, end_dt = parse_date_range(start_date, end_date)
 
-        client_pool = YouTubeClientPool(api_keys)
-
         if not keywords_list:
             log_warn(log_callback, "关键词列表为空，无任务可执行。")
             return
@@ -203,6 +201,9 @@ def run_youtube_keyword_pro(api_keys: list[str], keywords_list, max_results, lim
         while True:
             # 每次循环开始前，执行一次到期快照扫描
             process_due_jobs(api_keys, log_callback, stop_event, pause_event)
+            
+            # 每轮循环重新初始化 API 客户端池，防止由于长时间休眠导致底层 TCP 连接被服务器静默掐断 (ConnectionResetError 10054)
+            client_pool = YouTubeClientPool(api_keys)
             
             current_run += 1
             if enable_timer and limit_time_bool:
