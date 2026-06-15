@@ -1,5 +1,3 @@
-from datetime import datetime, timezone
-
 import src.platforms.youtube.keyword as keyword_module
 from src.platforms.youtube.keyword import (
     fetch_video_rows,
