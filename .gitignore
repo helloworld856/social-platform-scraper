@@ -4,6 +4,9 @@ __pycache__/
 output/
 user_data/
 
+# 本地备份/废弃代码（如 unified 替换前的原文件）
+ignore/
+
 .venv/
 venv/
 env/

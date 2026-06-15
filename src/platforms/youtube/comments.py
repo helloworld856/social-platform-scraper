@@ -10,12 +10,10 @@ from __future__ import annotations
 import re
 import time
 from urllib.parse import parse_qs, urlparse
-import urllib.request
-import urllib.error
-import concurrent.futures
 
 from googleapiclient.errors import HttpError
 from src.platforms.youtube.keyword import YouTubeClientPool, execute_with_retry
+from src.platforms.youtube.video_type import check_video_type_bulk
 
 from src.core import MultiSheetXlsxWriter, XlsxRowWriter, build_output_path, log_error, log_line, log_warn, sanitize_csv_row, sanitize_csv_rows, should_stop, wait_if_paused
 
@@ -201,62 +199,6 @@ def format_youtube_duration(iso_duration: str) -> str:
     minutes = int(match.group("minutes") or 0)
     seconds = int(match.group("seconds") or 0)
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-
-
-class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """自定义 HTTP 处理器，遇到 30x 重定向时静默终止而不做跳转追踪。
-
-    用于探测 Shorts 短视频。如果请求 shorts/VIDEO_ID 被 302 重定向到 watch?v=，
-    说明它实际上是一个普通长视频；若直接返回 200 则确认为 Shorts。
-    """
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-def check_video_type_bulk(video_ids: list[str]) -> dict[str, str]:
-    """通过多线程 HEAD 请求，高效率、配额友好地判定视频是 Shorts 还是普通长视频。
-
-    YouTube API 难以直接区分视频是 Shorts 还是长视频，而直接调接口也消耗配额。
-    这里利用本地网络库发起 HEAD 请求来判断是否产生 302 重定向。
-
-    Args:
-        video_ids: 待判定视频 ID 列表。
-
-    Returns:
-        dict[str, str]: 视频 ID 到类型字符串（"Shorts", "普通视频", "未知"）的字典映射。
-    """
-    opener = urllib.request.build_opener(NoRedirectHandler)
-    
-    def check_one(vid: str) -> tuple[str, str]:
-        req = urllib.request.Request(f"https://www.youtube.com/shorts/{vid}", method="HEAD")
-        req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-        max_attempts = 3
-        for attempt in range(max_attempts):
-            try:
-                resp = opener.open(req, timeout=5)
-                if resp.status == 200:
-                    return vid, "Shorts"
-            except urllib.error.HTTPError as e:
-                # 30x 表示产生了重定向，实际为普通视频
-                if e.code in (301, 302, 303, 307, 308):
-                    return vid, "普通视频"
-                if attempt < max_attempts - 1:
-                    time.sleep(0.5 * (2 ** attempt))
-                    continue
-            except (urllib.error.URLError, Exception):
-                if attempt < max_attempts - 1:
-                    time.sleep(0.5 * (2 ** attempt))
-                    continue
-        return vid, "未知"
-
-    results = {}
-    # 使用 10 线程并发执行，提升网络 IO 密集型测试性能
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        future_to_vid = {executor.submit(check_one, vid): vid for vid in video_ids}
-        for future in concurrent.futures.as_completed(future_to_vid):
-            vid, vtype = future.result()
-            results[vid] = vtype
-    return results
 
 
 def fetch_video_metrics(client_pool, video_ids: list[str]) -> dict[str, dict]:
@@ -484,7 +426,7 @@ def run_youtube_video_metrics_spider(api_keys: list[str], txt_path: str, get_com
             metrics_map = fetch_video_metrics(client_pool, video_ids)
         except Exception as exc:
             import googleapiclient.errors
-            if isinstance(exc, googleapiclient.errors.HttpError) and exc.resp.status in [403]:
+            if isinstance(exc, googleapiclient.errors.HttpError) and exc.resp.status in [403, 429]:
                 log_error(log_callback, "API 配额已耗尽，或无权访问，请更换 API Key。")
                 return
             else:
