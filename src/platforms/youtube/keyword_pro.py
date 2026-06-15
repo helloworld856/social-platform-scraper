@@ -24,7 +24,8 @@ from src.platforms.youtube.keyword import (
     parse_date_range,
     safe_filename_part,
 )
-from src.platforms.youtube.comments import check_video_type_bulk, format_youtube_datetime
+from src.platforms.youtube.comments import format_youtube_datetime
+from src.platforms.youtube.video_type import check_video_type_bulk
 
 CSV_FIELDS_PRO = [
     "搜索词",
@@ -197,6 +198,10 @@ def run_youtube_keyword_pro(api_keys: list[str], keywords_list, max_results, lim
 
         current_run = 0
         tz_local = timezone(timedelta(hours=8))
+        # 用户输入的日期视为北京时间 (UTC+8) 的 0 点，而非 UTC 的 0 点
+        if enable_timer and limit_time_bool and start_dt and end_dt:
+            start_dt = start_dt.replace(tzinfo=tz_local)
+            end_dt = end_dt.replace(tzinfo=tz_local)
         
         while True:
             # 每次循环开始前，执行一次到期快照扫描
@@ -297,7 +302,7 @@ def run_youtube_keyword_pro(api_keys: list[str], keywords_list, max_results, lim
                     if should_stop(stop_event) or wait_if_paused(pause_event, stop_event):
                         break
 
-                    rows = fetch_video_rows_pro(client_pool, keyword, chunk_ids, stop_event, pause_event, video_batch_size)
+                    rows = fetch_video_rows_pro(client_pool, keyword, chunk_ids, stop_event, pause_event, video_batch_size, log_callback)
 
                     if written_count + len(rows) > max_results:
                         rows = rows[:max_results - written_count]
@@ -354,7 +359,7 @@ def run_youtube_keyword_pro(api_keys: list[str], keywords_list, max_results, lim
                         log_line(log_callback, f"    [{serial_number - 1}] {row['视频链接']} ({row['视频类型']}) - 粉丝数: {row['作者粉丝数']}")
 
                     if get_comments_bool:
-                        for r in rows:
+                        for r in sanitize_csv_rows(rows):
                             writer.writerow("视频信息", r)
                     else:
                         writer.writerows(sanitize_csv_rows(rows))

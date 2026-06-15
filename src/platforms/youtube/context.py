@@ -14,6 +14,8 @@ from urllib.parse import urlparse
 
 from googleapiclient.errors import HttpError
 from src.platforms.youtube.keyword import YouTubeClientPool, execute_with_retry
+from src.platforms.youtube.comments import build_video_url
+from src.platforms.youtube.video_type import UNKNOWN, check_video_type_bulk
 
 from src.core import XlsxRowWriter, build_output_path, log_error, log_line, log_warn, sanitize_csv_rows, should_stop, wait_if_paused
 
@@ -179,7 +181,7 @@ def find_context_video_ids(client_pool, uploads_playlist_id: str, target_video_i
         context_size: 视频前后截取区间大小。
 
     Returns:
-        tuple: (选定的上下文视频 ID 列表, 目标视频在全列表的发布索引, 完整拉取的视频 ID 轴)。
+        tuple: (选定的上下文视频 ID 列表, 目标视频在全列表的发布索引, 完整拉取的视频 ID 轴, 选定视频对应的物理索引列表)。
     """
     video_ids: list[str] = []
     next_page_token = None
@@ -188,9 +190,9 @@ def find_context_video_ids(client_pool, uploads_playlist_id: str, target_video_i
     while page_count < max_pages:
         page_count += 1
         if should_stop(stop_event):
-            return [], -1, video_ids
+            return [], -1, video_ids, []
         if wait_if_paused(pause_event, stop_event):
-            return [], -1, video_ids
+            return [], -1, video_ids, []
         
         # 批量获取播放列表内容项
         while True:
@@ -226,13 +228,13 @@ def find_context_video_ids(client_pool, uploads_playlist_id: str, target_video_i
             break
 
     if target_video_id not in video_ids:
-        return [], -1, video_ids
+        return [], -1, video_ids, []
 
     # 切分出前后各 N 个视频 ID
     target_index = video_ids.index(target_video_id)
     selected_indices = list(range(max(0, target_index - context_size), target_index))
     selected_indices += list(range(target_index + 1, min(len(video_ids), target_index + context_size + 1)))
-    return [video_ids[idx] for idx in selected_indices], target_index, video_ids
+    return [video_ids[idx] for idx in selected_indices], target_index, video_ids, selected_indices
 
 
 def fetch_video_details(client_pool, video_ids: list[str], stop_event=None, pause_event=None, log_callback=None) -> dict[str, dict]:
@@ -307,7 +309,7 @@ OUTPUT_FIELDS = [
 ]
 
 
-def build_pair_rows(client_pool, target_video_url: str, profile_url: str, channel_cache: dict[str, dict], log_callback, stop_event=None, pause_event=None, context_size: int = CONTEXT_SIZE, max_upload_pages: int = 200) -> list[dict]:
+def build_pair_rows(client_pool, target_video_url: str, profile_url: str, channel_cache: dict[str, dict], log_callback, stop_event=None, pause_event=None, context_size: int = CONTEXT_SIZE, max_upload_pages: int = 200, check_video_type_bool: bool = True) -> list[dict]:
     """针对单对“目标视频 + 博主主页”解析其前后关联的上下文数据行。"""
     rows: list[dict] = []
     target_video_id = parse_video_id(target_video_url)
@@ -319,7 +321,10 @@ def build_pair_rows(client_pool, target_video_url: str, profile_url: str, channe
     channel = channel_cache.get(profile_url)
     if channel is None:
         channel = resolve_channel(client_pool, profile_url, log_callback)
-        channel_cache[profile_url] = channel
+        # 仅成功才写缓存。失败时不缓存空 dict，否则 `is None` 判断永久失效，
+        # 导致后续相同 profile_url 的配对反复触发昂贵的视频反查。
+        if channel:
+            channel_cache[profile_url] = channel
 
     uploads_id = channel.get("contentDetails", {}).get("relatedPlaylists", {}).get("uploads", "")
     if not uploads_id:
@@ -332,7 +337,7 @@ def build_pair_rows(client_pool, target_video_url: str, profile_url: str, channe
             log_line(log_callback, "  跳过：无法解析上传列表。请检查博主主页链接是否为 YouTube 频道主页。")
             return rows
 
-    selected_ids, target_index, timeline_ids = find_context_video_ids(client_pool, uploads_id, target_video_id, stop_event, pause_event, max_upload_pages, context_size, log_callback)
+    selected_ids, target_index, timeline_ids, selected_indices = find_context_video_ids(client_pool, uploads_id, target_video_id, stop_event, pause_event, max_upload_pages, context_size, log_callback)
     if should_stop(stop_event):
         return rows
     if target_index < 0:
@@ -341,9 +346,12 @@ def build_pair_rows(client_pool, target_video_url: str, profile_url: str, channe
 
     # 批量解析抓取的上下文视频 ID 指标
     details = fetch_video_details(client_pool, selected_ids, stop_event, pause_event, log_callback)
+    type_map = {}
+    if check_video_type_bool and selected_ids:
+        log_line(log_callback, f"  使用统一 HEAD/重定向逻辑验证 {len(selected_ids)} 个上下文视频的长短类型...")
+        type_map = check_video_type_bulk(selected_ids)
     from src.platforms.youtube.comments import format_youtube_datetime
-    for vid in selected_ids:
-        current_index = timeline_ids.index(vid)
+    for vid, current_index in zip(selected_ids, selected_indices):
         item = details.get(vid, {})
         channel_id = item.get("channel_id", "")
         channel_url = f"https://www.youtube.com/channel/{channel_id}" if channel_id else ""
@@ -353,7 +361,7 @@ def build_pair_rows(client_pool, target_video_url: str, profile_url: str, channe
         rows.append({
             "博主链接": profile_url,
             "目标视频链接": target_video_url,
-            "视频链接": f"https://www.youtube.com/watch?v={vid}",
+            "视频链接": build_video_url(vid, type_map.get(vid, UNKNOWN)),
             "博主主页链接": channel_url,
             "时间轴关系": relation_for_index(target_index, current_index),
             "标题": item.get("title", ""),
@@ -361,7 +369,7 @@ def build_pair_rows(client_pool, target_video_url: str, profile_url: str, channe
             "频道名称": item.get("channel_title", ""),
             "发布日期": final_pub_date,
             "发布时间": final_pub_date,
-            "视频类型": "",
+            "视频类型": type_map.get(vid, ""),
             "视频时长": item.get("duration", ""),
             "视频简介": item.get("description", ""),
             "播放量": item.get("view_count", ""),
@@ -388,6 +396,7 @@ def run_youtube_paired_context_spider(api_keys: list[str], txt_path: str, log_ca
         config = {}
     context_size = int(config.get("context_size", CONTEXT_SIZE))
     max_upload_pages = int(config.get("max_upload_pages", 200))
+    check_video_type_bool = config.get("check_video_type", "是") == "是"
 
     output_path = None
     try:
@@ -411,7 +420,7 @@ def run_youtube_paired_context_spider(api_keys: list[str], txt_path: str, log_ca
                 break
             log_line(log_callback, f"[{index}/{len(pairs)}] 定位 YouTube 目标视频: {target_video_url}")
             try:
-                rows = build_pair_rows(client_pool, target_video_url, profile_url, channel_cache, log_callback, stop_event, pause_event, context_size, max_upload_pages)
+                rows = build_pair_rows(client_pool, target_video_url, profile_url, channel_cache, log_callback, stop_event, pause_event, context_size, max_upload_pages, check_video_type_bool)
                 if rows:
                     writer.writerows(sanitize_csv_rows(rows))
                     written_count += len(rows)

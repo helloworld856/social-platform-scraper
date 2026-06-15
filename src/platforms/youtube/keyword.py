@@ -9,7 +9,10 @@
 
 from __future__ import annotations
 
+import errno
+import http.client
 import re
+import socket
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -17,6 +20,73 @@ from googleapiclient.discovery import build
 
 from src.core import XlsxRowWriter, MultiSheetXlsxWriter, build_output_path, interruptible_sleep, log_error, log_line, log_warn, sanitize_csv_rows, should_stop, wait_if_paused
 # Deferred imports below to prevent circular dependency
+
+
+TRANSIENT_CONNECTION_WINERRORS = {10053, 10054, 10060}
+TRANSIENT_CONNECTION_ERRNOS = {errno.ECONNABORTED, errno.ECONNRESET, errno.ETIMEDOUT, errno.EPIPE}
+TRANSIENT_CONNECTION_TEXT = (
+    "forcibly closed",
+    "connection reset",
+    "remote end closed connection",
+    "主机关闭了一个已有的连接",
+    "远程主机强迫关闭",
+)
+# 方案 A：仅保留确切的连接断开/超时类异常。
+# ssl.SSLError、urllib.error.URLError 覆盖面过宽（含证书校验失败、DNS 解析失败等
+# 不可重试的永久故障），已移出白名单；真正的连接断开仍由下方 errno/winerror/文本兜底捕获。
+TRANSIENT_CONNECTION_EXCEPTIONS = (
+    ConnectionAbortedError,
+    ConnectionResetError,
+    BrokenPipeError,
+    TimeoutError,
+    socket.timeout,
+    http.client.RemoteDisconnected,
+    http.client.CannotSendRequest,
+    http.client.ResponseNotReady,
+    http.client.BadStatusLine,
+)
+
+
+def _iter_exception_chain(exc: BaseException):
+    """Yield nested exceptions, including urllib.reason/cause/context."""
+    seen = set()
+    current = exc
+    while current and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = getattr(current, "reason", None) or getattr(current, "__cause__", None) or getattr(current, "__context__", None)
+
+
+def is_transient_connection_error(exc: BaseException) -> bool:
+    """Return True for low-level network disconnects worth retrying with a fresh socket."""
+    for item in _iter_exception_chain(exc):
+        if isinstance(item, TRANSIENT_CONNECTION_EXCEPTIONS):
+            return True
+        if isinstance(item, OSError):
+            if getattr(item, "winerror", None) in TRANSIENT_CONNECTION_WINERRORS:
+                return True
+            if getattr(item, "errno", None) in TRANSIENT_CONNECTION_ERRNOS:
+                return True
+        text = str(item).lower()
+        if any(pattern in text for pattern in TRANSIENT_CONNECTION_TEXT):
+            return True
+    return False
+
+
+def _clear_request_http_connections(request) -> None:
+    """Drop stale httplib2 keep-alive sockets before retrying an API request."""
+    http_obj = getattr(request, "http", None)
+    connections = getattr(http_obj, "connections", None)
+    if not isinstance(connections, dict):
+        return
+    for connection in list(connections.values()):
+        close = getattr(connection, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+    connections.clear()
 
 
 class YouTubeClientPool:
@@ -36,6 +106,12 @@ class YouTubeClientPool:
             self._clients[key] = build("youtube", "v3", developerKey=key, cache_discovery=False)
         self._current_client = self._clients[key]
 
+    def refresh_current_client(self):
+        """重建当前 Key 的 API client，丢弃可能持有失效 socket 的旧实例。"""
+        key = self.api_keys[self.current_idx]
+        self._clients.pop(key, None)
+        self._build_client()
+
     @property
     def client(self):
         return self._current_client
@@ -50,7 +126,7 @@ class YouTubeClientPool:
 
 
 def execute_with_retry(request, log_callback=None, stop_event=None):
-    """执行 API 请求，遇 429/500/503 自动重试（最多 3 次）。
+    """执行 API 请求，遇 429/500/503 或瞬时断线自动重试（最多 3 次）。
 
     不处理 403（配额耗尽），由调用方通过 client_pool.next_client() 处理。
     """
@@ -64,6 +140,15 @@ def execute_with_retry(request, log_callback=None, stop_event=None):
                 wait = 2 ** attempt
                 if log_callback:
                     log_line(log_callback, f"  [API] HTTP {e.resp.status}，{wait}秒后重试...")
+                interruptible_sleep(wait, stop_event)
+                continue
+            raise
+        except Exception as e:
+            if is_transient_connection_error(e) and attempt < max_retries - 1:
+                _clear_request_http_connections(request)
+                wait = 2 ** attempt
+                if log_callback:
+                    log_line(log_callback, f"  [API] 连接被远端关闭，{wait}秒后重试...")
                 interruptible_sleep(wait, stop_event)
                 continue
             raise
@@ -138,6 +223,8 @@ def _api_call_with_rotation(client_pool, build_request, log_callback, stop_event
         stop_event: 中断事件。
     """
     import googleapiclient.errors
+    transient_refreshes = 0
+    max_transient_refreshes = 2
     while True:
         try:
             return execute_with_retry(build_request(), log_callback, stop_event)
@@ -147,6 +234,13 @@ def _api_call_with_rotation(client_pool, build_request, log_callback, stop_event
                     log_line(log_callback, f"  [API] 额度受限 ({e.resp.status})，切换 Key ({client_pool.current_idx + 1}/{len(client_pool.api_keys)})...")
                     continue
                 log_line(log_callback, f"  [API] 所有 API Key 配额均已耗尽 ({e.resp.status})。")
+            raise
+        except Exception as e:
+            if is_transient_connection_error(e) and transient_refreshes < max_transient_refreshes:
+                transient_refreshes += 1
+                client_pool.refresh_current_client()
+                log_line(log_callback, f"  [API] 连接失效，已重建当前 API client 后重试 ({transient_refreshes}/{max_transient_refreshes})...")
+                continue
             raise
 
 
