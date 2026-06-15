@@ -21,6 +21,8 @@ from src.platforms.youtube.keyword import (
     collect_video_ids_with_playwright,
     format_youtube_duration,
     iter_search_video_id_batches,
+    language_matches_snippet,
+    parse_language_filter,
     parse_date_range,
     safe_filename_part,
 )
@@ -45,7 +47,7 @@ CSV_FIELDS_PRO = [
 ]
 
 
-def fetch_video_rows_pro(client_pool, keyword: str, video_ids: list[str], stop_event=None, pause_event=None, batch_size: int = 50, log_callback=None) -> list[dict]:
+def fetch_video_rows_pro(client_pool, keyword: str, video_ids: list[str], stop_event=None, pause_event=None, batch_size: int = 50, log_callback=None, target_languages: set[str] | None = None) -> list[dict]:
     """批量获取指定视频 ID 的详情指标（包含评论数、简介等），封装为导出格式。"""
     import googleapiclient.errors
 
@@ -61,7 +63,7 @@ def fetch_video_rows_pro(client_pool, keyword: str, video_ids: list[str], stop_e
                     part="snippet,contentDetails,statistics",
                     id=",".join(ids),
                     maxResults=batch_size,
-                    fields="items(id,snippet(title,channelId,publishedAt,description),contentDetails(duration),statistics(viewCount,likeCount,commentCount))"
+                    fields="items(id,snippet(title,channelId,publishedAt,description,defaultAudioLanguage,defaultLanguage),contentDetails(duration),statistics(viewCount,likeCount,commentCount))"
                 ),
                 log_callback,
                 stop_event,
@@ -72,14 +74,26 @@ def fetch_video_rows_pro(client_pool, keyword: str, video_ids: list[str], stop_e
                 break  # 所有 Key 配额耗尽，跳出循环
             raise
 
+        batch_before = len(response.get("items", []))
+        batch_kept = 0
+        missing_language_count = 0
+        mismatch_language_count = 0
         for item in response.get("items", []):
             if should_stop(stop_event):
                 break
             snippet = item.get("snippet", {})
+            language_ok, language_reason = language_matches_snippet(snippet, target_languages)
+            if not language_ok:
+                if language_reason == "missing":
+                    missing_language_count += 1
+                else:
+                    mismatch_language_count += 1
+                continue
             stats = item.get("statistics", {})
             content_details = item.get("contentDetails", {})
             video_id = item.get("id", "")
             channel_id = snippet.get("channelId", "")
+            batch_kept += 1
 
             # 简介：不截断，但处理换行符以适应 CSV/Excel
             description = (snippet.get("description") or "").replace("\n", " | ").replace("\r", "")
@@ -104,6 +118,12 @@ def fetch_video_rows_pro(client_pool, keyword: str, video_ids: list[str], stop_e
             row["_channel_id"] = channel_id
             row["_video_id"] = video_id
             rows.append(row)
+        if target_languages:
+            filtered = batch_before - batch_kept
+            log_line(
+                log_callback,
+                f"  语种过滤：本批 {batch_before} -> {batch_kept}，过滤 {filtered}（无语言 {missing_language_count}，不匹配 {mismatch_language_count}）",
+            )
     return rows
 
 
@@ -148,7 +168,14 @@ def fetch_channel_subscribers_batch(client_pool, channel_ids: list[str], log_cal
 
 def run_youtube_keyword_pro(api_keys: list[str], keywords_list, max_results, limit_time_str, start_date, end_date, get_comments_str, max_comments, check_video_type_str, auto_snapshot_3d_str, auto_snapshot_7d_str, log_callback, finish_callback, stop_event=None, config=None, pause_event=None):
     """运行 YouTube 关键词采集 Pro 主驱动函数。"""
-    from src.platforms.youtube.comments import fetch_top_level_comments
+    from src.platforms.youtube.comments import (
+        COMMENT_MODE_FAST,
+        DEFAULT_COMMENT_WORKERS,
+        CommentFetchTask,
+        fetch_top_comments_for_videos,
+        normalize_comment_mode,
+        normalize_comment_workers,
+    )
     from src.platforms.youtube.snapshot_scheduler import process_due_jobs, register_job
 
     if config is None:
@@ -168,6 +195,10 @@ def run_youtube_keyword_pro(api_keys: list[str], keywords_list, max_results, lim
     enable_timer = config.get("enable_timer", "否") == "是"
     timer_interval_minutes = int(config.get("timer_interval_minutes", 60))
     timer_max_runs = int(config.get("timer_max_runs", 3))
+    target_languages = parse_language_filter(config.get("youtube_language_filter", ""))
+    relevance_language = next(iter(target_languages)) if len(target_languages) == 1 else ""
+    comment_mode = normalize_comment_mode(config.get("youtube_comment_mode", COMMENT_MODE_FAST))
+    comment_workers = normalize_comment_workers(config.get("youtube_comment_workers", DEFAULT_COMMENT_WORKERS))
 
     output_path = None
     output_paths: list[str] = []
@@ -209,6 +240,8 @@ def run_youtube_keyword_pro(api_keys: list[str], keywords_list, max_results, lim
             
             # 每轮循环重新初始化 API 客户端池，防止由于长时间休眠导致底层 TCP 连接被服务器静默掐断 (ConnectionResetError 10054)
             client_pool = YouTubeClientPool(api_keys)
+            if target_languages:
+                log_line(log_callback, f"  语种严格过滤已启用：{', '.join(sorted(target_languages))}")
             
             current_run += 1
             if enable_timer and limit_time_bool:
@@ -288,7 +321,7 @@ def run_youtube_keyword_pro(api_keys: list[str], keywords_list, max_results, lim
                 if not all_video_ids:
                     log_line(log_callback, "  使用 API 搜索模式获取视频 ID 列表中...")
                     try:
-                        for batch_ids in iter_search_video_id_batches(client_pool, keyword, max_results, limit_time_bool, start_dt, end_dt, log_callback, stop_event, pause_event, search_batch_size, date_chunk_days, date_chunk_hours):
+                        for batch_ids in iter_search_video_id_batches(client_pool, keyword, max_results, limit_time_bool, start_dt, end_dt, log_callback, stop_event, pause_event, search_batch_size, date_chunk_days, date_chunk_hours, relevance_language):
                             all_video_ids.extend(batch_ids)
                             if len(all_video_ids) >= max_results:
                                 break
@@ -302,7 +335,7 @@ def run_youtube_keyword_pro(api_keys: list[str], keywords_list, max_results, lim
                     if should_stop(stop_event) or wait_if_paused(pause_event, stop_event):
                         break
 
-                    rows = fetch_video_rows_pro(client_pool, keyword, chunk_ids, stop_event, pause_event, video_batch_size, log_callback)
+                    rows = fetch_video_rows_pro(client_pool, keyword, chunk_ids, stop_event, pause_event, video_batch_size, log_callback, target_languages)
 
                     if written_count + len(rows) > max_results:
                         rows = rows[:max_results - written_count]
@@ -322,6 +355,25 @@ def run_youtube_keyword_pro(api_keys: list[str], keywords_list, max_results, lim
                         video_type_map = check_video_type_bulk(batch_vids)
 
                     # 整合并写入数据
+                    comment_results = {}
+                    if get_comments_bool:
+                        comment_tasks = [
+                            CommentFetchTask(video_id=row["_video_id"], video_url=row["视频链接"])
+                            for row in rows
+                            if row.get("_video_id")
+                        ]
+                        comment_results = fetch_top_comments_for_videos(
+                            api_keys,
+                            comment_tasks,
+                            max_comments,
+                            comment_top_limit,
+                            comment_mode,
+                            comment_workers,
+                            log_callback,
+                            stop_event,
+                            pause_event,
+                        )
+
                     for row in rows:
                         row["序号"] = str(serial_number)
                         vid = row.pop("_video_id", "")
@@ -334,12 +386,14 @@ def run_youtube_keyword_pro(api_keys: list[str], keywords_list, max_results, lim
 
                         if get_comments_bool:
                             try:
-                                comments = fetch_top_level_comments(client_pool, vid, max_comments, log_callback, stop_event, pause_event)
+                                result = comment_results.get(vid)
+                                if result and result.status == "error":
+                                    log_warn(log_callback, f"    评论获取失败 ({vid})：{result.error}")
+                                comments = result.comments if result else []
                                 if not comments:
                                     writer.writerow("评论信息", {"序号": row["序号"], "视频链接": row["视频链接"], "评论内容": "无评论或被禁用"})
                                 else:
-                                    comments.sort(key=lambda item: item["like_count"], reverse=True)
-                                    for comment in comments[:comment_top_limit]:
+                                    for comment in comments:
                                         comment_row = {
                                             "序号": row["序号"],
                                             "视频链接": row["视频链接"],

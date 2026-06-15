@@ -51,24 +51,36 @@ DEFAULT_CONFIGS: dict[str, dict] = {
         "max_results": 5000,                  # 搜索结果最大爬取数
         "youtube_search_batch_size": 50,       # 搜索 API 批量请求大小
         "youtube_video_batch_size": 50,        # 视频详情 API 批量请求大小
+        "youtube_language_filter": "fr, ru, de, es",  # 目标语种代码，默认法/俄/德/西
+        "youtube_comment_mode": "快速模式",
+        "youtube_comment_workers": 5,
     },
     "youtube_keyword_mining_pro": {
         "max_results": 5000,
         "youtube_search_batch_size": 50,
         "youtube_video_batch_size": 50,
+        "youtube_language_filter": "fr, ru, de, es",
+        "youtube_comment_mode": "快速模式",
+        "youtube_comment_workers": 5,
     },
     "youtube_paired_context_metrics": {
         "context_size": 5,                     # 上下文选取大小（目标视频前后各取 N 个）
         "max_upload_pages": 200,               # 上传列表分页获取最大页数
+        "check_video_type": "是",               # 是否使用统一 HEAD/重定向逻辑检测长短视频类型
     },
     "youtube_channel_works": {
         "max_video_items": 5000,               # 频道作品提取上限
         "max_post_scrolls": 200,               # 帖子/社区内容滚动的最大次数（别名保留）
         "initial_load_delay": 1.8,
+        "youtube_comment_scan_limit": 500,     # 评论扫描上限（深扫模式下生效，快速模式下受 top_limit 约束）
+        "youtube_comment_mode": "快速模式",
+        "youtube_comment_workers": 5,
     },
     "youtube_top_comments": {
         "max_scan_comments": 500,              # 扫描评论最大上限
         "youtube_api_page_size": 100,          # API 每页请求数量
+        "youtube_comment_mode": "快速模式",
+        "youtube_comment_workers": 5,
     },
     "tiktok_keyword_metrics": {
         "max_videos": 1000,

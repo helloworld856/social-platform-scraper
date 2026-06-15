@@ -30,7 +30,14 @@ except ModuleNotFoundError:
     sync_playwright = None
 
 from src.core import DEFAULT_X_CDP_URL, MultiSheetXlsxWriter, XlsxRowWriter, build_output_path, connect_existing_chromium, interruptible_sleep, log_error, log_line, log_warn, sanitize_csv_cell, should_stop, wait_if_paused
-from src.platforms.youtube.comments import fetch_top_level_comments
+from src.platforms.youtube.comments import (
+    COMMENT_MODE_FAST,
+    DEFAULT_COMMENT_WORKERS,
+    CommentFetchTask,
+    fetch_top_comments_for_videos,
+    normalize_comment_mode,
+    normalize_comment_workers,
+)
 from src.platforms.youtube.keyword import parse_date_range
 from src.platforms.youtube.video_type import NORMAL_VIDEO, UNKNOWN, check_video_type_bulk
 
@@ -889,6 +896,9 @@ def run_youtube_channel_works_spider(
     max_post_scrolls = int(config.get("max_post_scrolls", max_post_scrolls))
     initial_load_delay_val = float(config.get("initial_load_delay", INITIAL_LOAD_DELAY))
     verify_video_type_bool = config.get("verify_video_type", "是") == "是"
+    comment_mode = normalize_comment_mode(config.get("youtube_comment_mode", COMMENT_MODE_FAST))
+    comment_workers = normalize_comment_workers(config.get("youtube_comment_workers", DEFAULT_COMMENT_WORKERS))
+    comment_scan_limit = int(config.get("youtube_comment_scan_limit", 500))
 
     completed_path = None
     browser = None
@@ -1000,6 +1010,26 @@ def run_youtube_channel_works_spider(
                 except Exception as exc:
                     log_warn(log_callback, f"  统一视频类型验证失败，保留原始类型：{exc}")
 
+            comment_results = {}
+            if get_comments_bool and api_keys:
+                comment_tasks = []
+                for work in works:
+                    work_link = work.get("link", "")
+                    video_id = _extract_video_id_from_href(work_link)
+                    if video_id:
+                        comment_tasks.append(CommentFetchTask(video_id=video_id, video_url=work_link))
+                comment_results = fetch_top_comments_for_videos(
+                    api_keys,
+                    comment_tasks,
+                    comment_scan_limit,
+                    max_comments,
+                    comment_mode,
+                    comment_workers,
+                    log_callback,
+                    stop_event,
+                    pause_event,
+                )
+
             def _flush_rows():
                 nonlocal channel_written
                 if not rows_buffer:
@@ -1018,19 +1048,17 @@ def run_youtube_channel_works_spider(
                     break
                 rows_buffer.append(row_from_work(serial_number, work, channel_url))
 
-                if get_comments_bool and client_pool is not None:
+                if get_comments_bool and comment_results:
                     try:
                         work_link = work.get("link", "")
-                        video_id = ""
-                        if "watch?v=" in work_link:
-                            video_id = work_link.split("v=")[1].split("&")[0]
-                        elif "shorts/" in work_link:
-                            video_id = work_link.split("shorts/")[1].split("?")[0]
+                        video_id = _extract_video_id_from_href(work_link)
 
                         if video_id:
-                            comments = fetch_top_level_comments(client_pool, video_id, max_comments, log_callback, stop_event, pause_event)
-                            comments.sort(key=lambda item: item["like_count"], reverse=True)
-                            for comment in comments[:max_comments]:
+                            result = comment_results.get(video_id)
+                            if result and result.status == "error":
+                                log_warn(log_callback, f"    评论获取失败 ({video_id})：{result.error}")
+                            comments = result.comments if result else []
+                            for comment in comments:
                                 comment_row = {
                                     "序号": str(serial_number),
                                     "编号": str(serial_number),

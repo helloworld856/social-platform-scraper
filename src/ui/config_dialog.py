@@ -18,6 +18,7 @@ from PyQt5.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -34,7 +35,7 @@ class ConfigParam:
     """
     key: str                    # 参数键名
     label: str                  # 参数显示名称
-    kind: str = "int"          # 参数渲染类型：int | float | combo | bool
+    kind: str = "int"          # 参数渲染类型：int | float | combo | bool | text
     default: Any = 0            # 默认值
     minimum: float = 0          # 数字上限
     maximum: float = 999999
@@ -210,6 +211,9 @@ class ConfigDialog(QDialog):
         elif param.kind == "bool":
             widget = QCheckBox()
             widget.setChecked(bool(param.default))
+        elif param.kind == "text":
+            widget = QLineEdit()
+            widget.setText(str(param.default or ""))
         else:
             widget = QSpinBox()
             widget.setRange(int(param.minimum), int(param.maximum))
@@ -240,6 +244,8 @@ class ConfigDialog(QDialog):
                 widget.setCurrentText(str(value))
             elif param.kind == "bool":
                 widget.setChecked(bool(value))
+            elif param.kind == "text":
+                widget.setText(str(value or ""))
 
     def _on_save(self) -> None:
         """确认保存。强行同步各微调框中用户手动键入未按回车的文本。"""
@@ -262,6 +268,8 @@ class ConfigDialog(QDialog):
                 widget.setCurrentText(str(param.default))
             elif param.kind == "bool":
                 widget.setChecked(bool(param.default))
+            elif param.kind == "text":
+                widget.setText(str(param.default or ""))
 
     def get_values(self) -> dict[str, Any]:
         """
@@ -282,6 +290,8 @@ class ConfigDialog(QDialog):
                 result[param.key] = widget.currentText()
             elif param.kind == "bool":
                 result[param.key] = widget.isChecked()
+            elif param.kind == "text":
+                result[param.key] = widget.text()
         return result
 
     def get_selected_profile(self) -> str | None:

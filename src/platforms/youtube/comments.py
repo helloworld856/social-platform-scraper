@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 import re
 import time
 from urllib.parse import parse_qs, urlparse
@@ -25,6 +27,47 @@ COMMENT_FIELDS = ["编号", "视频链接", "评论的点赞量", "评论内容"
 TOP_COMMENT_LIMIT = 100
 # 默认扫描评论的最大安全阈值
 DEFAULT_SCAN_LIMIT = 500
+COMMENT_MODE_FAST = "快速模式"
+COMMENT_MODE_DEEP = "深扫模式"
+DEFAULT_COMMENT_WORKERS = 5
+
+
+@dataclass(frozen=True)
+class CommentFetchTask:
+    video_id: str
+    video_url: str = ""
+    index: str = ""
+
+
+@dataclass
+class CommentFetchResult:
+    video_id: str
+    comments: list[dict]
+    status: str = "ok"
+    error: str = ""
+    http_status: int = 0
+
+
+def normalize_comment_mode(value: str | None) -> str:
+    if str(value or "").strip() == COMMENT_MODE_DEEP:
+        return COMMENT_MODE_DEEP
+    return COMMENT_MODE_FAST
+
+
+def effective_comment_scan_limit(max_scan_comments: int, top_comment_limit: int, comment_mode: str) -> int:
+    scan_limit = max(0, int(max_scan_comments or 0))
+    top_limit = max(1, int(top_comment_limit or TOP_COMMENT_LIMIT))
+    if normalize_comment_mode(comment_mode) == COMMENT_MODE_FAST:
+        return min(scan_limit, top_limit) if scan_limit > 0 else top_limit
+    return max(scan_limit, top_limit)
+
+
+def normalize_comment_workers(value) -> int:
+    try:
+        workers = int(value)
+    except (TypeError, ValueError):
+        workers = DEFAULT_COMMENT_WORKERS
+    return max(1, min(workers, 10))
 
 
 def format_youtube_datetime(date_str: str) -> str:
@@ -342,14 +385,10 @@ def fetch_top_level_comments(client_pool, video_id: str, max_scan_comments: int,
     return comments
 
 
-def top_comment_rows(client_pool, video_index: int, video_url: str, video_id: str, max_scan_comments: int, log_callback, stop_event=None, pause_event=None, top_comment_limit: int = TOP_COMMENT_LIMIT, api_page_size: int = 100) -> list[dict[str, str]]:
-    """提取视频评论并进行点赞排序，返回格式化好的前 N 条评论数据列表。"""
-    comments = fetch_top_level_comments(client_pool, video_id, max_scan_comments, log_callback, stop_event, pause_event, api_page_size=api_page_size)
-    # 按点赞数降序排序
-    comments.sort(key=lambda item: item["like_count"], reverse=True)
-
+def build_comment_rows(video_index: str, video_url: str, comments: list[dict], top_comment_limit: int = TOP_COMMENT_LIMIT) -> list[dict[str, str]]:
+    sorted_comments = sorted(comments, key=lambda item: item["like_count"], reverse=True)
     rows: list[dict[str, str]] = []
-    for comment in comments[:top_comment_limit]:
+    for comment in sorted_comments[:top_comment_limit]:
         rows.append(
             {
                 "编号": str(video_index),
@@ -360,6 +399,97 @@ def top_comment_rows(client_pool, video_index: int, video_url: str, video_id: st
             }
         )
     return rows
+
+
+def fetch_top_comments_for_videos(
+    api_keys: list[str],
+    video_tasks: list[CommentFetchTask],
+    max_scan_comments: int,
+    top_comment_limit: int,
+    comment_mode: str,
+    workers: int,
+    log_callback,
+    stop_event=None,
+    pause_event=None,
+    api_page_size: int = 100,
+) -> dict[str, CommentFetchResult]:
+    tasks = [task for task in video_tasks if task.video_id]
+    if not tasks:
+        return {}
+
+    scan_limit = effective_comment_scan_limit(max_scan_comments, top_comment_limit, comment_mode)
+    worker_count = min(normalize_comment_workers(workers), len(tasks))
+    mode = normalize_comment_mode(comment_mode)
+    log_line(log_callback, f"  评论采集：{mode}，并发 {worker_count}，每视频扫描上限 {scan_limit}，输出前 {top_comment_limit} 条。")
+
+    results: dict[str, CommentFetchResult] = {}
+    completed = 0
+    failed = 0
+    empty = 0
+    written_comments = 0
+
+    def _fetch_one(task: CommentFetchTask) -> CommentFetchResult:
+        if should_stop(stop_event):
+            return CommentFetchResult(task.video_id, [], "stopped")
+        if wait_if_paused(pause_event, stop_event):
+            return CommentFetchResult(task.video_id, [], "stopped")
+        try:
+            worker_pool = YouTubeClientPool(api_keys)
+            comments = fetch_top_level_comments(
+                worker_pool,
+                task.video_id,
+                scan_limit,
+                None,
+                stop_event,
+                pause_event,
+                api_page_size=api_page_size,
+            )
+            comments.sort(key=lambda item: item["like_count"], reverse=True)
+            return CommentFetchResult(task.video_id, comments[:top_comment_limit], "ok" if comments else "empty")
+        except HttpError as exc:
+            if "commentsDisabled" in str(exc) or (exc.resp.status == 403 and "disabled" in str(exc).lower()):
+                return CommentFetchResult(task.video_id, [], "disabled", str(exc), http_status=exc.resp.status)
+            return CommentFetchResult(task.video_id, [], "error", str(exc), http_status=exc.resp.status)
+        except Exception as exc:
+            return CommentFetchResult(task.video_id, [], "error", str(exc))
+
+    if worker_count <= 1:
+        for task in tasks:
+            if should_stop(stop_event):
+                break
+            result = _fetch_one(task)
+            results[task.video_id] = result
+            completed += 1
+            if result.status == "error":
+                failed += 1
+            if result.status in {"empty", "disabled"}:
+                empty += 1
+            written_comments += len(result.comments)
+    else:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            future_map = {executor.submit(_fetch_one, task): task for task in tasks}
+            try:
+                for future in as_completed(future_map):
+                    task = future_map[future]
+                    if should_stop(stop_event):
+                        for f in future_map:
+                            f.cancel()
+                        break
+                    result = future.result()
+                    results[task.video_id] = result
+                    completed += 1
+                    if result.status == "error":
+                        failed += 1
+                    if result.status in {"empty", "disabled"}:
+                        empty += 1
+                    written_comments += len(result.comments)
+                    if completed == len(tasks) or completed % max(1, worker_count) == 0:
+                        log_line(log_callback, f"  评论采集进度：{completed}/{len(tasks)}，失败 {failed}，空/禁评 {empty}，已取评论 {written_comments} 条。")
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+
+    log_line(log_callback, f"  评论采集完成：{completed}/{len(tasks)}，失败 {failed}，空/禁评 {empty}，已取评论 {written_comments} 条。")
+    return results
 
 
 def empty_video_row(video_index: int, video_url: str) -> dict[str, str]:
@@ -397,6 +527,8 @@ def run_youtube_video_metrics_spider(api_keys: list[str], txt_path: str, get_com
     check_type_bool = (check_type == "是")
     top_comment_limit = int(config.get("comment_top_limit", TOP_COMMENT_LIMIT))
     api_page_size = int(config.get("youtube_api_page_size", 100))
+    comment_mode = normalize_comment_mode(config.get("youtube_comment_mode", COMMENT_MODE_FAST))
+    comment_workers = normalize_comment_workers(config.get("youtube_comment_workers", DEFAULT_COMMENT_WORKERS))
 
     output_path = None
     completed_path = None
@@ -437,6 +569,29 @@ def run_youtube_video_metrics_spider(api_keys: list[str], txt_path: str, get_com
         if check_type_bool:
             log_line(log_callback, f"正在精确检测 {len(video_ids)} 个视频的长短类型 (网络请求可能较慢)...")
             type_map = check_video_type_bulk(video_ids)
+
+        comment_results: dict[str, CommentFetchResult] = {}
+        if get_comments_bool:
+            comment_tasks = [
+                CommentFetchTask(
+                    video_id=str(entry["视频ID"]),
+                    video_url=str(entry["视频链接"]),
+                    index=str(entry["编号"]),
+                )
+                for entry in entries
+            ]
+            comment_results = fetch_top_comments_for_videos(
+                api_keys,
+                comment_tasks,
+                max_scan_comments,
+                top_comment_limit,
+                comment_mode,
+                comment_workers,
+                log_callback,
+                stop_event,
+                pause_event,
+                api_page_size,
+            )
 
         for progress_index, entry in enumerate(entries, 1):
             if should_stop(stop_event):
@@ -492,7 +647,16 @@ def run_youtube_video_metrics_spider(api_keys: list[str], txt_path: str, get_com
                 writer.writerow("视频信息", sanitize_csv_row(row_video))
                 
                 try:
-                    rows = top_comment_rows(client_pool, video_index, final_video_url, video_id, max_scan_comments, log_callback, stop_event, pause_event, top_comment_limit, api_page_size)
+                    result = comment_results.get(video_id, CommentFetchResult(video_id, [], "empty"))
+                    if result.status == "error":
+                        if result.http_status in (403, 429) or "quotaExceeded" in result.error:
+                            log_error(log_callback, f"  停止任务：API 配额耗尽 ({result.error})")
+                            break
+                        else:
+                            log_warn(log_callback, f"  评论获取失败 ({video_id})：{result.error}，写入空占位行。")
+                            writer.writerow("评论信息", sanitize_csv_row(empty_video_row(video_index, final_video_url)))
+                            continue
+                    rows = build_comment_rows(str(video_index), final_video_url, result.comments, top_comment_limit)
                     if not rows:
                         rows = [empty_video_row(video_index, final_video_url)]
                     for r in sanitize_csv_rows(rows):
@@ -500,13 +664,8 @@ def run_youtube_video_metrics_spider(api_keys: list[str], txt_path: str, get_com
                     written_comments = len([row for row in rows if row["评论内容"]])
                     log_line(log_callback, f"  完成：播放 {v_info.get('播放量')}，点赞 {v_info.get('点赞数')}，评论 {v_info.get('评论数')}。写入热评 {written_comments} 条。")
                 except Exception as exc:
-                    import googleapiclient.errors
-                    if isinstance(exc, googleapiclient.errors.HttpError) and exc.resp.status in [403, 429]:
-                        log_error(log_callback, f"  停止任务：API 配额耗尽 ({exc})，请更换 API Key。")
-                        break
-                    else:
-                        writer.writerow("评论信息", sanitize_csv_row(empty_video_row(video_index, final_video_url)))
-                        log_warn(log_callback, f"  抓取评论失败：{exc}，已写入空评论占位行。")
+                    writer.writerow("评论信息", sanitize_csv_row(empty_video_row(video_index, final_video_url)))
+                    log_warn(log_callback, f"  抓取评论失败：{exc}，已写入空评论占位行。")
             else:
                 writer.writerow(sanitize_csv_row(row_video))
                 log_line(log_callback, f"  完成：播放 {v_info.get('播放量')}，点赞 {v_info.get('点赞数')}，评论 {v_info.get('评论数')}。")

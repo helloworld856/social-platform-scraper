@@ -63,6 +63,10 @@ class YouTubeKeywordWindow(SimpleToolWindow):
             ConfigParam("youtube_date_chunk_hours", "日期切分粒度(小时)，留空则使用上方天数", kind="int", default=0, minimum=0, maximum=720,
                         tooltip="若填写（如 1），则按小时切分时间区间，优先级高于上方的天数粒度。适合短时间范围内大量视频的精确采集。0 或留空表示使用天数粒度。"),
             ConfigParam("youtube_video_batch_size", "视频详情每批条数", kind="int", default=50, minimum=1, maximum=50),
+            ConfigParam("youtube_language_filter", "目标语种代码", kind="text", default="fr, ru, de, es",
+                        tooltip="可填写一个或多个语言代码，逗号、分号、空格或换行分隔，例如 zh-CN, zh-TW, en。为空表示不过滤。"),
+            ConfigParam("youtube_comment_mode", "评论采集模式", kind="combo", options=("快速模式", "深扫模式"), default="快速模式"),
+            ConfigParam("youtube_comment_workers", "评论并发数", kind="int", default=5, minimum=1, maximum=10),
             ConfigParam("youtube_browser_scroll_px", "浏览器每次滚动像素", kind="int", default=2500, minimum=500, maximum=10000, step=100),
             ConfigParam("youtube_browser_scroll_delay", "浏览器滚动间隔(秒)", kind="float", default=1.0, minimum=0.2, maximum=5.0, step=0.1, decimals=1),
             ConfigParam("youtube_browser_max_scrolls", "浏览器最大滚动次数", kind="int", default=100, minimum=10, maximum=500),
@@ -143,6 +147,10 @@ class YouTubeKeywordProWindow(SimpleToolWindow):
             ConfigParam("youtube_date_chunk_days", "按天切分跨度", kind="int", default=7, minimum=1, maximum=30),
             ConfigParam("youtube_date_chunk_hours", "按小时切分跨度", kind="int", default=0, minimum=0, maximum=23),
             ConfigParam("youtube_video_batch_size", "视频详情每页条数", kind="int", default=50, minimum=1, maximum=50),
+            ConfigParam("youtube_language_filter", "目标语种代码", kind="text", default="fr, ru, de, es",
+                        tooltip="可填写一个或多个语言代码，逗号、分号、空格或换行分隔，例如 zh-CN, zh-TW, en。为空表示不过滤。"),
+            ConfigParam("youtube_comment_mode", "评论采集模式", kind="combo", options=("快速模式", "深扫模式"), default="快速模式"),
+            ConfigParam("youtube_comment_workers", "评论并发数", kind="int", default=5, minimum=1, maximum=10),
             ConfigParam("youtube_browser_scroll_px", "浏览器单次滚动距离 (px)", kind="int", default=2500, minimum=500, maximum=10000),
             ConfigParam("youtube_browser_scroll_delay", "浏览器滚动等待时间 (秒)", kind="float", default=1.0, minimum=0.1, maximum=10.0),
             ConfigParam("youtube_browser_max_scrolls", "浏览器最大滚动次数", kind="int", default=100, minimum=1, maximum=10000),
@@ -207,12 +215,13 @@ class YouTubeContextWindow(SimpleToolWindow):
         return [
             ConfigParam("context_size", "目标视频前后各取几条", kind="int", default=5, minimum=1, maximum=20),
             ConfigParam("max_upload_pages", "最多翻页数", kind="int", default=200, minimum=10, maximum=1000),
+            ConfigParam("check_video_type", "是否检测长短视频类型？", kind="combo", options=("是", "否"), default="是"),
         ]
 
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
         from src.platforms.youtube.context import run_youtube_paired_context_spider
 
-        config = {k: v for k, v in values.items() if k in ("context_size", "max_upload_pages")}
+        config = {k: v for k, v in values.items() if k in ("context_size", "max_upload_pages", "check_video_type")}
         return run_youtube_paired_context_spider(_lines(values["api_key"]), self._text_to_tempfile(values["txt_path"]), log_callback, finish_callback, stop_event, config=config, pause_event=pause_event)
 
 
@@ -238,13 +247,11 @@ class YouTubeChannelWorksWindow(SimpleToolWindow):
                 FieldSpec("get_comments", "是否获取视频评论信息？", kind="combo", options=("是", "否"), default="否"),
                 FieldSpec("max_comments", "最多获取评论数", kind="int", default=100, minimum=10, maximum=10000),
                 FieldSpec("verify_video_type", "是否精确验证视频长短类型？", kind="combo", options=("是", "否"), default="是"),
-                FieldSpec("verify_max_scrolls", "验证最大滚动次数", kind="int", default=20, minimum=1, maximum=500),
             ],
             height=820,
         )
         self.bind_field_visibility("limit_time", "是", ["start_date", "end_date"])
         self.bind_field_visibility("get_comments", "是", ["max_comments"])
-        self.bind_field_visibility("verify_video_type", "是", ["verify_max_scrolls"])
 
     def validate_values(self, values):
         if not _lines(values["channel_urls"]):
@@ -258,12 +265,16 @@ class YouTubeChannelWorksWindow(SimpleToolWindow):
             ConfigParam("max_video_items", "最多作品数", kind="int", default=5000, minimum=1, maximum=5000),
             ConfigParam("max_post_scrolls", "帖子最大滚动次数", kind="int", default=200, minimum=1, maximum=5000),
             ConfigParam("initial_load_delay", "初始加载等待(秒)", kind="float", default=1.8, minimum=0.5, maximum=10.0, step=0.1, decimals=1),
+            ConfigParam("youtube_comment_scan_limit", "评论扫描上限", kind="int", default=500, minimum=10, maximum=10000,
+                        tooltip="深扫模式下每视频最多扫描的评论数。快速模式下受\"最多获取评论数\"约束。"),
+            ConfigParam("youtube_comment_mode", "评论采集模式", kind="combo", options=("快速模式", "深扫模式"), default="快速模式"),
+            ConfigParam("youtube_comment_workers", "评论并发数", kind="int", default=5, minimum=1, maximum=10),
         ]
 
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
         from src.platforms.youtube.channel_works import run_youtube_channel_works_spider
 
-        config = {k: v for k, v in values.items() if k in ("max_video_items", "page_load_timeout", "scroll_interval", "no_new_scroll_limit", "scroll_px", "max_post_scrolls", "save_batch_size", "initial_load_delay", "verify_video_type", "verify_max_scrolls")}
+        config = {k: v for k, v in values.items() if k.startswith("youtube_") or k in ("max_video_items", "page_load_timeout", "scroll_interval", "no_new_scroll_limit", "scroll_px", "max_post_scrolls", "save_batch_size", "initial_load_delay", "verify_video_type")}
         return run_youtube_channel_works_spider(
             _lines(values["api_key"]),
             values["channel_urls"],
@@ -302,6 +313,8 @@ class YouTubeCommentsWindow(SimpleToolWindow):
     def tool_config_params(self):
         return [
             ConfigParam("youtube_api_page_size", "评论每页条数", kind="int", default=100, minimum=1, maximum=100),
+            ConfigParam("youtube_comment_mode", "评论采集模式", kind="combo", options=("快速模式", "深扫模式"), default="快速模式"),
+            ConfigParam("youtube_comment_workers", "评论并发数", kind="int", default=5, minimum=1, maximum=10),
         ]
 
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):

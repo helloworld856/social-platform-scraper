@@ -1,5 +1,7 @@
 {
   "max_video_items": 5000,
   "max_post_scrolls": 100,
-  "initial_load_delay": 3.8
+  "initial_load_delay": 3.8,
+  "youtube_comment_mode": "快速模式",
+  "youtube_comment_workers": 5
 }
