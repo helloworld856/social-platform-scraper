@@ -241,6 +241,7 @@ class YouTubeChannelWorksWindow(SimpleToolWindow):
                     required=True,
                 ),
                 FieldSpec("collect_target", "采集目标", kind="combo", options=("全部", "仅视频与Shorts", "仅帖子 (Posts)"), default="全部"),
+                FieldSpec("live_stream_policy", "直播处理策略", kind="combo", options=("不处理", "保留并标记", "直接排除"), default="不处理", tooltip="【仅在提供有效API Key时生效】若需标记或排除直播，会消耗少量额度查询状态。"),
                 FieldSpec("limit_time", "是否限制时间？", kind="combo", options=("是", "否"), default="否"),
                 FieldSpec("start_date", "开始日期 YYYY-MM-DD", default=DEFAULT_START_DATE),
                 FieldSpec("end_date", "结束日期 YYYY-MM-DD", default=DEFAULT_END_DATE),
@@ -281,6 +282,7 @@ class YouTubeChannelWorksWindow(SimpleToolWindow):
             values.get("collect_target", "全部"),
             int(values.get("max_video_items", 5000)),
             int(values.get("max_post_scrolls", 200)),
+            values.get("live_stream_policy", "不处理"),
             values["limit_time"],
             values["start_date"],
             values["end_date"],
@@ -303,6 +305,7 @@ class YouTubeCommentsWindow(SimpleToolWindow):
             [
                 FieldSpec("api_key", "Google API Key(s) (支持多行或导入txt)", kind="text_or_file", required=True, placeholder="支持每行填写一个API Key，耗尽自动轮询"),
                 FieldSpec("txt_path", "视频链接，每行一个", kind="text_or_file", required=True, placeholder="https://www.youtube.com/watch?v=xxxx"),
+                FieldSpec("live_stream_policy", "直播处理策略", kind="combo", options=("不处理", "保留并标记", "直接排除"), default="不处理"),
                 FieldSpec("get_comments", "是否获取视频评论信息？", kind="combo", options=("是", "否"), default="否"),
                 FieldSpec("max_scan_comments", "最多获取评论数", kind="int", default=500, minimum=100, maximum=10000),
                 FieldSpec("check_type", "是否精确检测视频长短类型？", kind="combo", options=("是", "否"), default="否"),
@@ -324,6 +327,7 @@ class YouTubeCommentsWindow(SimpleToolWindow):
         return run_youtube_video_metrics_spider(
             _lines(values["api_key"]),
             self._text_to_tempfile(values["txt_path"]),
+            values.get("live_stream_policy", "不处理"),
             values.get("get_comments", "否"),
             values.get("check_type", "否"),
             int(values.get("max_scan_comments", 500)),

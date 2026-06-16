@@ -20,7 +20,7 @@ from src.platforms.youtube.video_type import check_video_type_bulk
 from src.core import MultiSheetXlsxWriter, XlsxRowWriter, build_output_path, log_error, log_line, log_warn, sanitize_csv_row, sanitize_csv_rows, should_stop, wait_if_paused
 
 # Excel 表头定义
-VIDEO_FIELDS = ["编号", "视频链接", "博主主页链接", "标题", "频道名称", "发布日期", "视频类型", "视频时长", "视频简介", "播放量", "点赞数", "评论数"]
+VIDEO_FIELDS = ["编号", "视频链接", "博主主页链接", "标题", "频道名称", "发布日期", "视频类型", "直播状态", "视频时长", "视频简介", "播放量", "点赞数", "评论数"]
 COMMENT_FIELDS = ["编号", "视频链接", "评论的点赞量", "评论内容", "发布时间"]
 
 # 默认导出热门评论的上限
@@ -244,7 +244,7 @@ def format_youtube_duration(iso_duration: str) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
-def fetch_video_metrics(client_pool, video_ids: list[str]) -> dict[str, dict]:
+def fetch_video_metrics(client_pool, video_ids: list[str], live_stream_policy: str = "不处理") -> dict[str, dict]:
     """调用 API 批量拉取视频的基本指标参数信息，单批上限 50 个。
 
     Args:
@@ -255,13 +255,17 @@ def fetch_video_metrics(client_pool, video_ids: list[str]) -> dict[str, dict]:
         dict[str, dict]: 视频 ID 到指标字典的映射映射表。
     """
     result = {}
+    api_part = "snippet,statistics,contentDetails"
+    if live_stream_policy in ("保留并标记", "直接排除"):
+        api_part += ",liveStreamingDetails"
+
     for i in range(0, len(video_ids), 50):
         batch = video_ids[i:i+50]
         while True:
             try:
                 response = execute_with_retry(
                     client_pool.client.videos().list(
-                        part="snippet,statistics,contentDetails",
+                        part=api_part,
                         id=",".join(batch)
                     ),
                     None
@@ -285,11 +289,29 @@ def fetch_video_metrics(client_pool, video_ids: list[str]) -> dict[str, dict]:
             if len(desc) > 300:
                 desc = desc[:300] + "..."
             
+            # 检测直播状态
+            live_status = "非直播"
+            if live_stream_policy != "不处理":
+                broadcast_content = snippet.get("liveBroadcastContent", "none").lower()
+                has_live_details = "liveStreamingDetails" in item
+                
+                if broadcast_content == "live":
+                    live_status = "正在直播"
+                elif broadcast_content == "upcoming":
+                    live_status = "预告直播"
+                elif has_live_details:
+                    live_status = "直播回放"
+                
+                if live_stream_policy == "直接排除" and live_status != "非直播":
+                    result[vid] = {"is_excluded": True}
+                    continue
+            
             result[vid] = {
                 "标题": snippet.get("title", ""),
                 "频道名称": snippet.get("channelTitle", ""),
                 "频道ID": snippet.get("channelId", ""),
                 "发布日期": pub_date,
+                "直播状态": live_status if live_stream_policy != "不处理" else "",
                 "视频时长": format_youtube_duration(content.get("duration", "")),
                 "视频简介": desc,
                 "播放量": stats.get("viewCount", ""),
@@ -503,15 +525,16 @@ def empty_video_row(video_index: int, video_url: str) -> dict[str, str]:
     }
 
 
-def run_youtube_video_metrics_spider(api_keys: list[str], txt_path: str, get_comments: str, check_type: str, max_scan_comments: int, log_callback, finish_callback, stop_event=None, config=None, pause_event=None):
+def run_youtube_video_metrics_spider(api_keys: list[str], txt_path: str, live_stream_policy: str, get_comments: str, check_type: str, max_scan_comments: int, log_callback, finish_callback, stop_event=None, config=None, pause_event=None):
     """运行 YouTube 视频数据与评论采集任务的主驱动函数。
 
     根据 TXT 文件输入批量获取视频基本热度、判定是否为 Shorts，
     并可选择性导出点赞排序后的置顶评论。
 
     Args:
-        api_key: API 服务密钥。
+        api_keys: API 服务密钥。
         txt_path: 输入文件路径。
+        live_stream_policy: 直播内容处理策略。
         get_comments: 是否同时抓取置顶评论（"是" / "否"）。
         check_type: 是否进行精确长短类型（Shorts）判别（"是" / "否"）。
         max_scan_comments: 每视频最多评论提取深度。
@@ -555,7 +578,7 @@ def run_youtube_video_metrics_spider(api_keys: list[str], txt_path: str, get_com
         
         try:
             log_line(log_callback, f"正在批量获取 {len(video_ids)} 个视频的热度数据...")
-            metrics_map = fetch_video_metrics(client_pool, video_ids)
+            metrics_map = fetch_video_metrics(client_pool, video_ids, live_stream_policy)
         except Exception as exc:
             import googleapiclient.errors
             if isinstance(exc, googleapiclient.errors.HttpError) and exc.resp.status in [403, 429]:
@@ -606,6 +629,10 @@ def run_youtube_video_metrics_spider(api_keys: list[str], txt_path: str, get_com
             log_line(log_callback, f"[{progress_index}/{len(entries)}] 处理编号 {video_index}：{video_url}")
             
             v_info = metrics_map.get(video_id)
+            if v_info and v_info.get("is_excluded"):
+                log_line(log_callback, "  因属于直播内容，跳过该视频。")
+                continue
+                
             detected_type = ""
             if not v_info:
                 v_info = {
@@ -613,6 +640,7 @@ def run_youtube_video_metrics_spider(api_keys: list[str], txt_path: str, get_com
                     "频道名称": "",
                     "频道ID": "",
                     "发布日期": "",
+                    "直播状态": "",
                     "视频时长": "",
                     "视频简介": "",
                     "播放量": "",
@@ -636,6 +664,7 @@ def run_youtube_video_metrics_spider(api_keys: list[str], txt_path: str, get_com
                 "频道名称": v_info.get("频道名称", ""),
                 "发布日期": final_pub_date,
                 "视频类型": detected_type,
+                "直播状态": v_info.get("直播状态", ""),
                 "视频时长": v_info.get("视频时长", ""),
                 "视频简介": v_info.get("视频简介", ""),
                 "播放量": v_info.get("播放量", ""),

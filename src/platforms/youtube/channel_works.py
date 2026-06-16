@@ -54,6 +54,7 @@ CSV_FIELDS = [
     "频道名称",
     "发布日期",
     "视频类型",
+    "直播状态",
     "视频时长",
     "视频简介",
     "播放量",
@@ -305,14 +306,19 @@ def collect_upload_video_ids(client_pool, uploads_playlist_id: str, max_video_it
     return video_ids
 
 
-def video_rows_from_api(client_pool, video_ids: list[str], stop_event=None, pause_event=None, log_callback=None) -> list[dict[str, str]]:
+def video_rows_from_api(client_pool, video_ids: list[str], stop_event=None, pause_event=None, log_callback=None, live_stream_policy: str = "不处理") -> list[dict[str, str]]:
     """
     根据视频 ID 列表，分页批量抓取视频详情元数据。
     调用 videos().list 获取 snippet (标题、描述、发布时间、频道)、statistics (播放、点赞、评论数) 和 contentDetails (时长)。
+    如果 live_stream_policy 需要判断直播，则额外请求 liveStreamingDetails。
     """
     rows: list[dict[str, str]] = []
     from src.platforms.youtube.comments import format_youtube_datetime, build_video_url
     from src.platforms.youtube.keyword import format_youtube_duration as kw_format
+
+    api_part = "snippet,statistics,contentDetails"
+    if live_stream_policy in ("保留并标记", "直接排除"):
+        api_part += ",liveStreamingDetails"
 
     # API 限制单次请求最大 50 条
     for batch in chunked(video_ids, 50):
@@ -323,7 +329,7 @@ def video_rows_from_api(client_pool, video_ids: list[str], stop_event=None, paus
         while True:
             try:
                 response = execute_with_retry(
-                    client_pool.client.videos().list(part="snippet,statistics,contentDetails", id=",".join(batch), maxResults=50),
+                    client_pool.client.videos().list(part=api_part, id=",".join(batch), maxResults=50),
                     log_callback
                 )
                 break
@@ -342,6 +348,22 @@ def video_rows_from_api(client_pool, video_ids: list[str], stop_event=None, paus
             title = (snippet.get("title") or "").strip()
             if not video_id or not title:
                 continue
+            
+            # 检测直播状态
+            live_status = "非直播"
+            if live_stream_policy != "不处理":
+                broadcast_content = snippet.get("liveBroadcastContent", "none").lower()
+                has_live_details = "liveStreamingDetails" in item
+                
+                if broadcast_content == "live":
+                    live_status = "正在直播"
+                elif broadcast_content == "upcoming":
+                    live_status = "预告直播"
+                elif has_live_details:
+                    live_status = "直播回放"
+                
+                if live_stream_policy == "直接排除" and live_status != "非直播":
+                    continue
             
             raw_duration = content.get("duration", "")
             duration = kw_format(raw_duration)
@@ -365,6 +387,7 @@ def video_rows_from_api(client_pool, video_ids: list[str], stop_event=None, paus
                     "channel_id": snippet.get("channelId", ""),
                     "published_at": pub_date,
                     "video_type": UNKNOWN,
+                    "live_status": live_status if live_stream_policy != "不处理" else "",
                     "duration": duration,
                     "description": desc,
                 }
@@ -399,7 +422,7 @@ def apply_unified_video_type_check(works: list[dict[str, str]], log_callback=Non
         work["link"] = build_video_url(video_id, video_type)
 
 
-def collect_video_works_with_api(client_pool, channel_url: str, max_video_items: int, limit_time_bool: bool, start_dt, end_dt, log_callback, stop_event=None, pause_event=None) -> list[dict[str, str]]:
+def collect_video_works_with_api(client_pool, channel_url: str, max_video_items: int, limit_time_bool: bool, start_dt, end_dt, log_callback, stop_event=None, pause_event=None, live_stream_policy: str = "不处理") -> list[dict[str, str]]:
     """
     完整的 API 模式博主视频采集。
     获取频道的 uploads 播放列表 -> 获取列表下符合时间条件的视频 ID -> 批量拉取视频统计详情。
@@ -422,7 +445,7 @@ def collect_video_works_with_api(client_pool, channel_url: str, max_video_items:
     if title:
         log_line(log_callback, f"  API 识别频道：{title}")
     video_ids = collect_upload_video_ids(client_pool, uploads_playlist_id, max_video_items, limit_time_bool, start_dt, end_dt, log_callback, stop_event, pause_event)
-    rows = video_rows_from_api(client_pool, video_ids, stop_event, pause_event, log_callback)
+    rows = video_rows_from_api(client_pool, video_ids, stop_event, pause_event, log_callback, live_stream_policy)
     log_line(log_callback, f"  API 视频类作品完成：{len(rows)} 条。")
     return rows
 
@@ -864,6 +887,7 @@ def run_youtube_channel_works_spider(
     collect_target: str = "全部",
     max_video_items: int = DEFAULT_MAX_VIDEO_ITEMS,
     max_post_scrolls: int = DEFAULT_MAX_POST_SCROLLS,
+    live_stream_policy: str = "不处理",
     limit_time_str: str = "否",
     start_date: str = "",
     end_date: str = "",
@@ -963,7 +987,7 @@ def run_youtube_channel_works_spider(
                     log_line(log_callback, "  YouTube API 不可用，尝试用浏览器读取 Videos/Shorts。")
                 else:
                     try:
-                        video_works = collect_video_works_with_api(client_pool, channel_url, max_video_items, limit_time_bool, start_dt, end_dt, log_callback, stop_event, pause_event)
+                        video_works = collect_video_works_with_api(client_pool, channel_url, max_video_items, limit_time_bool, start_dt, end_dt, log_callback, stop_event, pause_event, live_stream_policy)
                         if not video_works:
                             should_fallback_video_tabs = True
                             log_line(log_callback, "  API 未返回 Videos/Shorts，尝试用浏览器读取。")
