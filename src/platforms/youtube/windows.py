@@ -241,7 +241,7 @@ class YouTubeChannelWorksWindow(SimpleToolWindow):
                     required=True,
                 ),
                 FieldSpec("collect_target", "采集目标", kind="combo", options=("全部", "仅视频与Shorts", "仅帖子 (Posts)"), default="全部"),
-                FieldSpec("live_stream_policy", "直播处理策略", kind="combo", options=("不处理", "保留并标记", "直接排除"), default="不处理", tooltip="【仅在提供有效API Key时生效】若需标记或排除直播，会消耗少量额度查询状态。"),
+                FieldSpec("live_stream_policy", "直播处理策略", kind="combo", options=("不处理", "保留并标记", "直接排除"), default="不处理"),
                 FieldSpec("limit_time", "是否限制时间？", kind="combo", options=("是", "否"), default="否"),
                 FieldSpec("start_date", "开始日期 YYYY-MM-DD", default=DEFAULT_START_DATE),
                 FieldSpec("end_date", "结束日期 YYYY-MM-DD", default=DEFAULT_END_DATE),
