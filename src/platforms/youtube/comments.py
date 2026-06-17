@@ -17,10 +17,10 @@ from googleapiclient.errors import HttpError
 from src.platforms.youtube.keyword import YouTubeClientPool, execute_with_retry
 from src.platforms.youtube.video_type import check_video_type_bulk
 
-from src.core import MultiSheetXlsxWriter, XlsxRowWriter, build_output_path, log_error, log_line, log_warn, sanitize_csv_row, sanitize_csv_rows, should_stop, wait_if_paused
+from src.core import MultiSheetXlsxWriter, XlsxRowWriter, build_output_path, log_error, log_line, log_warn, sanitize_csv_row, sanitize_csv_rows, should_stop, wait_if_paused, interruptible_sleep
 
 # Excel 表头定义
-VIDEO_FIELDS = ["编号", "视频链接", "博主主页链接", "标题", "频道名称", "发布日期", "视频类型", "直播状态", "视频时长", "视频简介", "播放量", "点赞数", "评论数"]
+VIDEO_FIELDS = ["编号", "视频链接", "博主主页链接", "标题", "频道名称", "发布日期", "视频类型", "直播状态", "关联视频标题", "关联视频链接", "视频时长", "视频简介", "播放量", "点赞数", "评论数"]
 COMMENT_FIELDS = ["编号", "视频链接", "评论的点赞量", "评论内容", "发布时间"]
 
 # 默认导出热门评论的上限
@@ -196,6 +196,7 @@ def parse_video_entries(txt_path: str) -> list[dict[str, object]]:
                     "编号": len(entries) + 1,
                     "视频链接": canonical_video_url(video_id),
                     "视频ID": video_id,
+                    "预测类型": "Shorts" if "/shorts/" in raw_url else "视频",
                 }
             )
     # 为每一条条目记录本次解析的行数特征，方便驱动端日志打印
@@ -525,7 +526,7 @@ def empty_video_row(video_index: int, video_url: str) -> dict[str, str]:
     }
 
 
-def run_youtube_video_metrics_spider(api_keys: list[str], txt_path: str, live_stream_policy: str, get_comments: str, check_type: str, max_scan_comments: int, log_callback, finish_callback, stop_event=None, config=None, pause_event=None):
+def run_youtube_video_metrics_spider(api_keys: list[str], txt_path: str, fetch_shorts_related: str, live_stream_policy: str, get_comments: str, check_type: str, max_scan_comments: int, log_callback, finish_callback, stop_event=None, config=None, pause_event=None):
     """运行 YouTube 视频数据与评论采集任务的主驱动函数。
 
     根据 TXT 文件输入批量获取视频基本热度、判定是否为 Shorts，
@@ -534,6 +535,7 @@ def run_youtube_video_metrics_spider(api_keys: list[str], txt_path: str, live_st
     Args:
         api_keys: API 服务密钥。
         txt_path: 输入文件路径。
+        fetch_shorts_related: 抓取 Shorts 关联长视频。
         live_stream_policy: 直播内容处理策略。
         get_comments: 是否同时抓取置顶评论（"是" / "否"）。
         check_type: 是否进行精确长短类型（Shorts）判别（"是" / "否"）。
@@ -547,7 +549,11 @@ def run_youtube_video_metrics_spider(api_keys: list[str], txt_path: str, live_st
     if config is None:
         config = {}
     get_comments_bool = (get_comments == "是")
-    check_type_bool = (check_type == "是")
+    check_type_bool = check_type == "是"
+    fetch_shorts_related_bool = fetch_shorts_related == "是"
+    
+    # 用户明确反馈：若在TXT导入时已经由链接本身区分长短，则不强制开启检测，避免多余请求。
+    # 仅当用户主动勾选精确检测时才做深层请求。
     top_comment_limit = int(config.get("comment_top_limit", TOP_COMMENT_LIMIT))
     api_page_size = int(config.get("youtube_api_page_size", 100))
     comment_mode = normalize_comment_mode(config.get("youtube_comment_mode", COMMENT_MODE_FAST))
@@ -650,11 +656,21 @@ def run_youtube_video_metrics_spider(api_keys: list[str], txt_path: str, live_st
                 detected_type = "已删除"
             elif check_type_bool:
                 detected_type = type_map.get(video_id, "未知")
+            else:
+                detected_type = str(entry.get("预测类型", "视频"))
             
             final_pub_date = format_youtube_datetime(v_info.get("发布日期", ""))
             final_video_url = build_video_url(video_id, detected_type)
             channel_id = v_info.get("频道ID", "")
             channel_url = f"https://www.youtube.com/channel/{channel_id}" if channel_id else ""
+            
+            rt, rl = "", ""
+            if fetch_shorts_related_bool and detected_type == "Shorts":
+                if interruptible_sleep(1.0, stop_event):
+                    break
+                log_line(log_callback, f"  获取 Shorts 关联长视频：{video_id}")
+                from src.platforms.youtube.shorts import fetch_short_related_video
+                rt, rl = fetch_short_related_video(video_id)
             
             row_video = {
                 "编号": str(video_index),
@@ -665,6 +681,8 @@ def run_youtube_video_metrics_spider(api_keys: list[str], txt_path: str, live_st
                 "发布日期": final_pub_date,
                 "视频类型": detected_type,
                 "直播状态": v_info.get("直播状态", ""),
+                "关联视频标题": rt,
+                "关联视频链接": rl,
                 "视频时长": v_info.get("视频时长", ""),
                 "视频简介": v_info.get("视频简介", ""),
                 "播放量": v_info.get("播放量", ""),
