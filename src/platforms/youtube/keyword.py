@@ -89,6 +89,25 @@ def _clear_request_http_connections(request) -> None:
     connections.clear()
 
 
+class RequestsAdapter:
+    """
+    基于 requests 的 HTTP 适配器，用于替换 google-api-python-client 默认的 httplib2 客户端。
+    requests 原生支持代理环境变量，可完美绕过 httplib2 在处理 HTTPS 代理隧道时的各种报错。
+    """
+    def __init__(self):
+        import requests
+        self.session = requests.Session()
+        
+    def request(self, uri, method="GET", body=None, headers=None, redirections=1, connection_type=None):
+        resp = self.session.request(method, uri, data=body, headers=headers)
+        class ResponseHeaders(dict):
+            pass
+        rh = ResponseHeaders(resp.headers)
+        rh.status = resp.status_code
+        rh.reason = resp.reason
+        return rh, resp.content
+
+
 class YouTubeClientPool:
     """YouTube API 多 Key 轮换池。配额耗尽时自动切换到下一个 Key。"""
 
@@ -103,7 +122,7 @@ class YouTubeClientPool:
     def _build_client(self):
         key = self.api_keys[self.current_idx]
         if key not in self._clients:
-            self._clients[key] = build("youtube", "v3", developerKey=key, cache_discovery=False)
+            self._clients[key] = build("youtube", "v3", developerKey=key, cache_discovery=False, http=RequestsAdapter())
         self._current_client = self._clients[key]
 
     def refresh_current_client(self):

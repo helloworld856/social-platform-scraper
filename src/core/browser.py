@@ -174,6 +174,12 @@ def launch_chrome_for_cdp(port_or_url: str | int) -> subprocess.Popen:
     chrome_path = find_chrome_executable()
     port = debug_port_from_cdp_url(port_or_url)
     user_data_dir = get_chrome_user_data_dir()
+    
+    # 清除向 Chrome 传递的环境变量中的 HTTP_PROXY 以免影响 Playwright 浏览器
+    chrome_env = os.environ.copy()
+    for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        chrome_env.pop(k, None)
+
     p = subprocess.Popen(
         [
             chrome_path,
@@ -186,6 +192,7 @@ def launch_chrome_for_cdp(port_or_url: str | int) -> subprocess.Popen:
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         stdin=subprocess.DEVNULL,
+        env=chrome_env,
         # CREATE_NO_WINDOW 避免在 Windows GUI 界面下弹出黑色控制台闪窗
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )

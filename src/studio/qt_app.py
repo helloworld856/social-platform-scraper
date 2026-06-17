@@ -83,6 +83,10 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         self._apply_style()
         self.refresh_tools()
         self._setup_watcher()
+        
+        # 启动时应用全局代理配置
+        from src.core.config_store import apply_global_proxy
+        apply_global_proxy()
 
         # 启动后延迟 500ms 异步检查更新（避免阻塞窗口初始化）
         QTimer.singleShot(500, self._check_for_updates)
@@ -456,6 +460,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
             GLOBAL_TOOL_ID,
             load_config,
             save_config,
+            apply_global_proxy,
         )
 
         defaults = {p.key: p.default for p in GLOBAL_CONFIG_PARAMS}
@@ -464,6 +469,7 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         if dialog.exec_() == ConfigDialog.Accepted:
             values = dialog.get_values()
             save_config(GLOBAL_TOOL_ID, values, defaults, None)
+            apply_global_proxy()
 
     def refresh_tools(self) -> None:
         """
@@ -546,6 +552,15 @@ class ThreePlatformCrawlerQtApp(QMainWindow):
         process = QProcess(self)
         # 用当前相同的 python 解释器执行 tool_runner 模块
         process.setProgram(sys.executable)
+        
+        # 传递当前所有的环境变量，包含系统代理 HTTP_PROXY 等
+        from PyQt5.QtCore import QProcessEnvironment
+        import os
+        env = QProcessEnvironment.systemEnvironment()
+        for key, val in os.environ.items():
+            env.insert(key, val)
+        process.setProcessEnvironment(env)
+        
         process.setArguments(["-m", "src.studio.tool_runner", "--tool-id", tool.tool_id])
         process.setWorkingDirectory(str(Path(__file__).resolve().parents[2]))
         # 开启输出合并管道，将子进程的标准错误和标准输出流合并归纳，方便主应用接收打印

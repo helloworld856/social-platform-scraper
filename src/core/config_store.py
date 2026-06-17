@@ -18,6 +18,7 @@ _CONFIG_DIR_NAME = "config"
 GLOBAL_TOOL_ID = "__global__"
 
 GLOBAL_CONFIG_PARAMS: list[ConfigParam] = [
+    ConfigParam("proxy_address", "代理地址(非Playwright)", kind="text", default="", tooltip="如: http://127.0.0.1:7890 (留空走系统默认)"),
     ConfigParam("page_load_timeout", "页面加载超时(毫秒)", kind="int", default=45000, minimum=10000, maximum=120000, step=1000),
     ConfigParam("scroll_interval", "滚动间隔(秒)", kind="float", default=2.0, minimum=0.1, maximum=10.0, step=0.1, decimals=1),
     ConfigParam("no_new_scroll_limit", "无新内容停止阈值", kind="int", default=8, minimum=2, maximum=50),
@@ -30,6 +31,21 @@ GLOBAL_CONFIG_PARAMS: list[ConfigParam] = [
 ]
 
 GLOBAL_CONFIG_DEFAULTS: dict[str, object] = {p.key: p.default for p in GLOBAL_CONFIG_PARAMS}
+
+
+def apply_global_proxy() -> None:
+    """根据全局配置应用系统级的 HTTP_PROXY 与 HTTPS_PROXY 环境变量。"""
+    config = load_config(GLOBAL_TOOL_ID, GLOBAL_CONFIG_DEFAULTS, None)
+    proxy_url = str(config.get("proxy_address", "")).strip()
+    if proxy_url:
+        os.environ["HTTP_PROXY"] = proxy_url
+        os.environ["HTTPS_PROXY"] = proxy_url
+        os.environ["http_proxy"] = proxy_url
+        os.environ["https_proxy"] = proxy_url
+    else:
+        for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+            os.environ.pop(k, None)
+
 
 # 参数名别名映射：全局标准名 → [工具中使用的别名列表]
 # 仅包含语义和类型完全兼容的映射
