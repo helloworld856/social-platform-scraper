@@ -55,6 +55,8 @@ CSV_FIELDS = [
     "发布日期",
     "视频类型",
     "直播状态",
+    "关联视频标题",
+    "关联视频链接",
     "视频时长",
     "视频简介",
     "播放量",
@@ -872,6 +874,9 @@ def row_from_work(index: int, work: dict[str, str], channel_url: str = "") -> di
         "频道名称": work.get("channel_title", ""),
         "发布日期": work.get("published_at", ""),
         "视频类型": work.get("video_type", ""),
+        "直播状态": work.get("live_status", ""),
+        "关联视频标题": work.get("related_title", ""),
+        "关联视频链接": work.get("related_link", ""),
         "视频时长": work.get("duration", ""),
         "视频简介": work.get("description", ""),
         "播放量": work.get("views", ""),
@@ -887,6 +892,7 @@ def run_youtube_channel_works_spider(
     collect_target: str = "全部",
     max_video_items: int = DEFAULT_MAX_VIDEO_ITEMS,
     max_post_scrolls: int = DEFAULT_MAX_POST_SCROLLS,
+    fetch_shorts_related: str = "否",
     live_stream_policy: str = "不处理",
     limit_time_str: str = "否",
     start_date: str = "",
@@ -945,6 +951,7 @@ def run_youtube_channel_works_spider(
 
         limit_time_bool = limit_time_str == "是"
         get_comments_bool = get_comments_str == "是"
+        fetch_shorts_related_bool = fetch_shorts_related == "是"
         start_dt, end_dt = None, None
         if limit_time_bool:
             start_dt, end_dt = parse_date_range(start_date, end_date)
@@ -1070,6 +1077,18 @@ def run_youtube_channel_works_spider(
             for work in works:
                 if should_stop(stop_event):
                     break
+                
+                if fetch_shorts_related_bool and work.get("video_type") == "Shorts":
+                    vid = extract_video_id_from_work(work)
+                    if vid:
+                        if interruptible_sleep(1.0, stop_event):
+                            break
+                        log_line(log_callback, f"    获取 Shorts 关联长视频：{vid}")
+                        from src.platforms.youtube.shorts import fetch_short_related_video
+                        rt, rl = fetch_short_related_video(vid)
+                        work["related_title"] = rt
+                        work["related_link"] = rl
+
                 rows_buffer.append(row_from_work(serial_number, work, channel_url))
 
                 if get_comments_bool and comment_results:
