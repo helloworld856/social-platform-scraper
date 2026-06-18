@@ -169,8 +169,10 @@ def test_main_days_string_handling(tmp_path):
     import sys
     from src.tools.calibration import main
     
-    with patch.object(sys, 'argv', ['calibration.py', '--config', str(config_file_valid)]):
+    with patch.object(sys, 'argv', ['calibration.py', '--config', str(config_file_valid)]), \
+         patch('src.tools.calibration.run_calibration_task') as mock_run:
         main()  # Should run successfully without crashing
+        mock_run.assert_called_once()
 
     # Case B: Invalid days config like "seven" (should fail gracefully with SystemExit(1))
     config_data_invalid = {

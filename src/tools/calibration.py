@@ -143,7 +143,7 @@ def calculate_coverage(group_links: set[str], baseline_links: set[str]) -> tuple
     return round(volume_ratio, 2), round(intersection_ratio, 2)
 
 
-def run_platform_spider(platform: str, keyword: str, start_date: str, end_date: str, platform_config: dict, days: int) -> set[str]:
+def run_platform_spider(platform: str, keyword: str, start_date: str, end_date: str, platform_config: dict, days: int, stop_event=None, pause_event=None) -> set[str]:
     """在指定平台上执行单个关键词的搜索，返回去重链接集合。
 
     通过 finish_callback 拿到爬虫输出的 Excel 路径，再解析提取链接。
@@ -187,6 +187,8 @@ def run_platform_spider(platform: str, keyword: str, start_date: str, end_date: 
                 max_comments=0,
                 log_callback=log_callback,
                 finish_callback=finish_callback,
+                stop_event=stop_event,
+                pause_event=pause_event,
                 # 校准工具只走 API 模式，不启动浏览器
                 config={"youtube_search_method": "仅API（消耗配额）"}
             )
@@ -206,7 +208,9 @@ def run_platform_spider(platform: str, keyword: str, start_date: str, end_date: 
                 max_comments=0,
                 cdp_port_or_url=cdp_url,
                 log_callback=log_callback,
-                finish_callback=finish_callback
+                finish_callback=finish_callback,
+                stop_event=stop_event,
+                pause_event=pause_event
             )
 
         elif platform == "x_twitter":
@@ -228,6 +232,8 @@ def run_platform_spider(platform: str, keyword: str, start_date: str, end_date: 
                 port=cdp_url,
                 log_callback=log_callback,
                 finish_callback=finish_callback,
+                stop_event=stop_event,
+                pause_event=pause_event,
                 config={
                     "max_scrolls": max_scrolls,
                     "cooldown_min": 2.0,
@@ -324,28 +330,19 @@ def generate_reports(results: dict, output_path: str):
             f.write("\n".join(md_lines))
 
 
-def main():
-    """校准工具主入口：解析命令行参数 → 加载配置 → 逐游戏逐平台执行查询 → 生成报告。"""
-    parser = argparse.ArgumentParser(description="Keyword Coverage Calibration Tool")
-    parser.add_argument("--config", type=str, default="config/calibration_config.json", help="Path to configuration file")
-    parser.add_argument("--output", type=str, default="output/calibration_report.md", help="Path to output report file")
+def run_calibration_task(config: dict, output_path: str, log_callback=None, stop_event=None, pause_event=None):
+    """
+    分离出的核心执行逻辑，供 GUI 或 main() 调用。
+    """
+    from src.core.timing import should_stop, wait_if_paused
 
-    args = parser.parse_args()
-
-    try:
-        config = load_config(args.config)
-    except Exception as e:
-        print(f"Failed to load config: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    # 解析时间区间：支持显式指定 start_date/end_date，也支持用 days 自动计算
     time_period = config.get("time_period", {})
     days_raw = time_period.get("days", 7)
     try:
         days = int(days_raw)
     except (ValueError, TypeError) as e:
-        print(f"Invalid days value in config (must be integer): {e}", file=sys.stderr)
-        sys.exit(1)
+        if log_callback: log_callback(f"Invalid days value in config (must be integer): {e}")
+        raise ValueError(f"Invalid days value: {e}")
 
     if "start_date" in time_period and "end_date" in time_period:
         start_date_str = time_period["start_date"]
@@ -356,25 +353,38 @@ def main():
         start_date_str = start_dt.strftime("%Y-%m-%d")
         end_date_str = end_dt.strftime("%Y-%m-%d")
 
-    print(f"Calibration period: {start_date_str} to {end_date_str} ({days} days)")
+    msg = f"Calibration period: {start_date_str} to {end_date_str} ({days} days)"
+    print(msg)
+    if log_callback: log_callback(msg)
 
     platforms = ["youtube", "tiktok", "x_twitter"]
     results = {}
 
     for game in config.get("games", []):
+        if should_stop(stop_event): break
+        wait_if_paused(pause_event, stop_event)
+
         game_name = game["name"]
         baseline_query = game["baseline_query"]
         keyword_groups = game.get("keyword_groups", [])
 
-        print(f"\nProcessing game: {game_name}")
+        msg = f"\nProcessing game: {game_name}"
+        print(msg)
+        if log_callback: log_callback(msg)
+        
         results[game_name] = {
             "baseline_query": baseline_query,
             "platforms": {}
         }
 
         for platform in platforms:
+            if should_stop(stop_event): break
+            wait_if_paused(pause_event, stop_event)
+
             platform_config = config.get(platform, {})
-            print(f"  Running searches on platform: {platform}")
+            msg = f"  Running searches on platform: {platform}"
+            print(msg)
+            if log_callback: log_callback(msg)
 
             # 第一步：执行基准查询，获取基准链接集合
             baseline_links = run_platform_spider(
@@ -383,7 +393,9 @@ def main():
                 start_date=start_date_str,
                 end_date=end_date_str,
                 platform_config=platform_config,
-                days=days
+                days=days,
+                stop_event=stop_event,
+                pause_event=pause_event
             )
 
             results[game_name]["platforms"][platform] = {
@@ -393,15 +405,23 @@ def main():
 
             # 第二步：遍历每个关键词组，合并组内所有关键词的链接
             for grp in keyword_groups:
+                if should_stop(stop_event): break
+                wait_if_paused(pause_event, stop_event)
+
                 group_links = set()
                 for kw in grp:
+                    if should_stop(stop_event): break
+                    wait_if_paused(pause_event, stop_event)
+
                     kw_links = run_platform_spider(
                         platform=platform,
                         keyword=kw,
                         start_date=start_date_str,
                         end_date=end_date_str,
                         platform_config=platform_config,
-                        days=days
+                        days=days,
+                        stop_event=stop_event,
+                        pause_event=pause_event
                     )
                     group_links.update(kw_links)
 
@@ -416,9 +436,36 @@ def main():
                     "intersection_coverage": inter_cov
                 })
 
-    # 生成校准报告
-    generate_reports(results, args.output)
-    print(f"\nSuccessfully generated calibration report at {args.output}")
+    if not should_stop(stop_event):
+        # 生成校准报告
+        generate_reports(results, output_path)
+        msg = f"\nSuccessfully generated calibration report at {output_path}"
+        print(msg)
+        if log_callback: log_callback(msg)
+
+    # 兼容 GUI：最终写入 finish_callback (可选) 可以在 GUI 包装层处理，此处仅负责逻辑
+    return output_path
+
+
+def main():
+    """校准工具主入口：解析命令行参数 → 加载配置 → 逐游戏逐平台执行查询 → 生成报告。"""
+    parser = argparse.ArgumentParser(description="Keyword Coverage Calibration Tool")
+    parser.add_argument("--config", type=str, default="config/calibration_config.json", help="Path to configuration file")
+    parser.add_argument("--output", type=str, default="output/calibration_report.md", help="Path to output report file")
+
+    args = parser.parse_args()
+
+    try:
+        config = load_config(args.config)
+    except Exception as e:
+        print(f"Failed to load config: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        run_calibration_task(config, args.output)
+    except Exception as e:
+        print(f"Calibration failed: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
