@@ -46,6 +46,7 @@ class FieldSpec:
     maximum: int = 999999       # 数字类型最大值上限
     options: tuple[str, ...] = ()  # combo 下拉框的选项列表
     placeholder: str = ""       # 输入框占位符提示
+    tooltip: str = ""           # 悬停提示信息
 
 
 class WorkerSignals(QObject):
@@ -244,6 +245,8 @@ class SimpleToolWindow(QWidget):
             widget.setPlaceholderText(field.placeholder)
             
         self.widgets[field.name] = widget
+        if field.tooltip:
+            widget.setToolTip(field.tooltip)
         # 对数字微调框和下拉框安装轮播拦截器，禁止在此类组件上误触鼠标滚轮切换选项
         if isinstance(widget, (QSpinBox, QComboBox)):
             widget.installEventFilter(self)
