@@ -160,6 +160,28 @@ def is_cdp_available(port_or_url: str | int, timeout: float = 1.0) -> bool:
         return False
 
 
+def _is_port_occupied(port_or_url: str | int, timeout: float = 1.0) -> bool:
+    """
+    检测端口是否被占用（不管是否为 CDP 服务）。
+    Chrome 不带 --remote-debugging-port 运行时，/json/version 返回 400，
+    说明端口被占用但不是 CDP 模式。
+
+    Args:
+        port_or_url: CDP 端口或连接地址
+        timeout: 超时时长（秒）
+
+    Returns:
+        bool: 端口是否被占用
+    """
+    cdp_url = build_cdp_url(port_or_url).rstrip("/")
+    try:
+        with urlopen(f"{cdp_url}/json/version", timeout=timeout) as response:
+            # 200 = CDP 可用, 其他状态码 = 端口被占用但非 CDP
+            return True
+    except (OSError, ValueError):
+        return False
+
+
 def launch_chrome_for_cdp(port_or_url: str | int) -> subprocess.Popen:
     """
     以子进程的方式在后台启动带有 CDP 调试端口的 Chrome 浏览器。
@@ -200,6 +222,31 @@ def launch_chrome_for_cdp(port_or_url: str | int) -> subprocess.Popen:
     return p
 
 
+def _kill_chrome_on_port(port_or_url: str | int, log_callback=None) -> None:
+    """
+    尝试关闭占用指定端口的 Chrome 进程。
+    当 Chrome 已在运行但未开启 CDP 调试端口时，需要先关闭再重新以 CDP 模式启动。
+
+    Args:
+        port_or_url: CDP 端口或连接地址
+        log_callback: 日志回调
+    """
+    port = debug_port_from_cdp_url(port_or_url)
+    log_line(log_callback, f"端口 {port} 被占用但非 CDP 模式，尝试关闭现有 Chrome...")
+    try:
+        # Windows: 通过 taskkill 终止所有 chrome.exe 进程
+        subprocess.run(
+            ["taskkill", "/F", "/IM", "chrome.exe"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        # 等待进程完全退出
+        time.sleep(1.0)
+    except Exception:
+        pass
+
+
 def ensure_chrome_for_cdp(port_or_url: str | int, log_callback=None, wait_seconds: float = 12.0) -> None:
     """
     确保 Chrome CDP 调试端点已就绪。如果未就绪则自动拉起后台浏览器，并循环等待其加载就绪。
@@ -212,6 +259,10 @@ def ensure_chrome_for_cdp(port_or_url: str | int, log_callback=None, wait_second
     if is_cdp_available(port_or_url):
         return
 
+    # 检测端口是否被非 CDP 模式的 Chrome 占用（返回 400）
+    if _is_port_occupied(port_or_url):
+        _kill_chrome_on_port(port_or_url, log_callback)
+
     log_line(log_callback, "未检测到浏览器，正在自动启动 Chrome...")
     launch_chrome_for_cdp(port_or_url)
 
@@ -220,6 +271,10 @@ def ensure_chrome_for_cdp(port_or_url: str | int, log_callback=None, wait_second
     while time.time() < deadline:
         if is_cdp_available(port_or_url):
             return
+        # 如果端口仍被非 CDP 的进程占用，再次尝试关闭
+        if _is_port_occupied(port_or_url):
+            _kill_chrome_on_port(port_or_url, log_callback)
+            launch_chrome_for_cdp(port_or_url)
         # 每隔 0.4 秒检查一次，平衡响应灵敏度与无用轮询开销
         time.sleep(0.4)
 

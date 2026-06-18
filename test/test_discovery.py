@@ -14,7 +14,7 @@ def test_discover_all_tools():
     tools, _ = discover_tools()
     print(f"发现 {len(tools)} 个工具")
 
-    assert len(tools) == 25, f"期望 25 个工具，实际 {len(tools)}"
+    assert len(tools) == 26, f"期望 26 个工具，实际 {len(tools)}"
 
     # 验证每个工具都有必要字段
     for tool in tools:
@@ -39,7 +39,7 @@ def test_discover_by_category():
         print(f"  {cat}: {len(cat_tools)} 个工具")
 
     # 验证预期的类别
-    expected_categories = {"YouTube", "X/Twitter", "TikTok", "Instagram", "Facebook", "数据处理"}
+    expected_categories = {"YouTube", "X/Twitter", "TikTok", "Instagram", "Facebook", "数据处理", "工具"}
     actual_categories = set(categories.keys())
     assert actual_categories == expected_categories, f"类别不匹配: {actual_categories}"
 
@@ -50,6 +50,7 @@ def test_discover_by_category():
     assert len(categories["Instagram"]) == 1, f"Instagram 工具数量错误: {len(categories['Instagram'])}"
     assert len(categories["Facebook"]) == 2, f"Facebook 工具数量错误: {len(categories['Facebook'])}"
     assert len(categories["数据处理"]) == 3, f"数据处理工具数量错误: {len(categories['数据处理'])}"
+    assert len(categories.get("工具", [])) == 1, f"工具 数量错误: {len(categories.get('工具', []))}"
 
     print("[PASS] 类别统计验证通过")
 

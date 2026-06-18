@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 SCAN_DIRS = [
     "src/platforms",
     "src/processing",
+    "src/tools",
 ]
 
 

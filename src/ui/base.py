@@ -24,6 +24,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QTextEdit,
     QVBoxLayout,
@@ -45,6 +46,7 @@ class FieldSpec:
     maximum: int = 999999       # 数字类型最大值上限
     options: tuple[str, ...] = ()  # combo 下拉框的选项列表
     placeholder: str = ""       # 输入框占位符提示
+    tooltip: str = ""           # 悬停提示信息
 
 
 class WorkerSignals(QObject):
@@ -66,11 +68,12 @@ class SimpleToolWindow(QWidget):
     tool_id: str = ""
     current_profile: str | None = None
 
-    def __init__(self, title: str, fields: list[FieldSpec], *, width: int = 720, height: int = 680) -> None:
+    def __init__(self, title: str, fields: list[FieldSpec], *, width: int = 720, height: int = 680, form_stretch: int = 0) -> None:
         super().__init__()
         self.setWindowTitle(title)
         self.resize(width, height)
         self.fields = fields
+        self._form_stretch = form_stretch
         self.widgets: dict[str, Any] = {}
         
         # 线程同步与状态机通信事件
@@ -97,12 +100,21 @@ class SimpleToolWindow(QWidget):
         root.setContentsMargins(12, 10, 12, 8)
         root.setSpacing(6)
 
-        form = QFormLayout()
+        # 滚动区域
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QScrollArea.NoFrame)
+        
+        # 表单容器
+        form_widget = QWidget()
+        form = QFormLayout(form_widget)
         form.setLabelAlignment(Qt.AlignRight)
         form.setFormAlignment(Qt.AlignTop)
         form.setHorizontalSpacing(10)
         form.setVerticalSpacing(5)
-        root.addLayout(form)
+        
+        scroll_area.setWidget(form_widget)
+        root.addWidget(scroll_area, self._form_stretch)
         self.form_layout = form
 
         # 根据配置动态组装表单行
@@ -234,6 +246,8 @@ class SimpleToolWindow(QWidget):
             widget.setPlaceholderText(field.placeholder)
             
         self.widgets[field.name] = widget
+        if field.tooltip:
+            widget.setToolTip(field.tooltip)
         # 对数字微调框和下拉框安装轮播拦截器，禁止在此类组件上误触鼠标滚轮切换选项
         if isinstance(widget, (QSpinBox, QComboBox)):
             widget.installEventFilter(self)
