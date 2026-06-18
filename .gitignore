@@ -41,3 +41,6 @@ build/
 agents/
 TEST_READY.md
 config/__global__.json
+agents/
+TEST_READY.md
+config/__global__.json
