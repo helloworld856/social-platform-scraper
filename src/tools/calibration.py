@@ -143,7 +143,9 @@ def calculate_coverage(group_links: set[str], baseline_links: set[str]) -> tuple
     return round(volume_ratio, 2), round(intersection_ratio, 2)
 
 
-def run_platform_spider(platform: str, keyword: str, start_date: str, end_date: str, platform_config: dict, days: int, stop_event=None, pause_event=None) -> set[str]:
+def run_platform_spider(
+    platform: str, keyword: str, start_date: str, end_date: str, platform_config: dict, days: int, stop_event=None, pause_event=None
+) -> set[str]:
     """在指定平台上执行单个关键词的搜索，返回去重链接集合。
 
     通过 finish_callback 拿到爬虫输出的 Excel 路径，再解析提取链接。
@@ -190,7 +192,7 @@ def run_platform_spider(platform: str, keyword: str, start_date: str, end_date: 
                 stop_event=stop_event,
                 pause_event=pause_event,
                 # 校准工具只走 API 模式，不启动浏览器
-                config={"youtube_search_method": "仅API（消耗配额）"}
+                config={"youtube_search_method": "仅API（消耗配额）"},
             )
 
         elif platform == "tiktok":
@@ -210,21 +212,14 @@ def run_platform_spider(platform: str, keyword: str, start_date: str, end_date: 
                 log_callback=log_callback,
                 finish_callback=finish_callback,
                 stop_event=stop_event,
-                pause_event=pause_event
+                pause_event=pause_event,
             )
 
         elif platform == "x_twitter":
             cdp_url = platform_config.get("cdp_url", "http://localhost:9222")
             max_scrolls = platform_config.get("max_scrolls", 2)
 
-            adv_params = {
-                "limit_time": "是",
-                "start_date": start_date,
-                "end_date": end_date,
-                "get_comments": "否",
-                "max_comments": 0,
-                "lang": "any"
-            }
+            adv_params = {"limit_time": "是", "start_date": start_date, "end_date": end_date, "get_comments": "否", "max_comments": 0, "lang": "any"}
 
             run_x_spider(
                 keywords_list=[keyword],
@@ -240,8 +235,8 @@ def run_platform_spider(platform: str, keyword: str, start_date: str, end_date: 
                     "cooldown_max": 4.0,
                     "no_new_scroll_limit": 2,
                     "slice_days": days,
-                    "max_parallel_tabs": 1
-                }
+                    "max_parallel_tabs": 1,
+                },
             )
         else:
             print(f"Unknown platform: {platform}", file=sys.stderr)
@@ -281,22 +276,38 @@ def generate_reports(results: dict, output_path: str):
         # CSV 格式输出
         with open(output_path, "w", encoding="utf-8-sig", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow([
-                "Game", "Platform", "Baseline Query", "Baseline Count",
-                "Keyword Group", "Group Count", "Intersection Count",
-                "Volume Coverage (%)", "Intersection Coverage (%)"
-            ])
+            writer.writerow(
+                [
+                    "Game",
+                    "Platform",
+                    "Baseline Query",
+                    "Baseline Count",
+                    "Keyword Group",
+                    "Group Count",
+                    "Intersection Count",
+                    "Volume Coverage (%)",
+                    "Intersection Coverage (%)",
+                ]
+            )
             for game_name, game_data in results.items():
                 baseline_query = game_data["baseline_query"]
                 for platform, plat_data in game_data["platforms"].items():
                     baseline_cnt = plat_data["baseline_count"]
                     for grp in plat_data["groups"]:
                         grp_keywords = ", ".join(grp["keywords"])
-                        writer.writerow([
-                            game_name, platform, baseline_query, baseline_cnt,
-                            grp_keywords, grp["group_count"], grp["intersection_count"],
-                            grp["volume_coverage"], grp["intersection_coverage"]
-                        ])
+                        writer.writerow(
+                            [
+                                game_name,
+                                platform,
+                                baseline_query,
+                                baseline_cnt,
+                                grp_keywords,
+                                grp["group_count"],
+                                grp["intersection_count"],
+                                grp["volume_coverage"],
+                                grp["intersection_coverage"],
+                            ]
+                        )
     else:
         # Markdown 格式输出
         md_lines = []
@@ -341,7 +352,8 @@ def run_calibration_task(config: dict, output_path: str, log_callback=None, stop
     try:
         days = int(days_raw)
     except (ValueError, TypeError) as e:
-        if log_callback: log_callback(f"Invalid days value in config (must be integer): {e}")
+        if log_callback:
+            log_callback(f"Invalid days value in config (must be integer): {e}")
         raise ValueError(f"Invalid days value: {e}")
 
     if "start_date" in time_period and "end_date" in time_period:
@@ -355,13 +367,15 @@ def run_calibration_task(config: dict, output_path: str, log_callback=None, stop
 
     msg = f"Calibration period: {start_date_str} to {end_date_str} ({days} days)"
     print(msg)
-    if log_callback: log_callback(msg)
+    if log_callback:
+        log_callback(msg)
 
     platforms = ["youtube", "tiktok", "x_twitter"]
     results = {}
 
     for game in config.get("games", []):
-        if should_stop(stop_event): break
+        if should_stop(stop_event):
+            break
         wait_if_paused(pause_event, stop_event)
 
         game_name = game["name"]
@@ -370,21 +384,21 @@ def run_calibration_task(config: dict, output_path: str, log_callback=None, stop
 
         msg = f"\nProcessing game: {game_name}"
         print(msg)
-        if log_callback: log_callback(msg)
-        
-        results[game_name] = {
-            "baseline_query": baseline_query,
-            "platforms": {}
-        }
+        if log_callback:
+            log_callback(msg)
+
+        results[game_name] = {"baseline_query": baseline_query, "platforms": {}}
 
         for platform in platforms:
-            if should_stop(stop_event): break
+            if should_stop(stop_event):
+                break
             wait_if_paused(pause_event, stop_event)
 
             platform_config = config.get(platform, {})
             msg = f"  Running searches on platform: {platform}"
             print(msg)
-            if log_callback: log_callback(msg)
+            if log_callback:
+                log_callback(msg)
 
             # 第一步：执行基准查询，获取基准链接集合
             baseline_links = run_platform_spider(
@@ -395,22 +409,21 @@ def run_calibration_task(config: dict, output_path: str, log_callback=None, stop
                 platform_config=platform_config,
                 days=days,
                 stop_event=stop_event,
-                pause_event=pause_event
+                pause_event=pause_event,
             )
 
-            results[game_name]["platforms"][platform] = {
-                "baseline_count": len(baseline_links),
-                "groups": []
-            }
+            results[game_name]["platforms"][platform] = {"baseline_count": len(baseline_links), "groups": []}
 
             # 第二步：遍历每个关键词组，合并组内所有关键词的链接
             for grp in keyword_groups:
-                if should_stop(stop_event): break
+                if should_stop(stop_event):
+                    break
                 wait_if_paused(pause_event, stop_event)
 
                 group_links = set()
                 for kw in grp:
-                    if should_stop(stop_event): break
+                    if should_stop(stop_event):
+                        break
                     wait_if_paused(pause_event, stop_event)
 
                     kw_links = run_platform_spider(
@@ -421,27 +434,30 @@ def run_calibration_task(config: dict, output_path: str, log_callback=None, stop
                         platform_config=platform_config,
                         days=days,
                         stop_event=stop_event,
-                        pause_event=pause_event
+                        pause_event=pause_event,
                     )
                     group_links.update(kw_links)
 
                 # 第三步：计算覆盖率
                 volume_cov, inter_cov = calculate_coverage(group_links, baseline_links)
 
-                results[game_name]["platforms"][platform]["groups"].append({
-                    "keywords": grp,
-                    "group_count": len(group_links),
-                    "intersection_count": len(group_links.intersection(baseline_links)),
-                    "volume_coverage": volume_cov,
-                    "intersection_coverage": inter_cov
-                })
+                results[game_name]["platforms"][platform]["groups"].append(
+                    {
+                        "keywords": grp,
+                        "group_count": len(group_links),
+                        "intersection_count": len(group_links.intersection(baseline_links)),
+                        "volume_coverage": volume_cov,
+                        "intersection_coverage": inter_cov,
+                    }
+                )
 
     if not should_stop(stop_event):
         # 生成校准报告
         generate_reports(results, output_path)
         msg = f"\nSuccessfully generated calibration report at {output_path}"
         print(msg)
-        if log_callback: log_callback(msg)
+        if log_callback:
+            log_callback(msg)
 
     # 兼容 GUI：最终写入 finish_callback (可选) 可以在 GUI 包装层处理，此处仅负责逻辑
     return output_path
