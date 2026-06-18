@@ -24,6 +24,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QTextEdit,
     QVBoxLayout,
@@ -97,12 +98,21 @@ class SimpleToolWindow(QWidget):
         root.setContentsMargins(12, 10, 12, 8)
         root.setSpacing(6)
 
-        form = QFormLayout()
+        # 滚动区域
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QScrollArea.NoFrame)
+        
+        # 表单容器
+        form_widget = QWidget()
+        form = QFormLayout(form_widget)
         form.setLabelAlignment(Qt.AlignRight)
         form.setFormAlignment(Qt.AlignTop)
         form.setHorizontalSpacing(10)
         form.setVerticalSpacing(5)
-        root.addLayout(form)
+        
+        scroll_area.setWidget(form_widget)
+        root.addWidget(scroll_area, 2)  # 给表单区域较大的拉伸权重
         self.form_layout = form
 
         # 根据配置动态组装表单行
