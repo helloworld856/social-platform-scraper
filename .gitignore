@@ -38,3 +38,6 @@ build/
 .agents/
 
 .claude
+agents/
+TEST_READY.md
+config/__global__.json

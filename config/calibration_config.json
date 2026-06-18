@@ -1,0 +1,51 @@
+{
+  "time_period": {
+    "days": 7
+  },
+  "youtube": {
+    "api_keys": [],
+    "max_results": 10
+  },
+  "tiktok": {
+    "cdp_url": "http://localhost:9222",
+    "max_videos": 10
+  },
+  "x_twitter": {
+    "cdp_url": "http://localhost:9222",
+    "max_scrolls": 2
+  },
+  "games": [
+    {
+      "name": "Genshin Impact",
+      "baseline_query": "原神",
+      "keyword_groups": [
+        ["原神 攻略", "原神 角色"],
+        ["Genshin Impact guide", "Genshin Impact showcase"]
+      ]
+    },
+    {
+      "name": "Honkai: Star Rail",
+      "baseline_query": "崩坏：星穹铁道",
+      "keyword_groups": [
+        ["星铁 攻略", "星铁 角色"],
+        ["Honkai Star Rail guide", "Honkai Star Rail build"]
+      ]
+    },
+    {
+      "name": "Zenless Zone Zero",
+      "baseline_query": "绝区零",
+      "keyword_groups": [
+        ["绝区零 攻略", "绝区零 角色"],
+        ["Zenless Zone Zero guide", "Zenless Zone Zero gameplay"]
+      ]
+    },
+    {
+      "name": "Wuthering Waves",
+      "baseline_query": "鸣潮",
+      "keyword_groups": [
+        ["鸣潮 攻略", "鸣潮 角色"],
+        ["Wuthering Waves guide", "Wuthering Waves build"]
+      ]
+    }
+  ]
+}
