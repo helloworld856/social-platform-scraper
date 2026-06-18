@@ -18,14 +18,11 @@ import os
 import sys
 import json
 import csv
+import logging
 import argparse
 import datetime
 import openpyxl
-
-# 将项目根目录加入 sys.path，以便导入项目内模块
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-if project_root not in sys.path:
-    sys.path.insert(0, project_root)
+from src.core.csv_utils import sanitize_csv_cell
 
 from src.platforms.youtube.keyword import run_youtube_spider
 from src.platforms.tiktok.keyword import run_tiktok_spider
@@ -74,6 +71,7 @@ def extract_links_from_excel(file_path: str, platform: str) -> set[str]:
     links = set()
     if not file_path or not os.path.exists(file_path):
         return links
+    wb = None
     try:
         wb = openpyxl.load_workbook(file_path, data_only=True)
 
@@ -90,6 +88,8 @@ def extract_links_from_excel(file_path: str, platform: str) -> set[str]:
             elif "数据" in wb.sheetnames:
                 sheet_name = "数据"
 
+        if sheet_name is None:
+            logging.warning("预期的 Sheet 未找到 (%s)，回退到 active sheet: %s", platform, file_path)
         sheet = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
 
         # 根据平台确定目标列名
@@ -112,35 +112,38 @@ def extract_links_from_excel(file_path: str, platform: str) -> set[str]:
                         val_str = str(val).strip()
                         if val_str:
                             links.add(val_str)
-        wb.close()
     except Exception as e:
-        print(f"Error reading Excel file {file_path} for platform {platform}: {e}", file=sys.stderr)
+        logging.exception("读取 Excel 文件失败 (%s, platform=%s): %s", file_path, platform, e)
+    finally:
+        if wb is not None:
+            wb.close()
     return links
 
 
-def calculate_coverage(group_links: set[str], baseline_links: set[str]) -> tuple[float, float]:
+def calculate_coverage(group_links: set[str], baseline_links: set[str]) -> tuple[float, float, int]:
     """计算关键词组相对于基准的覆盖率。
 
-    返回两个指标：
+    返回三个值：
     - Volume Coverage: 关键词组链接数 / 基准链接数（可能超过 100%）。
     - Intersection Coverage: 与基准交集的链接数 / 基准链接数。
+    - Intersection Count: 交集的绝对数量。
 
     Args:
         group_links: 关键词组检索到的链接集合。
         baseline_links: 基准查询检索到的链接集合。
 
     Returns:
-        (volume_ratio_pct, intersection_ratio_pct) 均为百分比，保留两位小数。
+        (volume_ratio_pct, intersection_ratio_pct, intersection_count) 百分比保留两位小数。
     """
     # 除零保护：基准为空时所有覆盖率均为 0
     if not baseline_links:
-        return 0.0, 0.0
+        return 0.0, 0.0, 0
 
     volume_ratio = (len(group_links) / len(baseline_links)) * 100.0
-    intersection_links = group_links.intersection(baseline_links)
-    intersection_ratio = (len(intersection_links) / len(baseline_links)) * 100.0
+    intersection_count = len(group_links & baseline_links)
+    intersection_ratio = (intersection_count / len(baseline_links)) * 100.0
 
-    return round(volume_ratio, 2), round(intersection_ratio, 2)
+    return round(volume_ratio, 2), round(intersection_ratio, 2), intersection_count
 
 
 def run_platform_spider(
@@ -170,8 +173,7 @@ def run_platform_spider(
         retrieved_path = path
 
     def log_callback(msg):
-        # 校准模式下静默处理日志，不打印到终端
-        pass
+        logging.debug("[calibration] %s", msg)
 
     try:
         if platform == "youtube":
@@ -244,7 +246,8 @@ def run_platform_spider(
 
     except Exception as e:
         # 兜底：任何异常（限流、网络错误等）都不中断整体流程
-        print(f"Exception raised running spider for platform {platform}, keyword '{keyword}': {e}", file=sys.stderr)
+        logging.exception("爬虫异常 (platform=%s, keyword='%s')", platform, keyword)
+        log_callback(f"爬虫异常 ({platform}, '{keyword}'): {e}")
         return set()
 
     # 从爬虫输出的 Excel 中提取链接
@@ -297,11 +300,11 @@ def generate_reports(results: dict, output_path: str):
                         grp_keywords = ", ".join(grp["keywords"])
                         writer.writerow(
                             [
-                                game_name,
-                                platform,
-                                baseline_query,
+                                sanitize_csv_cell(game_name),
+                                sanitize_csv_cell(platform),
+                                sanitize_csv_cell(baseline_query),
                                 baseline_cnt,
-                                grp_keywords,
+                                sanitize_csv_cell(grp_keywords),
                                 grp["group_count"],
                                 grp["intersection_count"],
                                 grp["volume_coverage"],
@@ -328,7 +331,7 @@ def generate_reports(results: dict, output_path: str):
                 md_lines.append("|:---:|:---|:---:|:---:|:---:|:---:|")
 
                 for idx, grp in enumerate(plat_data["groups"], 1):
-                    grp_keywords = ", ".join([f"`{k}`" for k in grp["keywords"]])
+                    grp_keywords = ", ".join([f"`{k.replace('|', '\\|')}`" for k in grp["keywords"]])
                     md_lines.append(
                         f"| {idx} | {grp_keywords} | {grp['group_count']} | {grp['intersection_count']} | "
                         f"{grp['volume_coverage']}% | {grp['intersection_coverage']}% |"
@@ -359,6 +362,13 @@ def run_calibration_task(config: dict, output_path: str, log_callback=None, stop
     if "start_date" in time_period and "end_date" in time_period:
         start_date_str = time_period["start_date"]
         end_date_str = time_period["end_date"]
+        # 从显式日期计算实际天数，避免 days 配置值与日期范围不匹配
+        try:
+            start_dt = datetime.datetime.strptime(start_date_str, "%Y-%m-%d")
+            end_dt = datetime.datetime.strptime(end_date_str, "%Y-%m-%d")
+            days = max(1, (end_dt - start_dt).days)
+        except (ValueError, TypeError):
+            pass  # 日期解析失败时保留原 days 值
     else:
         end_dt = datetime.datetime.now()
         start_dt = end_dt - datetime.timedelta(days=days)
@@ -439,13 +449,13 @@ def run_calibration_task(config: dict, output_path: str, log_callback=None, stop
                     group_links.update(kw_links)
 
                 # 第三步：计算覆盖率
-                volume_cov, inter_cov = calculate_coverage(group_links, baseline_links)
+                volume_cov, inter_cov, intersection_count = calculate_coverage(group_links, baseline_links)
 
                 results[game_name]["platforms"][platform]["groups"].append(
                     {
                         "keywords": grp,
                         "group_count": len(group_links),
-                        "intersection_count": len(group_links.intersection(baseline_links)),
+                        "intersection_count": intersection_count,
                         "volume_coverage": volume_cov,
                         "intersection_coverage": inter_cov,
                     }

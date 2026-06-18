@@ -68,11 +68,12 @@ class SimpleToolWindow(QWidget):
     tool_id: str = ""
     current_profile: str | None = None
 
-    def __init__(self, title: str, fields: list[FieldSpec], *, width: int = 720, height: int = 680) -> None:
+    def __init__(self, title: str, fields: list[FieldSpec], *, width: int = 720, height: int = 680, form_stretch: int = 0) -> None:
         super().__init__()
         self.setWindowTitle(title)
         self.resize(width, height)
         self.fields = fields
+        self._form_stretch = form_stretch
         self.widgets: dict[str, Any] = {}
         
         # 线程同步与状态机通信事件
@@ -113,7 +114,7 @@ class SimpleToolWindow(QWidget):
         form.setVerticalSpacing(5)
         
         scroll_area.setWidget(form_widget)
-        root.addWidget(scroll_area, 2)  # 给表单区域较大的拉伸权重
+        root.addWidget(scroll_area, self._form_stretch)
         self.form_layout = form
 
         # 根据配置动态组装表单行

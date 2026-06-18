@@ -38,22 +38,15 @@ def create_mock_excel_edge_cases(file_path, platform, rows_data):
         ws.append(headers)
         for idx, val in enumerate(rows_data, 1):
             ws.append(["test", str(idx), "title", "10:00", "100", "10", "2026-06-18", val, "author", "2026-06-18"])
-    
+
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
     wb.save(file_path)
+    wb.close()
 
 
 def get_finish_callback(platform, args, kwargs):
-    cb = kwargs.get("finish_callback")
-    if cb:
-        return cb
-    if platform == "youtube" and len(args) > 9:
-        return args[9]
-    if platform == "tiktok" and len(args) > 10:
-        return args[10]
-    if platform == "x_twitter" and len(args) > 4:
-        return args[4]
-    return None
+    """Safely extract the finish_callback from arguments (keyword-only)."""
+    return kwargs.get("finish_callback")
 
 
 # Test 1: Config loading with missing required keys
@@ -195,7 +188,7 @@ def test_volume_ratio_exceeds_100():
     group_links = {"link1", "link2", "link3", "link4", "link5"}
     baseline_links = {"link1", "link2"}
     
-    vol, inter = calculate_coverage(group_links, baseline_links)
+    vol, inter, count = calculate_coverage(group_links, baseline_links)
     # 5 links in group vs 2 in baseline -> 250.0% volume ratio, 100.0% intersection ratio
     assert vol == 250.0
     assert inter == 100.0

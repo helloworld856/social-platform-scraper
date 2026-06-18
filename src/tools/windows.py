@@ -22,7 +22,7 @@ class CalibrationToolWindow(SimpleToolWindow):
                           tooltip="X (Twitter) 网页向下滚动加载的次数。每次滚动大约加载 10-15 条帖子。"),
                 FieldSpec("cdp_url", "CDP 调试地址", default="http://localhost:9222",
                           tooltip="Chrome 远程调试协议 (CDP) 的接口地址。如果不清楚，请保持默认。"),
-                FieldSpec("output_path", "输出报告路径", kind="text_or_file", required=True, default="output/calibration_report.md",
+                FieldSpec("output_path", "输出报告路径", kind="text", required=True, default="output/calibration_report.md",
                           tooltip="导出报告的位置。支持填写 .md（Markdown 排版格式）或 .csv（Excel 表格格式）。"),
                 
                 FieldSpec("games_count", "测试游戏数量", kind="combo", options=("1", "2", "3", "4"), default="1",
@@ -61,6 +61,7 @@ class CalibrationToolWindow(SimpleToolWindow):
                           tooltip="每一行是一个测试组，组内可用英文逗号并列多个词。\n示例：\n鸣潮 攻略, 鸣潮 角色\nWuthering Waves guide"),
             ],
             height=850,
+            form_stretch=2,
         )
 
         # 动态控制配置字段数量
@@ -91,14 +92,16 @@ class CalibrationToolWindow(SimpleToolWindow):
         return []
 
     def validate_values(self, values):
-        if not values.get("game_name_1", "").strip():
-            raise ValueError("游戏 1 的名称不能为空")
-        if not values.get("baseline_query_1", "").strip():
-            raise ValueError("游戏 1 的基准搜索词不能为空")
-        if not values.get("keyword_groups_1", "").strip():
-            raise ValueError("游戏 1 的测试词组不能为空")
         if not values.get("youtube_api_keys", "").strip():
             raise ValueError("请至少提供一个 YouTube API Key")
+        games_count = int(values.get("games_count", 1))
+        for i in range(1, games_count + 1):
+            if not values.get(f"game_name_{i}", "").strip():
+                raise ValueError(f"游戏 {i} 的名称不能为空")
+            if not values.get(f"baseline_query_{i}", "").strip():
+                raise ValueError(f"游戏 {i} 的基准搜索词不能为空")
+            if not values.get(f"keyword_groups_{i}", "").strip():
+                raise ValueError(f"游戏 {i} 的测试词组不能为空")
 
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
         from src.tools.calibration import run_calibration_task

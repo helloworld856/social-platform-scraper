@@ -36,23 +36,15 @@ def create_mock_excel(file_path, platform, urls):
         ws.append(headers)
         for idx, url in enumerate(urls, 1):
             ws.append(["test", str(idx), "title", "10:00", "100", "10", "2026-06-18", url, "author", "2026-06-18"])
-    
+
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
     wb.save(file_path)
+    wb.close()
 
 
 def get_finish_callback(platform, args, kwargs):
-    """Safely extract the finish_callback from arguments depending on platform."""
-    cb = kwargs.get("finish_callback")
-    if cb:
-        return cb
-    if platform == "youtube" and len(args) > 9:
-        return args[9]
-    if platform == "tiktok" and len(args) > 10:
-        return args[10]
-    if platform == "x_twitter" and len(args) > 4:
-        return args[4]
-    return None
+    """Safely extract the finish_callback from arguments (keyword-only)."""
+    return kwargs.get("finish_callback")
 
 
 def get_spider_target(platform):
@@ -100,7 +92,7 @@ def test_tier1_config_loading_happy_path(tmp_path, config_data, expected_games_c
     ({"link1", "link2", "link3"}, {"link1", "link2"}, 150.0, 100.0),
 ])
 def test_tier1_coverage_math(group_links, baseline_links, expected_volume, expected_intersection):
-    v_ratio, i_ratio = calculate_coverage(group_links, baseline_links)
+    v_ratio, i_ratio, _count = calculate_coverage(group_links, baseline_links)
     assert v_ratio == expected_volume
     assert i_ratio == expected_intersection
 
@@ -231,7 +223,7 @@ def test_tier2_config_loading_invalid(tmp_path, invalid_config, error_type):
 def test_tier2_coverage_math_boundaries(group_links, baseline_links, expected_vol, expected_inter):
     grp_stripped = {link.strip() for link in group_links}
     base_stripped = {link.strip() for link in baseline_links}
-    vol, inter = calculate_coverage(grp_stripped, base_stripped)
+    vol, inter, _count = calculate_coverage(grp_stripped, base_stripped)
     assert vol == expected_vol
     assert inter == expected_inter
 
@@ -397,7 +389,7 @@ def test_tier3_cross_feature_combinations(tmp_path, scenario_idx, game_configs, 
          config = load_config(str(config_file))
          assert len(config["games"]) == len(game_configs)
          for game in config["games"]:
-             v, i = calculate_coverage({"link_yt_1"}, {"link_yt_1"})
+             v, i, _c = calculate_coverage({"link_yt_1"}, {"link_yt_1"})
              assert v == 100.0
 
 
@@ -457,6 +449,6 @@ def test_tier4_real_world_scenarios(tmp_path, game_name, baseline_q, groups, moc
          
          base_set = set(mock_links)
          grp_set = set(mock_links)
-         vol, inter = calculate_coverage(grp_set, base_set)
+         vol, inter, _count = calculate_coverage(grp_set, base_set)
          assert vol == 100.0
          assert inter == 100.0
