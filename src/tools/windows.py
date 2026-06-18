@@ -18,28 +18,54 @@ class CalibrationToolWindow(SimpleToolWindow):
                 FieldSpec("cdp_url", "CDP 调试地址", default="http://localhost:9222"),
                 FieldSpec("output_path", "输出报告路径", kind="text_or_file", required=True, default="output/calibration_report.md"),
                 
+                FieldSpec("games_count", "测试游戏数量", kind="combo", options=("1", "2", "3", "4"), default="1"),
+                
                 # 游戏 1 (必填)
                 FieldSpec("game_name_1", "[游戏 1] 游戏名称", default="Genshin Impact"),
                 FieldSpec("baseline_query_1", "[游戏 1] 基准词", default="原神"),
                 FieldSpec("keyword_groups_1", "[游戏 1] 测试词组", kind="multiline", placeholder="每行一个词组，组内用逗号分隔:\n原神 攻略, 原神 角色\nGenshin guide, Genshin showcase"),
 
                 # 游戏 2
-                FieldSpec("game_name_2", "[游戏 2] 游戏名称", default="Honkai: Star Rail", placeholder="留空则忽略"),
+                FieldSpec("game_name_2", "[游戏 2] 游戏名称", default="Honkai: Star Rail"),
                 FieldSpec("baseline_query_2", "[游戏 2] 基准词", default="崩坏：星穹铁道"),
-                FieldSpec("keyword_groups_2", "[游戏 2] 测试词组", kind="multiline", placeholder="留空则忽略\n星铁 攻略, 星铁 角色\nHonkai Star Rail guide"),
+                FieldSpec("keyword_groups_2", "[游戏 2] 测试词组", kind="multiline", placeholder="星铁 攻略, 星铁 角色\nHonkai Star Rail guide"),
 
                 # 游戏 3
-                FieldSpec("game_name_3", "[游戏 3] 游戏名称", default="Zenless Zone Zero", placeholder="留空则忽略"),
+                FieldSpec("game_name_3", "[游戏 3] 游戏名称", default="Zenless Zone Zero"),
                 FieldSpec("baseline_query_3", "[游戏 3] 基准词", default="绝区零"),
-                FieldSpec("keyword_groups_3", "[游戏 3] 测试词组", kind="multiline", placeholder="留空则忽略\n绝区零 攻略, 绝区零 角色\nZenless Zone Zero guide"),
+                FieldSpec("keyword_groups_3", "[游戏 3] 测试词组", kind="multiline", placeholder="绝区零 攻略, 绝区零 角色\nZenless Zone Zero guide"),
 
                 # 游戏 4
-                FieldSpec("game_name_4", "[游戏 4] 游戏名称", default="Wuthering Waves", placeholder="留空则忽略"),
+                FieldSpec("game_name_4", "[游戏 4] 游戏名称", default="Wuthering Waves"),
                 FieldSpec("baseline_query_4", "[游戏 4] 基准词", default="鸣潮"),
-                FieldSpec("keyword_groups_4", "[游戏 4] 测试词组", kind="multiline", placeholder="留空则忽略\n鸣潮 攻略, 鸣潮 角色\nWuthering Waves guide"),
+                FieldSpec("keyword_groups_4", "[游戏 4] 测试词组", kind="multiline", placeholder="鸣潮 攻略, 鸣潮 角色\nWuthering Waves guide"),
             ],
             height=850,
         )
+
+        # 动态控制配置字段数量
+        self._bind_games_count()
+
+    def _bind_games_count(self):
+        combo = self.widgets.get("games_count")
+        if not combo:
+            return
+
+        def on_changed(text: str):
+            try:
+                count = int(text)
+            except ValueError:
+                count = 1
+            
+            # 游戏1永远显示，动态控制游戏2到4
+            for i in range(2, 5):
+                visible = i <= count
+                self.set_field_visible(f"game_name_{i}", visible)
+                self.set_field_visible(f"baseline_query_{i}", visible)
+                self.set_field_visible(f"keyword_groups_{i}", visible)
+
+        combo.currentTextChanged.connect(on_changed)
+        on_changed(combo.currentText())
 
     def tool_config_params(self):
         return []
@@ -61,14 +87,14 @@ class CalibrationToolWindow(SimpleToolWindow):
         api_keys = [k.strip() for k in values.get("youtube_api_keys", "").split("\n") if k.strip()]
         
         games_config = []
-        for i in range(1, 5):
+        games_count = int(values.get("games_count", 1))
+        for i in range(1, games_count + 1):
             name = values.get(f"game_name_{i}", "").strip()
             baseline = values.get(f"baseline_query_{i}", "").strip()
             kw_text = values.get(f"keyword_groups_{i}", "").strip()
             
-            # 如果名称为空或词组为空，则跳过该游戏
             if not name or not baseline or not kw_text:
-                continue
+                raise ValueError(f"游戏 {i} 的必填字段不能为空")
                 
             kw_lines = [line.strip() for line in kw_text.split("\n") if line.strip()]
             groups = []
