@@ -466,6 +466,16 @@ def extract_video_row(page, keyword: str, video_url: str, play_count: str = "", 
     item = find_item_in_state(page_state_sources(page), extract_tiktok_video_id(video_url))
     json_metrics = item_metrics(item)
     publish_time = json_metrics.get("发布时间") or extract_publish_time(page)
+    
+    if not publish_time:
+        # 网络不稳定或纯 CSR 渲染较慢时，增加额外等待时间以确保页面渲染出时间元素
+        try:
+            page.wait_for_selector("[data-e2e='video-create-time'], span[data-e2e='browser-nickname'] + span + span, time", timeout=8000)
+            item = find_item_in_state(page_state_sources(page), extract_tiktok_video_id(video_url))
+            json_metrics = item_metrics(item)
+            publish_time = json_metrics.get("发布时间") or extract_publish_time(page)
+        except Exception:
+            pass
     play_value = json_metrics.get("播放量") or play_count
     dom_like_value = extract_metric(page, "like-count", ["Likes", "Like", "赞", " "])
     like_value = json_metrics.get("点赞数") or dom_like_value
