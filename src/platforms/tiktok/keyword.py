@@ -17,9 +17,15 @@ import threading
 import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from playwright.sync_api import sync_playwright
+try:
+    from playwright.sync_api import sync_playwright
+
+    PLAYWRIGHT_IMPORT_ERROR = None
+except ModuleNotFoundError as exc:  # pragma: no cover - exercised via import-time fallback
+    sync_playwright = None
+    PLAYWRIGHT_IMPORT_ERROR = exc
 
 from src.core import (
     XlsxRowWriter,
@@ -56,6 +62,12 @@ CSV_FIELDS = [
     "标签",
 ]
 
+
+def ensure_playwright_available():
+    if sync_playwright is None:
+        raise ModuleNotFoundError("playwright is required for TikTok keyword scraping") from PLAYWRIGHT_IMPORT_ERROR
+
+
 def _tiktok_media_tag(item: dict, page=None) -> str:
     """
     根据后端 JSON 数据对视频的媒体类型进行判定与分类：
@@ -88,10 +100,11 @@ def _tiktok_media_tag(item: dict, page=None) -> str:
 
 DEFAULT_START_DATE = "2025-05-06"
 DEFAULT_END_DATE = "2026-05-06"
-MIN_SEARCH_SCROLLS = 60            # 最少搜索页面滚动轮数
-MAX_SEARCH_SCROLLS = 360           # 最大搜索页面滚动轮数上限
-SEARCH_SCROLL_PAUSE = 0.7          # 两次滚动之间的稳定等待时间（秒）
-DEFAULT_CANDIDATE_MULTIPLIER = 3   # 默认候选乘数，控制扫描数量上限
+MIN_SEARCH_SCROLLS = 60  # 最少搜索页面滚动轮数
+MAX_SEARCH_SCROLLS = 360  # 最大搜索页面滚动轮数上限
+SEARCH_SCROLL_PAUSE = 0.7  # 两次滚动之间的稳定等待时间（秒）
+DEFAULT_CANDIDATE_MULTIPLIER = 3  # 默认候选乘数，控制扫描数量上限
+
 
 def parse_date_range(start_date: str, end_date: str) -> tuple[datetime, datetime]:
     """
@@ -103,18 +116,65 @@ def parse_date_range(start_date: str, end_date: str) -> tuple[datetime, datetime
         raise ValueError("开始日期不能晚于结束日期")
     return start_dt, end_dt
 
+
 def parse_publish_date(value: str) -> datetime | None:
     """
     正则提取文本中可能包含的发布日期（年-月-日）。
     """
     text = (value or "").strip()
-    match = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", text)
-    if not match:
+    if not text:
         return None
-    try:
-        return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)))
-    except ValueError:
+
+    now = datetime.now()
+    match = re.search(r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", text)
+    if match:
+        try:
+            return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+        except ValueError:
+            return None
+
+    match = re.search(r"\b(\d{1,2})[-/.](\d{1,2})\b", text)
+    if match:
+        try:
+            publish_dt = datetime(now.year, int(match.group(1)), int(match.group(2)))
+            if publish_dt.date() > now.date() + timedelta(days=1):
+                publish_dt = publish_dt.replace(year=publish_dt.year - 1)
+            return publish_dt
+        except ValueError:
+            return None
+
+    lowered = text.lower()
+    if "刚刚" in text or "just now" in lowered:
+        return now
+    if "昨天" in text or "yesterday" in lowered:
+        return now - timedelta(days=1)
+
+    relative_match = re.search(
+        r"(\d+)\s*(秒|分钟|小时|天|周|月|年|sec|second|minute|min|hour|hr|day|week|month|year|s|m|h|d|w)\s*(前|ago)?",
+        text,
+        re.IGNORECASE,
+    )
+    if not relative_match:
         return None
+
+    amount = int(relative_match.group(1))
+    unit = relative_match.group(2).lower()
+    if unit in {"秒", "sec", "second", "s"}:
+        return now - timedelta(seconds=amount)
+    if unit in {"分钟", "minute", "min", "m"}:
+        return now - timedelta(minutes=amount)
+    if unit in {"小时", "hour", "hr", "h"}:
+        return now - timedelta(hours=amount)
+    if unit in {"天", "day", "d"}:
+        return now - timedelta(days=amount)
+    if unit in {"周", "week", "w"}:
+        return now - timedelta(weeks=amount)
+    if unit in {"月", "month"}:
+        return now - timedelta(days=amount * 30)
+    if unit in {"年", "year"}:
+        return now - timedelta(days=amount * 365)
+    return None
+
 
 def in_date_range(publish_time: str, start_dt: datetime, end_dt: datetime) -> bool:
     """
@@ -124,6 +184,7 @@ def in_date_range(publish_time: str, start_dt: datetime, end_dt: datetime) -> bo
     if not publish_dt:
         return False
     return start_dt.date() <= publish_dt.date() <= end_dt.date()
+
 
 def clean_url(url: str) -> str:
     """
@@ -140,6 +201,7 @@ def clean_url(url: str) -> str:
         value = "https://" + value
     return value.split("?")[0].split("#")[0]
 
+
 def safe_filename_part(value: str) -> str:
     """
     对文件名中的特殊符号进行过滤与安全编码。
@@ -148,6 +210,7 @@ def safe_filename_part(value: str) -> str:
     cleaned = re.sub(r"\s+", "_", cleaned)
     return cleaned[:80] or "keyword"
 
+
 def extract_author_url(video_url: str) -> str:
     """
     从视频 URL 中正则匹配作者句柄，并拼成主页 URL。
@@ -155,12 +218,30 @@ def extract_author_url(video_url: str) -> str:
     match = re.search(r"tiktok\.com/(@[^/?#]+)/video/", video_url or "")
     return f"https://www.tiktok.com/{match.group(1)}" if match else ""
 
+
 def extract_tiktok_video_id(url: str) -> str:
     """
     提取纯数字视频 ID。
     """
     match = re.search(r"/video/(\d+)", url or "")
     return match.group(1) if match else ""
+
+
+def derive_publish_time_from_video_url(video_url: str) -> str:
+    """
+    从 TikTok 视频 ID 的高位时间戳推导发布时间，作为最终兜底。
+    """
+    video_id = extract_tiktok_video_id(video_url)
+    if not video_id or not video_id.isdigit():
+        return ""
+    try:
+        unix_ts = int(video_id) >> 32
+        if unix_ts > 1500000000:
+            return format_publish_time(unix_ts)
+    except Exception:
+        return ""
+    return ""
+
 
 def format_plain_text(value) -> str:
     """
@@ -172,6 +253,7 @@ def format_plain_text(value) -> str:
         return ""
     text = str(value).strip()
     return "" if text.lower() in {"none", "null", "undefined", "nan"} else text
+
 
 def format_count(value) -> str:
     """
@@ -188,6 +270,7 @@ def format_count(value) -> str:
         return ""
     return expand_compact_number(text)
 
+
 def count_to_int(value) -> int:
     """
     统一数字指标强转整型以进行数值对比。
@@ -200,17 +283,44 @@ def count_to_int(value) -> int:
     except ValueError:
         return 0
 
+
 def format_publish_time(value) -> str:
     """
     格式化发布时间戳。
     """
     try:
-        timestamp = int(value)
+        timestamp = int(str(value).strip())
+        if timestamp > 10**12:
+            timestamp //= 1000
         if timestamp > 0:
             return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp))
     except Exception:
         pass
     return format_plain_text(value)
+
+
+def normalize_publish_time_text(value: str) -> str:
+    """
+    将 TikTok 页面上可能出现的多种发布时间文本归一化为可比较格式。
+    """
+    text = format_plain_text(value)
+    if not text:
+        return ""
+
+    normalized_from_timestamp = format_publish_time(text)
+    if normalized_from_timestamp and normalized_from_timestamp != text:
+        return normalized_from_timestamp
+
+    try:
+        iso_dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return iso_dt.strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        pass
+
+    publish_dt = parse_publish_date(text)
+    if publish_dt is not None:
+        return publish_dt.strftime("%Y-%m-%d %H:%M:%S")
+    return text
 
 
 def iter_dicts(value):
@@ -225,6 +335,7 @@ def iter_dicts(value):
         for child in value:
             yield from iter_dicts(child)
 
+
 def parse_script_json(html: str, script_id: str):
     """
     匹配 HTML 中的特定 script 标签并反序列化 JSON。
@@ -237,6 +348,7 @@ def parse_script_json(html: str, script_id: str):
         return json.loads(html_lib.unescape(match.group(1)).strip())
     except Exception:
         return None
+
 
 def page_state_sources(page) -> list[dict]:
     """
@@ -267,6 +379,7 @@ def page_state_sources(page) -> list[dict]:
         pass
     return sources
 
+
 def find_item_in_state(sources: list[dict], video_id: str) -> dict:
     """
     从候选反序列化数据源中查找 video_id 对应的 Item 字典。
@@ -288,6 +401,7 @@ def find_item_in_state(sources: list[dict], video_id: str) -> dict:
                 return node
     return {}
 
+
 def item_metric(item: dict, *keys: str) -> str:
     """
     从 Item 字典的各个 stats 变体结构中提取指定属性的计数值。
@@ -306,6 +420,7 @@ def item_metric(item: dict, *keys: str) -> str:
                     return value
     return ""
 
+
 def item_metrics(item: dict) -> dict[str, str]:
     """
     统一格式化获取 Item 里的标题、播放量、点赞量、收藏量、评论数及发布时间。
@@ -316,10 +431,13 @@ def item_metrics(item: dict) -> dict[str, str]:
         "视频标题": format_plain_text(item.get("desc") or item.get("description")),
         "播放量": item_metric(item, "playCount", "play_count", "viewCount", "view_count", "play_count_str"),
         "点赞数": item_metric(item, "diggCount", "digg_count", "digg_count_str", "likeCount", "like_count", "like_count_str"),
-        "收藏量": item_metric(item, "collectCount", "collect_count", "favoriteCount", "favouriteCount", "favorite_count", "favourite_count", "saveCount", "save_count"),
+        "收藏量": item_metric(
+            item, "collectCount", "collect_count", "favoriteCount", "favouriteCount", "favorite_count", "favourite_count", "saveCount", "save_count"
+        ),
         "评论数": item_metric(item, "commentCount", "comment_count", "comments"),
         "发布时间": format_publish_time(item.get("createTime") or item.get("create_time")),
     }
+
 
 def extract_metric(page, data_e2e_candidates, removable_words=(), default=""):
     """
@@ -341,15 +459,16 @@ def extract_metric(page, data_e2e_candidates, removable_words=(), default=""):
             continue
     return default
 
+
 def extract_publish_time(page) -> str:
     """
     UI 模式：通过正则或选择器提取发布时间。
     """
     try:
         html = page.content()
-        match = re.search(r'"createTime":"?(\d{10})"?', html)
+        match = re.search(r'"createTime":"?(\d{10,13})"?', html)
         if match:
-            return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(int(match.group(1))))
+            return format_publish_time(match.group(1))
     except Exception:
         pass
 
@@ -361,12 +480,19 @@ def extract_publish_time(page) -> str:
         try:
             loc = page.locator(selector).first
             if loc.count() > 0:
+                if selector == "time":
+                    datetime_attr = format_plain_text(loc.get_attribute("datetime"))
+                    if datetime_attr:
+                        normalized_attr = normalize_publish_time_text(datetime_attr)
+                        if normalized_attr:
+                            return normalized_attr
                 text = loc.inner_text(timeout=1500).strip()
                 if text:
-                    return text
+                    return normalize_publish_time_text(text)
         except Exception:
             continue
     return ""
+
 
 def extract_card_play_count(anchor) -> str:
     """
@@ -388,11 +514,14 @@ def extract_card_play_count(anchor) -> str:
         pass
     return ""
 
+
 def dynamic_search_scroll_limit(max_videos: int, max_search_scrolls: int = MAX_SEARCH_SCROLLS) -> int:
     return min(max_search_scrolls, max(MIN_SEARCH_SCROLLS, max_videos // 8 + 40))
 
+
 def default_candidate_scan_limit(max_videos: int) -> int:
     return max(max_videos, min(max_videos * DEFAULT_CANDIDATE_MULTIPLIER, max_videos + 3000))
+
 
 def trigger_search_lazy_load(page):
     """
@@ -431,6 +560,7 @@ def trigger_search_lazy_load(page):
     except Exception:
         pass
 
+
 def collect_visible_video_items(page, seen_links: set[str]) -> list[dict[str, str]]:
     """
     抓取当前视口内所有已加载视频卡片的 URL 及对应的播放量。
@@ -451,31 +581,46 @@ def collect_visible_video_items(page, seen_links: set[str]) -> list[dict[str, st
             seen_links.add(href)
     return items
 
+
 def open_search_page(page, keyword: str, stop_event=None):
     search_url = f"https://www.tiktok.com/search/video?q={urllib.parse.quote(keyword)}"
     page.goto(search_url, wait_until="domcontentloaded", timeout=45000)
     interruptible_sleep(random.uniform(1.8, 2.8), stop_event)
 
+
 def extract_video_row(page, keyword: str, video_url: str, play_count: str = "", stop_event=None) -> dict:
     page.goto(video_url, wait_until="domcontentloaded", timeout=25000)
     try:
-        page.wait_for_selector("script#__UNIVERSAL_DATA_FOR_REHYDRATION__, script#SIGI_STATE, [data-e2e='like-count']", timeout=3500)
+        page.wait_for_selector(
+            "script#__UNIVERSAL_DATA_FOR_REHYDRATION__, script#SIGI_STATE, script#RENDER_DATA, [data-e2e='like-count'], [data-e2e='browser-nickname']",
+            timeout=8000,
+        )
     except Exception:
         pass
     interruptible_sleep(random.uniform(0.25, 0.55), stop_event)
-    item = find_item_in_state(page_state_sources(page), extract_tiktok_video_id(video_url))
+    item = {}
+    for _ in range(4):
+        item = find_item_in_state(page_state_sources(page), extract_tiktok_video_id(video_url))
+        if item and (item.get("createTime") or item.get("create_time") or item.get("desc") or item.get("description")):
+            break
+        try:
+            page.wait_for_timeout(800)
+        except Exception:
+            interruptible_sleep(0.8, stop_event)
     json_metrics = item_metrics(item)
-    publish_time = json_metrics.get("发布时间") or extract_publish_time(page)
-    
+    publish_time = normalize_publish_time_text(json_metrics.get("发布时间") or extract_publish_time(page))
+
     if not publish_time:
         # 网络不稳定或纯 CSR 渲染较慢时，增加额外等待时间以确保页面渲染出时间元素
         try:
             page.wait_for_selector("[data-e2e='video-create-time'], span[data-e2e='browser-nickname'] + span + span, time", timeout=8000)
             item = find_item_in_state(page_state_sources(page), extract_tiktok_video_id(video_url))
             json_metrics = item_metrics(item)
-            publish_time = json_metrics.get("发布时间") or extract_publish_time(page)
+            publish_time = normalize_publish_time_text(json_metrics.get("发布时间") or extract_publish_time(page))
         except Exception:
             pass
+    if not publish_time:
+        publish_time = derive_publish_time_from_video_url(video_url)
     play_value = json_metrics.get("播放量") or play_count
     dom_like_value = extract_metric(page, "like-count", ["Likes", "Like", "赞", " "])
     like_value = json_metrics.get("点赞数") or dom_like_value
@@ -488,7 +633,8 @@ def extract_video_row(page, keyword: str, video_url: str, play_count: str = "", 
         "视频标题": json_metrics.get("视频标题") or extract_tiktok_video_title(page),
         "播放量": play_value,
         "点赞数": like_value,
-        "收藏量": json_metrics.get("收藏量") or extract_metric(page, ["favorite-count", "undefined-count"], ["Favorites", "Favorite", "Favourites", "Favourite", "收藏", " "]),
+        "收藏量": json_metrics.get("收藏量")
+        or extract_metric(page, ["favorite-count", "undefined-count"], ["Favorites", "Favorite", "Favourites", "Favourite", "收藏", " "]),
         "评论数": json_metrics.get("评论数") or extract_metric(page, "comment-count", ["Comments", "Comment", "评论", "評論", " "]),
         "发布时间": publish_time,
         "视频链接": video_url,
@@ -496,14 +642,15 @@ def extract_video_row(page, keyword: str, video_url: str, play_count: str = "", 
         "标签": _tiktok_media_tag(item, page=page),
     }
 
+
 def _make_keyword_log_callback(base_log_callback, keyword: str):
     """Wrap log_callback to prefix messages with [keyword] for disambiguation."""
     return make_keyword_log(base_log_callback, keyword)
 
 
-def _tiktok_comment_consumer(keyword, queue_obj, cdp_port_or_url, writer, writer_lock,
-                             log_callback, stop_event, pause_event, comment_top_limit,
-                             consumers_ready=None):
+def _tiktok_comment_consumer(
+    keyword, queue_obj, cdp_port_or_url, writer, writer_lock, log_callback, stop_event, pause_event, comment_top_limit, consumers_ready=None
+):
     """
     评论消费者线程函数：创建独立的 Playwright 连接与页面，从队列中消费视频任务并抓取评论。
     """
@@ -546,8 +693,12 @@ def _tiktok_comment_consumer(keyword, queue_obj, cdp_port_or_url, writer, writer
                     try:
                         # 执行评论采集逻辑
                         comments = collect_video_comments(
-                            comments_page, video_url, max_scan, log,
-                            stop_event, pause_event=pause_event,
+                            comments_page,
+                            video_url,
+                            max_scan,
+                            log,
+                            stop_event,
+                            pause_event=pause_event,
                             comment_top_limit=comment_top_limit,
                         )
                         # 写文件时加锁以防止多线程并发写入冲突
@@ -582,15 +733,31 @@ def _tiktok_comment_consumer(keyword, queue_obj, cdp_port_or_url, writer, writer
     except Exception as exc:
         log(f"评论线程异常: {exc}")
 
-def _scrape_single_tiktok_keyword(keyword, keyword_index, total_keywords,
-                                  max_videos, max_candidates, start_dt, end_dt,
-                                  get_comments_bool, max_comments, max_comment_tabs,
-                                  max_queue_size,
-                                  cdp_port_or_url, log_callback, stop_event, pause_event,
-                                  search_scroll_pause, config_max_search_scrolls,
-                                  no_new_scroll_limit, comment_top_limit,
-                                  run_stamp,
-                                  cooldown_min=3.0, cooldown_max=8.0):
+
+def _scrape_single_tiktok_keyword(
+    keyword,
+    keyword_index,
+    total_keywords,
+    max_videos,
+    max_candidates,
+    start_dt,
+    end_dt,
+    get_comments_bool,
+    max_comments,
+    max_comment_tabs,
+    max_queue_size,
+    cdp_port_or_url,
+    log_callback,
+    stop_event,
+    pause_event,
+    search_scroll_pause,
+    config_max_search_scrolls,
+    no_new_scroll_limit,
+    comment_top_limit,
+    run_stamp,
+    cooldown_min=3.0,
+    cooldown_max=8.0,
+):
     """
     抓取单个 TikTok 关键词的线程函数。
     根据指定的限制参数，滚动搜索结果页面，提取视频元数据。如果开启了评论抓取，将启动多个消费者子线程并发抓取评论。
@@ -615,7 +782,8 @@ def _scrape_single_tiktok_keyword(keyword, keyword_index, total_keywords,
         log(f"[{keyword_index}/{total_keywords}] 搜索关键词：{keyword}")
         # 构建输出文件路径
         output_path = build_output_path(
-            "tiktok", f"tiktok_keyword_{safe_filename_part(keyword)}_{run_stamp}.xlsx",
+            "tiktok",
+            f"tiktok_keyword_{safe_filename_part(keyword)}_{run_stamp}.xlsx",
         )
         log(f"  输出文件：{output_path}")
         if start_dt is not None:
@@ -628,7 +796,6 @@ def _scrape_single_tiktok_keyword(keyword, keyword_index, total_keywords,
             search_page = context.new_page()
             metrics_page = context.new_page()
             try:
-
                 # 如果需要采集评论，初始化多表 XLSX 写入器、写锁及线程安全的任务队列
                 if get_comments_bool:
                     comment_fields = ["序号", "视频链接", "评论的点赞量", "评论内容", "发布时间"]
@@ -640,9 +807,18 @@ def _scrape_single_tiktok_keyword(keyword, keyword_index, total_keywords,
                     for _ in range(max_comment_tabs):
                         t = threading.Thread(
                             target=_tiktok_comment_consumer,
-                            args=(keyword, comment_queue, cdp_port_or_url, writer, writer_lock,
-                                  log_callback, stop_event, pause_event, comment_top_limit,
-                                  consumers_ready),
+                            args=(
+                                keyword,
+                                comment_queue,
+                                cdp_port_or_url,
+                                writer,
+                                writer_lock,
+                                log_callback,
+                                stop_event,
+                                pause_event,
+                                comment_top_limit,
+                                consumers_ready,
+                            ),
                             daemon=True,
                         )
                         t.start()
@@ -792,11 +968,27 @@ def _scrape_single_tiktok_keyword(keyword, keyword_index, total_keywords,
                     t.join(timeout=10)
 
 
-def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str, start_date, end_date, get_comments_str, max_comments, cdp_port_or_url, log_callback, finish_callback, stop_event=None, pause_event=None, config=None):
+def run_tiktok_spider(
+    keywords_list,
+    max_videos,
+    max_candidates,
+    limit_time_str,
+    start_date,
+    end_date,
+    get_comments_str,
+    max_comments,
+    cdp_port_or_url,
+    log_callback,
+    finish_callback,
+    stop_event=None,
+    pause_event=None,
+    config=None,
+):
     """
     TikTok 关键词爬虫主入口函数。
     解析全局配置参数，视关键词数量与 max_parallel_tabs 决定是采用单线程顺序执行，还是采用 ThreadPoolExecutor 进行多关键词并发调度抓取。
     """
+    ensure_playwright_available()
     if config is None:
         config = {}
     search_scroll_pause = float(config.get("scroll_interval", SEARCH_SCROLL_PAUSE))
@@ -831,17 +1023,28 @@ def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str,
                 if wait_if_paused(pause_event, stop_event):
                     break
                 path = _scrape_single_tiktok_keyword(
-                    keyword, idx, len(keywords_list),
-                    max_videos, max_candidates,
-                    start_dt, end_dt,
-                    get_comments_bool, max_comments, max_comment_tabs,
+                    keyword,
+                    idx,
+                    len(keywords_list),
+                    max_videos,
+                    max_candidates,
+                    start_dt,
+                    end_dt,
+                    get_comments_bool,
+                    max_comments,
+                    max_comment_tabs,
                     max_queue_size,
                     cdp_port_or_url,
-                    log_callback, stop_event, pause_event,
-                    search_scroll_pause, config_max_search_scrolls,
-                    no_new_scroll_limit, comment_top_limit,
+                    log_callback,
+                    stop_event,
+                    pause_event,
+                    search_scroll_pause,
+                    config_max_search_scrolls,
+                    no_new_scroll_limit,
+                    comment_top_limit,
                     run_stamp,
-                    cooldown_min_val, cooldown_max_val,
+                    cooldown_min_val,
+                    cooldown_max_val,
                 )
                 if path:
                     output_paths.append(path)
@@ -862,17 +1065,28 @@ def run_tiktok_spider(keywords_list, max_videos, max_candidates, limit_time_str,
                     break
                 future = executor.submit(
                     _scrape_single_tiktok_keyword,
-                    keyword, idx, len(keywords_list),
-                    max_videos, max_candidates,
-                    start_dt, end_dt,
-                    get_comments_bool, max_comments, max_comment_tabs,
+                    keyword,
+                    idx,
+                    len(keywords_list),
+                    max_videos,
+                    max_candidates,
+                    start_dt,
+                    end_dt,
+                    get_comments_bool,
+                    max_comments,
+                    max_comment_tabs,
                     max_queue_size,
                     cdp_port_or_url,
-                    log_callback, stop_event, pause_event,
-                    search_scroll_pause, config_max_search_scrolls,
-                    no_new_scroll_limit, comment_top_limit,
+                    log_callback,
+                    stop_event,
+                    pause_event,
+                    search_scroll_pause,
+                    config_max_search_scrolls,
+                    no_new_scroll_limit,
+                    comment_top_limit,
                     run_stamp,
-                    cooldown_min_val, cooldown_max_val,
+                    cooldown_min_val,
+                    cooldown_max_val,
                 )
                 future_to_keyword[future] = keyword
 

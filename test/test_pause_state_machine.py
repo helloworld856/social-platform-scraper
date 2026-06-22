@@ -11,7 +11,11 @@ import sys
 import threading
 import time
 
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+pytest.importorskip("PyQt5")
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QApplication
@@ -305,11 +309,18 @@ def test_pause_event_is_threading_event():
 class _TextOrFileWindow(SimpleToolWindow):
     """Minimal window with a text_or_file field for testing."""
 
-    def __init__(self, required=True):
+    def __init__(self, required=True, default_text=""):
         super().__init__(
             "测试 text_or_file",
             [
-                FieldSpec("data", "数据输入", kind="text_or_file", required=required, placeholder="测试占位"),
+                FieldSpec(
+                    "data",
+                    "数据输入",
+                    kind="text_or_file",
+                    required=required,
+                    placeholder="测试占位",
+                    default=default_text,
+                ),
             ],
         )
 
@@ -348,6 +359,14 @@ def test_text_or_file_mode_switch_back():
     widget.mode_combo.setCurrentText("直接输入")
     assert widget.text_edit.isHidden() is False
     assert widget.file_edit.parent().isHidden() is True
+
+
+def test_text_or_file_default_text_is_applied():
+    """Field default should be rendered into the direct-input editor."""
+    _ensure_app()
+    w = _TextOrFileWindow(default_text="line1\nline2")
+    widget = w.widgets["data"]
+    assert widget.text_edit.toPlainText() == "line1\nline2"
 
 
 def test_text_or_file_collect_direct_mode():

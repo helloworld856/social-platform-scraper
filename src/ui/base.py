@@ -220,6 +220,7 @@ class SimpleToolWindow(QWidget):
             mode_combo.addItems(["直接输入", "TXT 文件"])
             vbox.addWidget(mode_combo)
             text_edit = QPlainTextEdit()
+            text_edit.setPlainText(str(field.default or ""))
             text_edit.setPlaceholderText(field.placeholder or "每行一条")
             text_edit.setMinimumHeight(48)
             vbox.addWidget(text_edit)

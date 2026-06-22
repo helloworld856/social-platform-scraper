@@ -9,7 +9,18 @@ import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError, Error as PlaywrightError
+try:
+    from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError, Error as PlaywrightError
+    PLAYWRIGHT_IMPORT_ERROR = None
+except ModuleNotFoundError as exc:  # pragma: no cover - exercised via import-time fallback
+    sync_playwright = None
+    PLAYWRIGHT_IMPORT_ERROR = exc
+
+    class PlaywrightTimeoutError(Exception):
+        pass
+
+    class PlaywrightError(Exception):
+        pass
 
 from src.core import (
     XlsxRowWriter,
@@ -333,6 +344,27 @@ def build_search_query(base_keyword: str, adv_params: dict, since: str, until: s
         query_parts.append(f"until:{until}")
     return " ".join(query_parts)
 
+
+def resolve_search_tab_filter(search_tab: str | None) -> str:
+    mapping = {
+        "top": "top",
+        "latest": "live",
+        "media": "media",
+        "people": "user",
+    }
+    normalized = (search_tab or "top").strip().lower()
+    return mapping.get(normalized, "top")
+
+
+def build_search_url(final_query: str, search_tab: str | None = "top") -> str:
+    tab_filter = resolve_search_tab_filter(search_tab)
+    return f"https://x.com/search?q={urllib.parse.quote(final_query)}&src=typed_query&f={tab_filter}"
+
+
+def ensure_playwright_available():
+    if sync_playwright is None:
+        raise ModuleNotFoundError("playwright is required for X keyword scraping") from PLAYWRIGHT_IMPORT_ERROR
+
 def _make_keyword_log_callback(base_log_callback, keyword: str):
     """Wrap log_callback to prefix messages with [keyword] for disambiguation."""
     return make_keyword_log(base_log_callback, keyword)
@@ -562,7 +594,7 @@ def _scrape_single_x_keyword(base_keyword, adv_params, port,
                     log("\n[搜索] 不限时间")
 
                 final_query = build_search_query(base_keyword, adv_params, since, until)
-                search_url = f"https://x.com/search?q={urllib.parse.quote(final_query)}&src=typed_query&f=top"
+                search_url = build_search_url(final_query, adv_params.get("search_tab", "top"))
                 log(f"搜索语法：{final_query}")
 
                 try:
@@ -740,6 +772,7 @@ def _scrape_single_x_keyword(base_keyword, adv_params, port,
 
 
 def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback, stop_event=None, config=None, pause_event=None):
+    ensure_playwright_available()
     if config is None:
         config = {}
     search_page_timeout = int(config.get("search_page_timeout", 40000))
