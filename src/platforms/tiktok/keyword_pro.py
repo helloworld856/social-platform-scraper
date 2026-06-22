@@ -69,7 +69,7 @@ def run_tiktok_keyword_pro_spider(
                 if current_run == 1:
                     end_dt = min(end_dt, now)
                 else:
-                    start_dt = end_dt
+                    # start_dt 保持不变，实现时间范围叠加
                     end_dt = now
 
             if enable_timer:
