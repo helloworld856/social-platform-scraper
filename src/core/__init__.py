@@ -20,6 +20,7 @@ from src.core.browser import (
     debug_port_from_cdp_url,
     ensure_chrome_for_cdp,
 )
+from src.core.ai_provider import AIProviderConfig, build_chat_openai, resolve_ai_provider_config
 from src.core.tiktok_metadata import (
     extract_tiktok_video_title,
     resolve_tiktok_card_container,
@@ -39,6 +40,9 @@ __all__ = [
     "get_config_path",
     "load_config",
     "save_config",
+    "AIProviderConfig",
+    "build_chat_openai",
+    "resolve_ai_provider_config",
     "DEFAULT_TIKTOK_CDP_URL",
     "DEFAULT_X_CDP_URL",
     "build_output_path",

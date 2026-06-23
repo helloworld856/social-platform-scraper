@@ -1,8 +1,8 @@
 # agent_create.py
 # 创建 AI Agent
 
-from langchain_openai import ChatOpenAI
 from langchain.agents import create_agent
+from src.core import build_chat_openai
 from .config import config
 
 
@@ -27,15 +27,7 @@ SYSTEM_PROMPT = """
 
 
 def get_agent():
-    if not config.API_KEY:
-        raise ValueError(
-            "未检测到环境变量 DEEPSEEK_API_KEY 或 API_KEY，请先设置 DeepSeek API Key。"
-        )
-
-    llm = ChatOpenAI(
-        model=config.MODEL_NAME,
-        api_key=config.API_KEY,
-        base_url=config.BASE_URL,
+    llm = build_chat_openai(
         temperature=config.TEMPERATURE,
         max_tokens=config.MAX_TOKENS,
         request_timeout=120,

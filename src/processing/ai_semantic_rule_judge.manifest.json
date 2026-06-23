@@ -1,0 +1,9 @@
+{
+  "tool_id": "ai_semantic_rule_judge",
+  "name": "AI 语义规则判定",
+  "category": "数据处理",
+  "summary": "读取 Excel 中指定 sheet 和多个文本列，基于用户判定词做两轮独立 AI 语义判定，并输出复核结果。",
+  "entrypoint": "src.processing.windows.AISemanticRuleJudgeWindow",
+  "implementation_path": "processing/ai_semantic_rule_judge.py",
+  "tags": ["AI", "semantic", "rule", "excel", "review"]
+}

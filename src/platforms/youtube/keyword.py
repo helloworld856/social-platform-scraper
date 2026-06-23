@@ -593,7 +593,7 @@ def collect_video_ids_with_playwright(page, keyword: str, max_results: int, star
     return video_ids
 
 
-def run_youtube_spider(api_keys: list[str], keywords_list, max_results, limit_time_str, start_date, end_date, get_comments_str, max_comments, log_callback, finish_callback, stop_event=None, config=None, pause_event=None):
+def run_youtube_spider(api_keys: list[str], keywords_list, max_results, limit_time_str, start_date, end_date, get_comments_str, max_comments, log_callback, finish_callback, stop_event=None, config=None, pause_event=None, stats_callback=None):
     """运行 YouTube 关键词视频采集与评论导出任务的主驱动函数。
 
     Args:
@@ -645,6 +645,7 @@ def run_youtube_spider(api_keys: list[str], keywords_list, max_results, limit_ti
 
     output_path = None
     output_paths: list[str] = []
+    last_run_stats = None
     playwright_context = None
     browser = None
     try:
@@ -846,6 +847,11 @@ def run_youtube_spider(api_keys: list[str], keywords_list, max_results, limit_ti
                         break
 
                 writer.save()
+                last_run_stats = {
+                    "scanned_count": len(all_video_ids),
+                    "written_count": written_count,
+                    "hit_limit": bool(max_results and (len(all_video_ids) >= max_results or written_count >= max_results)),
+                }
                 log_line(log_callback, f"  写入完成，共 {written_count} 条视频")
 
             log_line(log_callback, "完成，已按关键词分别保存：")
@@ -875,4 +881,6 @@ def run_youtube_spider(api_keys: list[str], keywords_list, max_results, limit_ti
                 playwright_context.stop()
             except Exception:
                 pass
+        if stats_callback and last_run_stats is not None:
+            stats_callback(last_run_stats)
         finish_callback(output_paths[-1] if output_paths else output_path)

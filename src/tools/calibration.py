@@ -35,11 +35,13 @@ try:
     from src.platforms.youtube.keyword import run_youtube_spider
 except ModuleNotFoundError:
     run_youtube_spider = None
+
 from src.version import __version__
 
 VALID_PLATFORMS = ("youtube", "tiktok", "x_twitter")
 SUCCESSFUL_RUN_STATUSES = {"SUCCESS", "EMPTY_RESULT"}
 REPORT_FAILURE_STATUS = "BASELINE_FAILED"
+DEFAULT_TRACK_LANGUAGE = "default"
 
 STATUS_SUCCESS = "SUCCESS"
 STATUS_EMPTY_RESULT = "EMPTY_RESULT"
@@ -56,14 +58,16 @@ REPORT_INTRO_LINES = [
     "",
     "## 口径说明",
     "",
-    "本报告评估的是在指定平台、指定账号或环境、指定时间窗口、指定搜索入口、指定排序方式和指定采集深度下，不同关键词组对可观察搜索结果的召回、重叠和增量影响。",
+    "本报告评估的是：在指定平台、指定时间窗口、指定搜索入口、指定排序方式和指定采集深度下，不同关键词组对可观察搜索结果的召回、重合和增量影响。",
     "",
-    "本报告不代表平台全量内容覆盖率。",
+    "这不是平台全量内容覆盖率，也不代表真实上限。",
 ]
 
 CSV_HEADERS = [
     "Game",
     "Platform",
+    "Language",
+    "Track Key",
     "Baseline Query",
     "Baseline Status",
     "Baseline Unique ID Count",
@@ -186,6 +190,25 @@ def invalid_platforms(platforms: list[str]) -> list[str]:
     return [platform for platform in platforms if platform not in VALID_PLATFORMS]
 
 
+def select_matching_tracks(games: list[dict[str, Any]], platforms: list[str]) -> list[tuple[str, dict[str, Any]]]:
+    matched_tracks: list[tuple[str, dict[str, Any]]] = []
+    for game in games:
+        game_name = str(game.get("name", "")).strip()
+        for track in game.get("tracks", []):
+            if track.get("platform") in platforms:
+                matched_tracks.append((game_name, track))
+    return matched_tracks
+
+
+def validate_selected_platforms(games: list[dict[str, Any]], platforms: list[str]) -> None:
+    invalid = invalid_platforms(platforms)
+    if invalid:
+        raise ValueError(f"不支持的平台: {', '.join(invalid)}")
+
+    if not select_matching_tracks(games, platforms):
+        raise ValueError("所选平台与实验配置中的 track 不匹配，请检查平台选择或 track 配置。")
+
+
 def parse_keyword_groups_text(raw_text: str) -> list[list[str]]:
     keyword_groups: list[list[str]] = []
     for raw_line in (raw_text or "").splitlines():
@@ -207,39 +230,122 @@ def format_keyword_groups_text(keyword_groups: list[list[str]]) -> str:
     return "\n".join(lines)
 
 
+def normalize_track_language(language: Any) -> str:
+    text = str(language or "").strip().lower()
+    return text or DEFAULT_TRACK_LANGUAGE
+
+
+def build_track_key(platform: str, language: str) -> str:
+    return f"{platform}/{language}"
+
+
+def normalize_keyword_groups(
+    raw_groups: Any,
+    *,
+    game_index: int,
+    track_index: int,
+) -> list[list[str]]:
+    if raw_groups is None:
+        return []
+    if not isinstance(raw_groups, list):
+        raise ValueError(f"第 {game_index} 个游戏的第 {track_index} 个 track 的 keyword_groups 必须是数组。")
+
+    keyword_groups: list[list[str]] = []
+    for group_index, group in enumerate(raw_groups, 1):
+        if not isinstance(group, list):
+            raise ValueError(f"第 {game_index} 个游戏的第 {track_index} 个 track 的第 {group_index} 个词组必须是数组。")
+        keywords = [str(keyword).strip() for keyword in group if str(keyword).strip()]
+        if not keywords:
+            raise ValueError(f"第 {game_index} 个游戏的第 {track_index} 个 track 的第 {group_index} 个词组不能为空。")
+        keyword_groups.append(keywords)
+    return keyword_groups
+
+
+def normalize_track_config(track: dict[str, Any], *, game_index: int, track_index: int) -> dict[str, Any]:
+    if not isinstance(track, dict):
+        raise ValueError(f"第 {game_index} 个游戏的第 {track_index} 个 track 必须是对象。")
+
+    platform = str(track.get("platform", "")).strip().lower()
+    language = normalize_track_language(track.get("language", DEFAULT_TRACK_LANGUAGE))
+    baseline_query = str(track.get("baseline_query", "")).strip()
+    keyword_groups = normalize_keyword_groups(
+        track.get("keyword_groups", []),
+        game_index=game_index,
+        track_index=track_index,
+    )
+
+    if not platform:
+        raise ValueError(f"第 {game_index} 个游戏的第 {track_index} 个 track 缺少 platform。")
+    if platform not in VALID_PLATFORMS:
+        raise ValueError(f"第 {game_index} 个游戏的第 {track_index} 个 track 使用了不支持的平台: {platform}")
+    if not baseline_query:
+        raise ValueError(f"第 {game_index} 个游戏的第 {track_index} 个 track 缺少 baseline_query。")
+
+    return {
+        "platform": platform,
+        "language": language,
+        "baseline_query": baseline_query,
+        "keyword_groups": keyword_groups,
+    }
+
+
+def expand_legacy_game_tracks(
+    *,
+    baseline_query: str,
+    raw_groups: Any,
+    game_index: int,
+) -> list[dict[str, Any]]:
+    keyword_groups = normalize_keyword_groups(
+        raw_groups,
+        game_index=game_index,
+        track_index=1,
+    )
+    return [
+        {
+            "platform": platform,
+            "language": DEFAULT_TRACK_LANGUAGE,
+            "baseline_query": baseline_query,
+            "keyword_groups": [list(group) for group in keyword_groups],
+        }
+        for platform in VALID_PLATFORMS
+    ]
+
+
 def normalize_games_config(games: list[dict[str, Any]]) -> list[dict[str, Any]]:
     normalized_games: list[dict[str, Any]] = []
-    for index, game in enumerate(games, 1):
+    for game_index, game in enumerate(games, 1):
         if not isinstance(game, dict):
-            raise ValueError(f"第 {index} 个游戏配置必须是对象。")
+            raise ValueError(f"第 {game_index} 个游戏配置必须是对象。")
 
         name = str(game.get("name", "")).strip()
-        baseline_query = str(game.get("baseline_query", "")).strip()
-        raw_groups = game.get("keyword_groups", [])
-
         if not name:
-            raise ValueError(f"第 {index} 个游戏缺少名称。")
-        if not baseline_query:
-            raise ValueError(f"第 {index} 个游戏缺少基准词。")
-        if not isinstance(raw_groups, list) or not raw_groups:
-            raise ValueError(f"第 {index} 个游戏至少需要一个测试词组。")
+            raise ValueError(f"第 {game_index} 个游戏缺少名称。")
 
-        keyword_groups: list[list[str]] = []
-        for group_index, group in enumerate(raw_groups, 1):
-            if not isinstance(group, list):
-                raise ValueError(f"第 {index} 个游戏的第 {group_index} 个词组必须是数组。")
-            keywords = [str(keyword).strip() for keyword in group if str(keyword).strip()]
-            if not keywords:
-                raise ValueError(f"第 {index} 个游戏的第 {group_index} 个词组不能为空。")
-            keyword_groups.append(keywords)
+        raw_tracks = game.get("tracks")
+        if raw_tracks is None:
+            baseline_query = str(game.get("baseline_query", "")).strip()
+            if not baseline_query:
+                raise ValueError(f"第 {game_index} 个游戏缺少 baseline_query。")
+            tracks = expand_legacy_game_tracks(
+                baseline_query=baseline_query,
+                raw_groups=game.get("keyword_groups", []),
+                game_index=game_index,
+            )
+        else:
+            if not isinstance(raw_tracks, list) or not raw_tracks:
+                raise ValueError(f"第 {game_index} 个游戏至少需要一个 track。")
+            tracks = [
+                normalize_track_config(track, game_index=game_index, track_index=track_index) for track_index, track in enumerate(raw_tracks, 1)
+            ]
 
-        normalized_games.append(
-            {
-                "name": name,
-                "baseline_query": baseline_query,
-                "keyword_groups": keyword_groups,
-            }
-        )
+        seen_track_keys: set[str] = set()
+        for track in tracks:
+            track_key = build_track_key(track["platform"], track["language"])
+            if track_key in seen_track_keys:
+                raise ValueError(f"第 {game_index} 个游戏存在重复 track: {track_key}")
+            seen_track_keys.add(track_key)
+
+        normalized_games.append({"name": name, "tracks": tracks})
 
     if not normalized_games:
         raise ValueError("请至少配置一个游戏。")
@@ -251,13 +357,15 @@ def parse_games_definition(raw_definition: str) -> list[dict[str, Any]]:
     if not text:
         raise ValueError("请至少配置一个游戏。")
 
-    if text.startswith("["):
+    if text.startswith("[") or text.startswith("{"):
         try:
             payload = json.loads(text)
         except json.JSONDecodeError as exc:
             raise ValueError(f"JSON 游戏配置解析失败: {exc}") from exc
+        if isinstance(payload, dict):
+            payload = payload.get("games")
         if not isinstance(payload, list):
-            raise ValueError("JSON 游戏配置必须是数组。")
+            raise ValueError("JSON 游戏配置必须是数组，或包含 games 数组的对象。")
         return normalize_games_config(payload)
 
     blocks = re.split(r"\n\s*\n+", text)
@@ -281,13 +389,11 @@ def parse_games_definition(raw_definition: str) -> list[dict[str, Any]]:
         if not name or not baseline_query:
             raise ValueError(f"第 {block_index} 个游戏配置的名称和基准词都不能为空。")
 
-        keyword_groups = parse_keyword_groups_text("\n".join(lines[1:]))
-
         games.append(
             {
                 "name": name,
                 "baseline_query": baseline_query,
-                "keyword_groups": keyword_groups,
+                "keyword_groups": parse_keyword_groups_text("\n".join(lines[1:])),
             }
         )
 
@@ -298,45 +404,45 @@ def extract_id_from_link(link: str, platform: str) -> str:
     if not link or not isinstance(link, str):
         return ""
 
-    link = link.strip()
+    text = link.strip()
     try:
         if platform == "youtube":
-            match = re.search(r"(?:v=|/shorts/|/embed/|/live/|/v/|youtu\.be/)([a-zA-Z0-9_-]{11})", link)
+            match = re.search(r"(?:v=|/shorts/|/embed/|/live/|/v/|youtu\.be/)([a-zA-Z0-9_-]{11})", text)
             if match:
                 return match.group(1)
-            parsed = urlparse(link)
-            if parsed.netloc and parsed.query:
-                qs = parse_qs(parsed.query)
-                if qs.get("v"):
-                    return qs["v"][0]
+            parsed = urlparse(text)
+            if parsed.query:
+                query = parse_qs(parsed.query)
+                if query.get("v"):
+                    return query["v"][0]
             path_parts = [part for part in parsed.path.split("/") if part]
             if path_parts:
                 return path_parts[-1]
 
         if platform == "tiktok":
-            match = re.search(r"/video/(\d+)", link)
+            match = re.search(r"/video/(\d+)", text)
             if match:
                 return match.group(1)
-            match = re.search(r"/v/(\d+)(?:\.html)?", link)
+            match = re.search(r"/v/(\d+)(?:\.html)?", text)
             if match:
                 return match.group(1)
-            parsed = urlparse(link)
+            parsed = urlparse(text)
             path_parts = [part for part in parsed.path.split("/") if part]
             if path_parts:
                 return path_parts[-1]
 
         if platform == "x_twitter":
-            match = re.search(r"/status/(\d+)", link)
+            match = re.search(r"/status/(\d+)", text)
             if match:
                 return match.group(1)
-            parsed = urlparse(link)
+            parsed = urlparse(text)
             path_parts = [part for part in parsed.path.split("/") if part]
             if path_parts:
                 return path_parts[-1]
     except Exception:
         return ""
 
-    return link
+    return text
 
 
 def load_config(config_path: str) -> dict:
@@ -349,7 +455,35 @@ def load_config(config_path: str) -> dict:
     if "games" not in config or not isinstance(config["games"], list):
         raise ValueError("Configuration must contain a 'games' list.")
 
+    config["games"] = normalize_games_config(config["games"])
     return config
+
+
+def select_workbook_sheet(workbook: openpyxl.Workbook, platform: str):
+    if platform == "x_twitter":
+        for name in ("数据", "推文信息"):
+            if name in workbook.sheetnames:
+                return workbook[name]
+    else:
+        for name in ("视频信息", "数据"):
+            if name in workbook.sheetnames:
+                return workbook[name]
+    return workbook.active
+
+
+def find_link_column(headers: list[Any], platform: str) -> int | None:
+    normalized_headers = [str(header or "").strip().lower() for header in headers]
+    primary_tokens = ("tweet", "推文", "post") if platform == "x_twitter" else ("video", "视频", "作品")
+
+    for index, header in enumerate(normalized_headers):
+        if any(token in header for token in ("url", "link", "链接")) and any(token in header for token in primary_tokens):
+            return index
+
+    for index, header in enumerate(normalized_headers):
+        if any(token in header for token in ("url", "link", "链接")):
+            return index
+
+    return None
 
 
 def extract_links_from_excel(file_path: str, platform: str) -> set[str]:
@@ -360,41 +494,27 @@ def extract_links_from_excel(file_path: str, platform: str) -> set[str]:
     workbook = None
     try:
         workbook = openpyxl.load_workbook(file_path, data_only=True)
-        sheet_name = None
-        if platform == "x_twitter":
-            if "数据" in workbook.sheetnames:
-                sheet_name = "数据"
-            elif "推文信息" in workbook.sheetnames:
-                sheet_name = "推文信息"
-        else:
-            if "视频信息" in workbook.sheetnames:
-                sheet_name = "视频信息"
-            elif "数据" in workbook.sheetnames:
-                sheet_name = "数据"
-
-        sheet = workbook[sheet_name] if sheet_name and sheet_name in workbook.sheetnames else workbook.active
-        target_col = "推文链接" if platform == "x_twitter" else "视频链接"
-
+        sheet = select_workbook_sheet(workbook, platform)
         try:
             headers = [cell.value for cell in next(sheet.iter_rows(max_row=1))]
         except StopIteration:
             headers = []
 
-        if target_col not in headers:
+        col_index = find_link_column(headers, platform)
+        if col_index is None:
             return links
 
-        col_idx = headers.index(target_col) + 1
         for row in sheet.iter_rows(min_row=2, values_only=True):
-            if len(row) < col_idx:
+            if len(row) <= col_index:
                 continue
-            value = row[col_idx - 1]
+            value = row[col_index]
             if value is None:
                 continue
             text = str(value).strip()
             if text:
                 links.add(text)
     except Exception as exc:
-        logging.exception("读取 Excel 文件失败 (%s, platform=%s): %s", file_path, platform, exc)
+        logging.exception("读取 Excel 失败 (%s, platform=%s): %s", file_path, platform, exc)
         raise
     finally:
         if workbook is not None:
@@ -405,11 +525,11 @@ def extract_links_from_excel(file_path: str, platform: str) -> set[str]:
 
 def classify_error_status(message: str | None) -> str:
     lowered = (message or "").lower()
-    if any(token in lowered for token in ("quota", "rate limit", "too many requests")):
+    if any(token in lowered for token in ("quota", "rate limit", "too many requests", "配额")):
         return STATUS_QUOTA_EXCEEDED
     if any(token in lowered for token in ("captcha", "verify", "risk", "风控")):
         return STATUS_CAPTCHA_OR_RISK
-    if any(token in lowered for token in ("login", "sign in", "signin", "auth", "unauthorized", "forbidden", "permission")):
+    if any(token in lowered for token in ("login", "sign in", "signin", "auth", "unauthorized", "forbidden", "permission", "登录")):
         return STATUS_AUTH_REQUIRED
     if any(token in lowered for token in ("timeout", "timed out", "超时")):
         return STATUS_TIMEOUT
@@ -458,7 +578,7 @@ def resolve_output_base(output_path: str, log_callback=None) -> Path:
             raw_path = workspace_root() / raw_path
         if raw_path.suffix:
             if log_callback:
-                log_callback(f"Legacy report path detected, using parent directory as output root: {raw_path.parent}")
+                log_callback(f"检测到旧版报告文件路径，已改用其父目录作为输出根: {raw_path.parent}")
             base_path = raw_path.parent
         else:
             base_path = raw_path
@@ -514,9 +634,25 @@ def raw_platform_dir_name(platform: str) -> str:
     return normalized or "unknown_platform"
 
 
+def raw_language_dir_name(language: str) -> str:
+    normalized = re.sub(r"[^a-z0-9_-]+", "_", normalize_track_language(language)).strip("_")
+    return normalized or DEFAULT_TRACK_LANGUAGE
+
+
+def raw_game_dir_name(game_name: str, game_index: int) -> str:
+    normalized = re.sub(r"[^a-z0-9_-]+", "_", (game_name or "").strip().lower()).strip("_")
+    if normalized:
+        return f"game_{game_index:02d}_{normalized}"
+    return f"game_{game_index:02d}"
+
+
 def build_group_snapshot(
     *,
+    game_name: str,
     platform: str,
+    language: str,
+    track_key: str,
+    baseline_query: str,
     group_key: str,
     keywords: list[str],
     status: str,
@@ -532,7 +668,11 @@ def build_group_snapshot(
     keyword_runs: list[SpiderRunResult] | None = None,
 ) -> dict[str, Any]:
     payload = {
+        "game": game_name,
         "platform": platform,
+        "language": language,
+        "track_key": track_key,
+        "baseline_query": baseline_query,
         "group_key": group_key,
         "keywords": keywords,
         "status": status,
@@ -592,11 +732,16 @@ def run_platform_spider(
     pause_event=None,
 ) -> SpiderRunResult:
     retrieved_path: str | None = None
+    spider_stats: dict[str, Any] = {}
     started_at = now_str()
 
     def finish_callback(path):
         nonlocal retrieved_path
         retrieved_path = path
+
+    def stats_callback(payload: dict[str, Any]):
+        nonlocal spider_stats
+        spider_stats = dict(payload or {})
 
     def log_callback(message: str):
         logging.debug("[calibration] %s", message)
@@ -608,7 +753,7 @@ def run_platform_spider(
             run_youtube_spider(
                 api_keys=platform_config.get("api_keys", []),
                 keywords_list=[keyword],
-                max_results=platform_config.get("max_results", 10),
+                max_results=int(platform_config.get("max_results", 10)),
                 limit_time_str="是",
                 start_date=start_date,
                 end_date=end_date,
@@ -618,7 +763,8 @@ def run_platform_spider(
                 finish_callback=finish_callback,
                 stop_event=stop_event,
                 pause_event=pause_event,
-                config={"youtube_search_method": "仅API（消耗配额）"},
+                config={"youtube_search_method": "使用 API（消耗配额）"},
+                stats_callback=stats_callback,
             )
         elif platform == "tiktok":
             if run_tiktok_spider is None:
@@ -638,6 +784,7 @@ def run_platform_spider(
                 finish_callback=finish_callback,
                 stop_event=stop_event,
                 pause_event=pause_event,
+                stats_callback=stats_callback,
             )
         elif platform == "x_twitter":
             if run_x_spider is None:
@@ -667,6 +814,7 @@ def run_platform_spider(
                     "slice_days": days,
                     "max_parallel_tabs": 1,
                 },
+                stats_callback=stats_callback,
             )
         else:
             finished_at = now_str()
@@ -692,10 +840,13 @@ def run_platform_spider(
             ids=set(),
             links=set(),
             output_path=retrieved_path,
-            error_message=error_message,
-            started_at=started_at,
-            finished_at=finished_at,
-        )
+        error_message=error_message,
+        started_at=started_at,
+        finished_at=finished_at,
+        scanned_count=spider_stats.get("scanned_count"),
+        written_count=spider_stats.get("written_count"),
+        hit_limit=bool(spider_stats.get("hit_limit", False)),
+    )
 
     finished_at = now_str()
     if not retrieved_path:
@@ -709,6 +860,9 @@ def run_platform_spider(
             error_message="No Excel path returned from spider",
             started_at=started_at,
             finished_at=finished_at,
+            scanned_count=spider_stats.get("scanned_count"),
+            written_count=spider_stats.get("written_count"),
+            hit_limit=bool(spider_stats.get("hit_limit", False)),
         )
 
     if not os.path.exists(retrieved_path):
@@ -722,6 +876,9 @@ def run_platform_spider(
             error_message=f"Excel file not found at {retrieved_path}",
             started_at=started_at,
             finished_at=finished_at,
+            scanned_count=spider_stats.get("scanned_count"),
+            written_count=spider_stats.get("written_count"),
+            hit_limit=bool(spider_stats.get("hit_limit", False)),
         )
 
     try:
@@ -737,6 +894,9 @@ def run_platform_spider(
             error_message=f"Failed to parse Excel: {exc}",
             started_at=started_at,
             finished_at=finished_at,
+            scanned_count=spider_stats.get("scanned_count"),
+            written_count=spider_stats.get("written_count"),
+            hit_limit=bool(spider_stats.get("hit_limit", False)),
         )
 
     ids = {extract_id_from_link(link, platform) for link in links if link}
@@ -752,28 +912,31 @@ def run_platform_spider(
         error_message="",
         started_at=started_at,
         finished_at=finished_at,
-        written_count=len(links),
+        scanned_count=spider_stats.get("scanned_count"),
+        written_count=spider_stats.get("written_count", len(links)),
+        hit_limit=bool(spider_stats.get("hit_limit", False)),
     )
 
 
-def write_csv_report(games: dict[str, Any], csv_path: Path) -> None:
+def write_csv_report(games: list[dict[str, Any]], csv_path: Path) -> None:
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with open(csv_path, "w", encoding="utf-8-sig", newline="") as file:
         writer = csv.writer(file)
         writer.writerow(CSV_HEADERS)
 
-        for game_name, game_data in games.items():
-            baseline_query = game_data["baseline_query"]
-            for platform, platform_data in game_data["platforms"].items():
-                for group in platform_data["groups"]:
+        for game_data in games:
+            for track_data in game_data["tracks"]:
+                for group in track_data["groups"]:
                     writer.writerow(
                         [
-                            sanitize_csv_cell(game_name),
-                            sanitize_csv_cell(platform),
-                            sanitize_csv_cell(baseline_query),
-                            sanitize_csv_cell(platform_data["baseline_status"]),
-                            platform_data["baseline_result_count"],
-                            platform_data["baseline_raw_link_count"],
+                            sanitize_csv_cell(game_data["name"]),
+                            sanitize_csv_cell(track_data["platform"]),
+                            sanitize_csv_cell(track_data["language"]),
+                            sanitize_csv_cell(track_data["track_key"]),
+                            sanitize_csv_cell(track_data["baseline_query"]),
+                            sanitize_csv_cell(track_data["baseline_status"]),
+                            track_data["baseline_result_count"],
+                            track_data["baseline_raw_link_count"],
                             sanitize_csv_cell(", ".join(group["keywords"])),
                             sanitize_csv_cell(group["status"]),
                             group["result_count"],
@@ -804,30 +967,41 @@ def write_markdown_report(context: dict[str, Any], markdown_path: Path) -> None:
         ]
     )
 
-    for game_name, game_data in context["games"].items():
-        lines.append(f"## Game: {game_name}")
-        lines.append(f"- **Baseline Query**: `{game_data['baseline_query']}`")
+    for game_data in context["games"]:
+        lines.append(f"## Game: {game_data['name']}")
         lines.append("")
 
-        for platform, platform_data in game_data["platforms"].items():
-            lines.append(f"### Platform: {platform.upper()}")
-            lines.append(f"- **Baseline Status**: `{platform_data['baseline_status']}`")
-            if platform_data["baseline_error"]:
-                lines.append(f"- **Baseline Error**: {platform_data['baseline_error']}")
-            lines.append(f"- **Baseline Result Count**: {platform_data['baseline_result_count']}")
-            lines.append(f"- **Baseline Raw Link Count**: {platform_data['baseline_raw_link_count']}")
+        if not game_data["tracks"]:
+            lines.append("_No track matched the selected platforms._")
             lines.append("")
+
+        for track_data in game_data["tracks"]:
+            lines.append(f"### Track: {track_data['track_key']}")
+            lines.append(f"- **Platform**: `{track_data['platform']}`")
+            lines.append(f"- **Language**: `{track_data['language']}`")
+            lines.append(f"- **Baseline Query**: `{track_data['baseline_query']}`")
+            lines.append(f"- **Baseline Status**: `{track_data['baseline_status']}`")
+            if track_data["baseline_error"]:
+                lines.append(f"- **Baseline Error**: {track_data['baseline_error']}")
+            lines.append(f"- **Baseline Result Count**: {track_data['baseline_result_count']}")
+            lines.append(f"- **Baseline Raw Link Count**: {track_data['baseline_raw_link_count']}")
+            lines.append("")
+
+            if not track_data["groups"]:
+                lines.append("_No keyword groups configured._")
+                lines.append("")
+                continue
+
             lines.append("| " + " | ".join(MARKDOWN_TABLE_HEADERS) + " |")
             lines.append("|:---:|:---|:---:|---:|---:|---:|---:|---:|---:|---:|---:|:---|")
-
-            for idx, group in enumerate(platform_data["groups"], 1):
+            for index, group in enumerate(track_data["groups"], 1):
                 escaped_keywords = [keyword.replace("|", "\\|") for keyword in group["keywords"]]
                 keyword_text = ", ".join(f"`{keyword}`" for keyword in escaped_keywords)
                 lines.append(
                     "| "
                     + " | ".join(
                         [
-                            str(idx),
+                            str(index),
                             keyword_text,
                             f"`{group['status']}`",
                             str(group["result_count"]),
@@ -844,6 +1018,7 @@ def write_markdown_report(context: dict[str, Any], markdown_path: Path) -> None:
                     + " |"
                 )
             lines.append("")
+
         lines.append("---")
         lines.append("")
 
@@ -869,7 +1044,7 @@ def run_calibration_task(config: dict, output_path: str, log_callback=None, stop
     days_raw = time_period.get("days", 7)
     try:
         days = int(days_raw)
-    except (ValueError, TypeError) as exc:
+    except (TypeError, ValueError) as exc:
         if log_callback:
             log_callback(f"Invalid days value in config (must be integer): {exc}")
         raise ValueError(f"Invalid days value: {exc}") from exc
@@ -881,7 +1056,7 @@ def run_calibration_task(config: dict, output_path: str, log_callback=None, stop
             start_dt = dt.datetime.strptime(start_date_str, "%Y-%m-%d")
             end_dt = dt.datetime.strptime(end_date_str, "%Y-%m-%d")
             days = max(1, (end_dt - start_dt).days)
-        except (ValueError, TypeError):
+        except (TypeError, ValueError):
             pass
     else:
         end_dt = dt.datetime.now()
@@ -890,6 +1065,8 @@ def run_calibration_task(config: dict, output_path: str, log_callback=None, stop
         end_date_str = end_dt.strftime("%Y-%m-%d")
 
     platforms = parse_platforms(config.get("platforms"))
+    normalized_games = normalize_games_config(config.get("games", []))
+    validate_selected_platforms(normalized_games, platforms)
     run_started_at = now_str()
     run_id, run_dir = create_run_directory(output_path, log_callback=log_callback)
     x_search_tab = select_x_search_tab(config.get("x_twitter", {}))
@@ -900,37 +1077,49 @@ def run_calibration_task(config: dict, output_path: str, log_callback=None, stop
         log_callback(message)
         log_callback(f"Run directory: {run_dir}")
 
-    config_snapshot_path = run_dir / "config_snapshot.json"
-    write_json(config_snapshot_path, config)
+    snapshot_config = dict(config)
+    snapshot_config["games"] = normalized_games
+    write_json(run_dir / "config_snapshot.json", snapshot_config)
 
-    games: dict[str, Any] = {}
+    report_games: list[dict[str, Any]] = []
 
-    for game in config.get("games", []):
+    for game_index, game in enumerate(normalized_games, 1):
         if should_stop(stop_event):
             break
         if wait_if_paused(pause_event, stop_event):
             break
 
         game_name = game["name"]
-        baseline_query = game["baseline_query"]
-        keyword_groups = game.get("keyword_groups", [])
-
         if log_callback:
             log_callback(f"\nProcessing game: {game_name}")
-        games[game_name] = {"baseline_query": baseline_query, "platforms": {}}
 
-        for platform in platforms:
+        report_game = {"name": game_name, "tracks": []}
+        report_games.append(report_game)
+
+        matched_tracks = [track for track in game["tracks"] if track["platform"] in platforms]
+        if not matched_tracks and log_callback:
+            log_callback("  No track matched the selected platforms, skipping.")
+
+        for track in matched_tracks:
             if should_stop(stop_event):
                 break
             if wait_if_paused(pause_event, stop_event):
                 break
 
+            platform = track["platform"]
+            language = track["language"]
+            track_key = build_track_key(platform, language)
+            baseline_query = track["baseline_query"]
+            keyword_groups = track.get("keyword_groups", [])
+
+            if log_callback:
+                log_callback(f"  Running track: {track_key}")
+
             platform_config = dict(config.get(platform, {}))
             if platform == "x_twitter":
                 platform_config["x_search_tab"] = x_search_tab
 
-            if log_callback:
-                log_callback(f"  Running searches on platform: {platform}")
+            raw_dir = run_dir / "raw" / raw_game_dir_name(game_name, game_index) / raw_platform_dir_name(platform) / raw_language_dir_name(language)
 
             baseline_result = run_platform_spider(
                 platform=platform,
@@ -944,9 +1133,13 @@ def run_calibration_task(config: dict, output_path: str, log_callback=None, stop
             )
 
             write_json(
-                run_dir / "raw" / raw_platform_dir_name(platform) / "baseline.json",
+                raw_dir / "baseline.json",
                 build_group_snapshot(
+                    game_name=game_name,
                     platform=platform,
+                    language=language,
+                    track_key=track_key,
+                    baseline_query=baseline_query,
                     group_key="baseline",
                     keywords=[baseline_query],
                     status=baseline_result.status,
@@ -962,18 +1155,22 @@ def run_calibration_task(config: dict, output_path: str, log_callback=None, stop
                 ),
             )
 
-            platform_entry = {
+            report_track = {
+                "platform": platform,
+                "language": language,
+                "track_key": track_key,
+                "baseline_query": baseline_query,
                 "baseline_status": baseline_result.status,
                 "baseline_error": baseline_result.error_message or "",
                 "baseline_result_count": len(baseline_result.ids),
                 "baseline_raw_link_count": len(baseline_result.links),
                 "groups": [],
             }
-            games[game_name]["platforms"][platform] = platform_entry
+            report_game["tracks"].append(report_track)
 
             if not is_successful_run(baseline_result):
-                for index, keywords in enumerate(keyword_groups, 1):
-                    platform_entry["groups"].append(
+                for group_index, keywords in enumerate(keyword_groups, 1):
+                    report_track["groups"].append(
                         {
                             "keywords": keywords,
                             "status": REPORT_FAILURE_STATUS,
@@ -989,10 +1186,14 @@ def run_calibration_task(config: dict, output_path: str, log_callback=None, stop
                         }
                     )
                     write_json(
-                        run_dir / "raw" / raw_platform_dir_name(platform) / f"group_{index:02d}.json",
+                        raw_dir / f"group_{group_index:02d}.json",
                         build_group_snapshot(
+                            game_name=game_name,
                             platform=platform,
-                            group_key=f"group_{index:02d}",
+                            language=language,
+                            track_key=track_key,
+                            baseline_query=baseline_query,
+                            group_key=f"group_{group_index:02d}",
                             keywords=keywords,
                             status=REPORT_FAILURE_STATUS,
                             ids=set(),
@@ -1008,7 +1209,7 @@ def run_calibration_task(config: dict, output_path: str, log_callback=None, stop
                     )
                 continue
 
-            for index, keywords in enumerate(keyword_groups, 1):
+            for group_index, keywords in enumerate(keyword_groups, 1):
                 if should_stop(stop_event):
                     break
                 if wait_if_paused(pause_event, stop_event):
@@ -1045,26 +1246,31 @@ def run_calibration_task(config: dict, output_path: str, log_callback=None, stop
                 started_at = min((result.started_at for result in keyword_runs), default=None)
                 finished_at = max((result.finished_at for result in keyword_runs), default=None)
 
-                group_entry = {
-                    "keywords": keywords,
-                    "status": group_status,
-                    "error_message": group_error,
-                    "result_count": metrics["result_count"],
-                    "raw_link_count": len(group_links),
-                    "baseline_intersection_count": metrics["baseline_intersection_count"],
-                    "relative_result_volume": metrics["relative_result_volume"],
-                    "baseline_overlap_rate": metrics["baseline_overlap_rate"],
-                    "unique_result_count": metrics["unique_result_count"],
-                    "incremental_gain": metrics["incremental_gain"],
-                    "jaccard_similarity": metrics["jaccard_similarity"],
-                }
-                platform_entry["groups"].append(group_entry)
+                report_track["groups"].append(
+                    {
+                        "keywords": keywords,
+                        "status": group_status,
+                        "error_message": group_error,
+                        "result_count": metrics["result_count"],
+                        "raw_link_count": len(group_links),
+                        "baseline_intersection_count": metrics["baseline_intersection_count"],
+                        "relative_result_volume": metrics["relative_result_volume"],
+                        "baseline_overlap_rate": metrics["baseline_overlap_rate"],
+                        "unique_result_count": metrics["unique_result_count"],
+                        "incremental_gain": metrics["incremental_gain"],
+                        "jaccard_similarity": metrics["jaccard_similarity"],
+                    }
+                )
 
                 write_json(
-                    run_dir / "raw" / raw_platform_dir_name(platform) / f"group_{index:02d}.json",
+                    raw_dir / f"group_{group_index:02d}.json",
                     build_group_snapshot(
+                        game_name=game_name,
                         platform=platform,
-                        group_key=f"group_{index:02d}",
+                        language=language,
+                        track_key=track_key,
+                        baseline_query=baseline_query,
+                        group_key=f"group_{group_index:02d}",
                         keywords=keywords,
                         status=group_status,
                         ids=group_ids,
@@ -1081,29 +1287,33 @@ def run_calibration_task(config: dict, output_path: str, log_callback=None, stop
                 )
 
     run_finished_at = now_str()
-    environment_snapshot = build_environment_snapshot(
-        run_id=run_id,
-        run_started_at=run_started_at,
-        run_finished_at=run_finished_at,
-        start_date=start_date_str,
-        end_date=end_date_str,
-        days=days,
-        platforms=platforms,
-        x_search_tab=x_search_tab,
+    write_json(
+        run_dir / "environment_snapshot.json",
+        build_environment_snapshot(
+            run_id=run_id,
+            run_started_at=run_started_at,
+            run_finished_at=run_finished_at,
+            start_date=start_date_str,
+            end_date=end_date_str,
+            days=days,
+            platforms=platforms,
+            x_search_tab=x_search_tab,
+        ),
     )
-    write_json(run_dir / "environment_snapshot.json", environment_snapshot)
 
     if not should_stop(stop_event):
-        report_context = {
-            "run_id": run_id,
-            "generated_at": run_finished_at,
-            "start_date": start_date_str,
-            "end_date": end_date_str,
-            "platforms": platforms,
-            "x_search_tab": x_search_tab,
-            "games": games,
-        }
-        report_paths = generate_reports(report_context, run_dir)
+        report_paths = generate_reports(
+            {
+                "run_id": run_id,
+                "generated_at": run_finished_at,
+                "start_date": start_date_str,
+                "end_date": end_date_str,
+                "platforms": platforms,
+                "x_search_tab": x_search_tab,
+                "games": report_games,
+            },
+            run_dir,
+        )
         if log_callback:
             log_callback(f"Markdown report: {report_paths['markdown']}")
             log_callback(f"CSV report: {report_paths['csv']}")

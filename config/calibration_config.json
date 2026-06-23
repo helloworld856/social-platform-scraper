@@ -1,0 +1,59 @@
+{
+  "platforms": ["youtube", "tiktok", "x_twitter"],
+  "time_period": {
+    "days": 7
+  },
+  "youtube": {
+    "api_keys": ["YOUR_YOUTUBE_API_KEY"],
+    "max_results": 10
+  },
+  "tiktok": {
+    "cdp_url": "http://localhost:9222",
+    "max_videos": 10
+  },
+  "x_twitter": {
+    "cdp_url": "http://localhost:9222",
+    "max_scrolls": 2,
+    "x_search_tab": "latest"
+  },
+  "games": [
+    {
+      "name": "Genshin Impact",
+      "tracks": [
+        {
+          "platform": "youtube",
+          "language": "en",
+          "baseline_query": "Genshin Impact",
+          "keyword_groups": [
+            ["Genshin guide", "Genshin build"],
+            ["Genshin wish", "Genshin pull"]
+          ]
+        },
+        {
+          "platform": "youtube",
+          "language": "ja",
+          "baseline_query": "原神",
+          "keyword_groups": [
+            ["原神 攻略", "原神 キャラ"]
+          ]
+        },
+        {
+          "platform": "tiktok",
+          "language": "ja",
+          "baseline_query": "原神",
+          "keyword_groups": [
+            ["原神 攻略", "原神 ガチャ"]
+          ]
+        },
+        {
+          "platform": "x_twitter",
+          "language": "en",
+          "baseline_query": "Genshin Impact",
+          "keyword_groups": [
+            ["genshin build", "genshin team"]
+          ]
+        }
+      ]
+    }
+  ]
+}

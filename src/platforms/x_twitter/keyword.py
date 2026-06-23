@@ -513,13 +513,15 @@ def _scrape_single_x_keyword(base_keyword, adv_params, port,
     comment_queue = None
     comment_threads: list[threading.Thread] = []
     search_page = None
+    total_count = 0
+    hit_limit = False
     try:
         if should_stop(stop_event):
             log("任务已停止。")
-            return None
+            return None, {"scanned_count": 0, "written_count": 0, "hit_limit": False}
         if wait_if_paused(pause_event, stop_event):
             log("任务已停止。")
-            return None
+            return None, {"scanned_count": 0, "written_count": 0, "hit_limit": False}
 
         limit_time_bool = adv_params.get("limit_time") == "是"
         get_comments_bool = adv_params.get("get_comments") == "是"
@@ -538,10 +540,10 @@ def _scrape_single_x_keyword(base_keyword, adv_params, port,
                 end_dt = datetime.strptime(adv_params["end_date"], "%Y-%m-%d") + timedelta(days=1)
             except ValueError:
                 log("日期或切片格式错误：日期必须是 YYYY-MM-DD，切片天数必须是整数。")
-                return None
+                return None, {"scanned_count": 0, "written_count": 0, "hit_limit": False}
             if start_dt >= end_dt:
                 log("起始日期必须早于结束日期。")
-                return None
+                return None, {"scanned_count": 0, "written_count": 0, "hit_limit": False}
         else:
             start_dt = datetime.now()
             end_dt = datetime.now()
@@ -572,7 +574,6 @@ def _scrape_single_x_keyword(base_keyword, adv_params, port,
                 writer = XlsxRowWriter(output_path, CSV_FIELDS, autosave_every=10)
 
             seen_urls = set()
-            total_count = 0
             current_end_dt = end_dt
             slice_index = 1
 
@@ -722,6 +723,8 @@ def _scrape_single_x_keyword(base_keyword, adv_params, port,
                         search_page.mouse.wheel(delta_x=0, delta_y=random.randint(900, 1400))
                     if stop_outer or interruptible_sleep(random.uniform(scroll_cooldown_min, scroll_cooldown_max), stop_event):
                         break
+                else:
+                    hit_limit = True
 
                 log(f"当前切片捕获 {slice_count} 条含媒体原创推文。")
                 if limit_time_bool:
@@ -740,7 +743,11 @@ def _scrape_single_x_keyword(base_keyword, adv_params, port,
                     writer.save()
             else:
                 writer.save()
-            return output_path
+            return output_path, {
+                "scanned_count": total_count,
+                "written_count": total_count,
+                "hit_limit": hit_limit,
+            }
 
     except Exception as exc:
         log_error(log, f"发生致命错误：{exc}")
@@ -753,7 +760,11 @@ def _scrape_single_x_keyword(base_keyword, adv_params, port,
                     writer.save()
             except Exception:
                 pass
-        return None
+        return None, {
+            "scanned_count": total_count,
+            "written_count": total_count,
+            "hit_limit": hit_limit,
+        }
     finally:
         if comment_threads and comment_queue is not None:
             try:
@@ -771,7 +782,7 @@ def _scrape_single_x_keyword(base_keyword, adv_params, port,
                 pass
 
 
-def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback, stop_event=None, config=None, pause_event=None):
+def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback, stop_event=None, config=None, pause_event=None, stats_callback=None):
     ensure_playwright_available()
     if config is None:
         config = {}
@@ -790,6 +801,7 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
     comment_refresh_count = int(config.get("comment_refresh_count", 3))
     comment_refresh_interval = float(config.get("comment_refresh_interval", 5.0))
 
+    last_run_stats: dict[str, int | bool] | None = None
     try:
         # pre-launch Chrome once before fanning out to threads
         ensure_chrome_for_cdp(port, log_callback=log_callback)
@@ -808,7 +820,7 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
                 if wait_if_paused(pause_event, stop_event):
                     break
                 log_line(log_callback, f"[{keyword_index}/{len(keywords_list)}] 开始关键词：{base_keyword}")
-                path = _scrape_single_x_keyword(
+                path, stats = _scrape_single_x_keyword(
                     base_keyword, adv_params, port,
                     log_callback, stop_event, pause_event,
                     search_page_timeout, scroll_cooldown_min, scroll_cooldown_max,
@@ -818,9 +830,12 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
                     search_refresh_count, search_refresh_interval,
                     comment_refresh_count, comment_refresh_interval,
                 )
+                last_run_stats = stats
                 if path:
                     output_path = path
             log_line(log_callback, "\nX 关键词媒体推文搜索任务结束。")
+            if stats_callback and last_run_stats is not None:
+                stats_callback(last_run_stats)
             finish_callback(output_path)
             return
 
@@ -850,7 +865,8 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
             for future in as_completed(future_to_keyword):
                 keyword = future_to_keyword[future]
                 try:
-                    path = future.result()
+                    path, stats = future.result()
+                    last_run_stats = stats
                     if path:
                         output_paths.append(path)
                 except Exception as exc:
@@ -859,8 +875,12 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
         log_line(log_callback, f"\nX 关键词媒体推文搜索任务结束。{len(output_paths)}/{len(keywords_list)} 个成功。")
         for p in output_paths:
             log_line(log_callback, f"  {p}")
+        if stats_callback and last_run_stats is not None:
+            stats_callback(last_run_stats)
         finish_callback(output_paths[-1] if output_paths else None)
 
     except Exception as e:
         log_error(log_callback, f"发生致命错误：{e}")
-        finish_callback()
+        if stats_callback and last_run_stats is not None:
+            stats_callback(last_run_stats)
+        finish_callback(None)

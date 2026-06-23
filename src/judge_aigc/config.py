@@ -1,17 +1,7 @@
 # config.py
 # 项目配置文件
 
-import os
-import dotenv
-from dotenv import find_dotenv
-
 class Config:
-
-    dotenv.load_dotenv(find_dotenv())
-    # ===== DeepSeek / OpenAI Compatible API 配置 =====
-    API_KEY = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("API_KEY", "")
-    BASE_URL = os.environ.get("DEEPSEEK_BASE_URL") or os.environ.get("BASE_URL", "https://api.deepseek.com")
-    MODEL_NAME = os.environ.get("DEEPSEEK_MODEL_NAME") or os.environ.get("MODEL_NAME", "deepseek-chat")
 
     # ===== 模型参数 =====
     TEMPERATURE = 0.1

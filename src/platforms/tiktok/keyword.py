@@ -770,14 +770,16 @@ def _scrape_single_tiktok_keyword(
     comment_threads: list[threading.Thread] = []
     search_page = metrics_page = None
     browser = None
+    scanned_count = 0
+    written_count = 0
     try:
         # 检查是否已请求停止或暂停
         if should_stop(stop_event):
             log("任务已停止。")
-            return None
+            return None, {"scanned_count": 0, "written_count": 0, "hit_limit": False}
         if wait_if_paused(pause_event, stop_event):
             log("任务已停止。")
-            return None
+            return None, {"scanned_count": 0, "written_count": 0, "hit_limit": False}
 
         log(f"[{keyword_index}/{total_keywords}] 搜索关键词：{keyword}")
         # 构建输出文件路径
@@ -833,11 +835,9 @@ def _scrape_single_tiktok_keyword(
                 # 计算动态搜索滚动次数上限，防止无限滚动
                 scroll_limit = dynamic_search_scroll_limit(max_videos, config_max_search_scrolls)
                 seen_links: set[str] = set()
-                scanned_count = 0
                 no_new_visible_rounds = 0
                 log("  开始边滚动边提取详情并按日期过滤")
 
-                written_count = 0
                 for scroll_index in range(scroll_limit):
                     if should_stop(stop_event):
                         log("  已请求停止，结束当前关键词。")
@@ -933,7 +933,11 @@ def _scrape_single_tiktok_keyword(
 
                 # 保存并保存 Excel 文件
                 writer.save()
-                return output_path
+                return output_path, {
+                    "scanned_count": scanned_count,
+                    "written_count": written_count,
+                    "hit_limit": bool(written_count >= max_videos or scanned_count >= max_candidates),
+                }
             finally:
                 for pg in (search_page, metrics_page):
                     if pg is not None and not pg.is_closed():
@@ -954,7 +958,11 @@ def _scrape_single_tiktok_keyword(
                 writer.save()
             except Exception:
                 pass
-        return None
+        return None, {
+            "scanned_count": scanned_count,
+            "written_count": written_count,
+            "hit_limit": bool(written_count >= max_videos or scanned_count >= max_candidates),
+        }
     finally:
         # 双重保险：确保消费者线程安全退出，关闭 Playwright 页面
         if comment_threads and comment_queue is not None:
@@ -983,6 +991,7 @@ def run_tiktok_spider(
     stop_event=None,
     pause_event=None,
     config=None,
+    stats_callback=None,
 ):
     """
     TikTok 关键词爬虫主入口函数。
@@ -1002,6 +1011,7 @@ def run_tiktok_spider(
     cooldown_max_val = float(config.get("cooldown_max", 8.0))
 
     output_paths: list[str] = []
+    last_run_stats: dict[str, int | bool] | None = None
     try:
         limit_time_bool = limit_time_str == "是"
         get_comments_bool = get_comments_str == "是"
@@ -1022,7 +1032,7 @@ def run_tiktok_spider(
                     break
                 if wait_if_paused(pause_event, stop_event):
                     break
-                path = _scrape_single_tiktok_keyword(
+                path, stats = _scrape_single_tiktok_keyword(
                     keyword,
                     idx,
                     len(keywords_list),
@@ -1046,12 +1056,15 @@ def run_tiktok_spider(
                     cooldown_min_val,
                     cooldown_max_val,
                 )
+                last_run_stats = stats
                 if path:
                     output_paths.append(path)
 
             log_line(log_callback, "完成，已按关键词分别保存：")
             for p in output_paths:
                 log_line(log_callback, f"  {p}")
+            if stats_callback and last_run_stats is not None:
+                stats_callback(last_run_stats)
             finish_callback(output_paths[-1] if output_paths else None)
             return
 
@@ -1093,7 +1106,8 @@ def run_tiktok_spider(
             for future in as_completed(future_to_keyword):
                 keyword = future_to_keyword[future]
                 try:
-                    path = future.result()
+                    path, stats = future.result()
+                    last_run_stats = stats
                     if path:
                         output_paths.append(path)
                 except Exception as exc:
@@ -1102,8 +1116,12 @@ def run_tiktok_spider(
         log_line(log_callback, f"全部关键词处理完毕。{len(output_paths)}/{len(keywords_list)} 个成功。")
         for p in output_paths:
             log_line(log_callback, f"  {p}")
+        if stats_callback and last_run_stats is not None:
+            stats_callback(last_run_stats)
         finish_callback(output_paths[-1] if output_paths else None)
 
     except Exception as exc:
         log_error(log_callback, f"运行失败：{exc}")
+        if stats_callback and last_run_stats is not None:
+            stats_callback(last_run_stats)
         finish_callback(None)
