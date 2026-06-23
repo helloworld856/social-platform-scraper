@@ -4,7 +4,7 @@
 
 ## 环境要求
 
-- Python 3.10+，建议使用 3.11 或 3.12。
+- Python 3.13。
 - Windows + Chrome 或 Chromium。
 - TikTok 和 X/Twitter 工具依赖 Playwright 接管浏览器。
 - YouTube 工具需要 Google API Key。
