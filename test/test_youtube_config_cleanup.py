@@ -30,6 +30,8 @@ def test_keyword_windows_expose_language_filter_config():
 
     assert basic_keys["youtube_language_filter"] == "text"
     assert pro_keys["youtube_language_filter"] == "text"
+    assert basic_keys == pro_keys
+    assert basic_keys["comment_top_limit"] == "int"
 
 
 def test_youtube_comment_tools_expose_mode_and_workers_config():

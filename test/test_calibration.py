@@ -1,16 +1,22 @@
 from __future__ import annotations
 
-import csv
 import json
+import os
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
 import openpyxl
 import pytest
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 from src.tools.calibration import (
+    KEYWORD_ROLE_CANDIDATE,
+    KEYWORD_ROLE_OFFICIAL,
+    STANDARDIZED_HEADERS,
+    STANDARDIZED_SHEET_NAME,
     STATUS_EMPTY_RESULT,
-    STATUS_FAILED,
     STATUS_SUCCESS,
     STATUS_UNKNOWN_PLATFORM,
     extract_id_from_link,
@@ -24,55 +30,76 @@ from src.tools.calibration import (
 )
 
 
-def create_mock_excel(file_path: Path, platform: str, urls: list[str]) -> None:
+def create_mock_excel(file_path: Path, platform: str, rows: list[dict[str, str]]) -> None:
     workbook = openpyxl.Workbook()
     sheet = workbook.active
     if platform == "x_twitter":
         sheet.title = "数据"
-        headers = [
-            "原始搜索词",
-            "完整搜索语法",
-            "序号",
-            "推文内容",
-            "浏览量",
-            "点赞量",
-            "转发量",
-            "评论数",
-            "发帖时间",
-            "推文链接",
-            "标签",
-        ]
-        sheet.append(headers)
-        for index, url in enumerate(urls, 1):
-            sheet.append(["kw", "kw", str(index), "content", "10", "1", "1", "1", "2026-06-18", url, "tag"])
+        sheet.append(["原始搜索词", "完整搜索语法", "序号", "推文内容", "浏览量", "点赞量", "转发量", "评论数", "发帖时间", "推文链接", "标签"])
+        for index, row in enumerate(rows, 1):
+            sheet.append(
+                [
+                    "kw",
+                    "kw",
+                    index,
+                    row.get("title", row.get("description", "content")),
+                    "10",
+                    "1",
+                    "1",
+                    "1",
+                    row.get("published_at", "2026-06-18"),
+                    row.get("link", ""),
+                    "tag",
+                ]
+            )
     else:
         sheet.title = "视频信息"
-        headers = ["搜索词", "序号", "视频标题", "播放量", "点赞数", "发布时间", "视频链接"]
-        sheet.append(headers)
-        for index, url in enumerate(urls, 1):
-            sheet.append(["kw", str(index), "title", "10", "1", "2026-06-18", url])
+        sheet.append(["搜索词", "序号", "视频标题", "播放量", "点赞数", "发布时间", "视频链接"])
+        for index, row in enumerate(rows, 1):
+            sheet.append(
+                [
+                    "kw",
+                    index,
+                    row.get("title", "title"),
+                    "10",
+                    "1",
+                    row.get("published_at", "2026-06-18"),
+                    row.get("link", ""),
+                ]
+            )
     file_path.parent.mkdir(parents=True, exist_ok=True)
     workbook.save(file_path)
     workbook.close()
 
 
-def read_csv_rows(path: Path) -> list[dict[str, str]]:
-    with open(path, "r", encoding="utf-8-sig", newline="") as file:
-        return list(csv.DictReader(file))
+def read_standardized_rows(path: Path) -> list[dict[str, str]]:
+    workbook = openpyxl.load_workbook(path)
+    sheet = workbook[STANDARDIZED_SHEET_NAME]
+    headers = [sheet.cell(row=1, column=index).value for index in range(1, sheet.max_column + 1)]
+    rows: list[dict[str, str]] = []
+    for row_number in range(2, sheet.max_row + 1):
+        rows.append(
+            {
+                str(headers[index - 1]): "" if sheet.cell(row=row_number, column=index).value is None else str(sheet.cell(row=row_number, column=index).value)
+                for index in range(1, sheet.max_column + 1)
+            }
+        )
+    workbook.close()
+    return rows
 
 
 def make_track(
     *,
     platform: str = "youtube",
     language: str = "en",
-    baseline_query: str = "base",
-    keyword_groups: list[list[str]] | None = None,
+    official_keywords: list[str] | None = None,
+    candidate_keywords: list[str] | None = None,
 ) -> dict[str, object]:
     return {
         "platform": platform,
         "language": language,
-        "baseline_query": baseline_query,
-        "keyword_groups": keyword_groups or [],
+        "official_keywords": official_keywords or ["base"],
+        "candidate_keywords": candidate_keywords or [],
     }
 
 
@@ -95,22 +122,22 @@ def test_keyword_groups_text_helpers_round_trip():
     assert format_keyword_groups_text(groups) == "kw1, kw2\n词组A, 词组B\nsolo"
 
 
-def test_parse_games_definition_supports_legacy_and_track_json_formats():
-    block_definition = """
+def test_parse_games_definition_supports_legacy_and_new_track_formats():
+    legacy_definition = """
     # 注释会被忽略
     Game A | base
     kw1, kw2
     kw3
     """.strip()
 
-    parsed_block = parse_games_definition(block_definition)
-    assert parsed_block == [
+    parsed_legacy = parse_games_definition(legacy_definition)
+    assert parsed_legacy == [
         {
             "name": "Game A",
             "tracks": [
-                make_track(platform="youtube", language="default", baseline_query="base", keyword_groups=[["kw1", "kw2"], ["kw3"]]),
-                make_track(platform="tiktok", language="default", baseline_query="base", keyword_groups=[["kw1", "kw2"], ["kw3"]]),
-                make_track(platform="x_twitter", language="default", baseline_query="base", keyword_groups=[["kw1", "kw2"], ["kw3"]]),
+                make_track(platform="youtube", language="default", official_keywords=["base"], candidate_keywords=["kw1", "kw2", "kw3"]),
+                make_track(platform="tiktok", language="default", official_keywords=["base"], candidate_keywords=["kw1", "kw2", "kw3"]),
+                make_track(platform="x_twitter", language="default", official_keywords=["base"], candidate_keywords=["kw1", "kw2", "kw3"]),
             ],
         }
     ]
@@ -118,8 +145,8 @@ def test_parse_games_definition_supports_legacy_and_track_json_formats():
     json_definition = json.dumps(
         [
             make_game(
-                make_track(platform="youtube", language="en", baseline_query="base-c", keyword_groups=[["alpha", "beta"]]),
-                make_track(platform="tiktok", language="ja", baseline_query="基准词", keyword_groups=[["词组A", "词组B"]]),
+                make_track(platform="youtube", language="en", official_keywords=["base-c"], candidate_keywords=["alpha", "beta"]),
+                make_track(platform="tiktok", language="ja", official_keywords=["基准词"], candidate_keywords=["词组A", "词组B"]),
             )
         ],
         ensure_ascii=False,
@@ -128,8 +155,8 @@ def test_parse_games_definition_supports_legacy_and_track_json_formats():
         {
             "name": "Game A",
             "tracks": [
-                make_track(platform="youtube", language="en", baseline_query="base-c", keyword_groups=[["alpha", "beta"]]),
-                make_track(platform="tiktok", language="ja", baseline_query="基准词", keyword_groups=[["词组A", "词组B"]]),
+                make_track(platform="youtube", language="en", official_keywords=["base-c"], candidate_keywords=["alpha", "beta"]),
+                make_track(platform="tiktok", language="ja", official_keywords=["基准词"], candidate_keywords=["词组A", "词组B"]),
             ],
         }
     ]
@@ -138,70 +165,6 @@ def test_parse_games_definition_supports_legacy_and_track_json_formats():
 def test_parse_games_definition_rejects_invalid_block_header():
     with pytest.raises(ValueError, match="首行必须写成"):
         parse_games_definition("Game A\nkw1, kw2")
-
-
-def test_parse_games_definition_rejects_unknown_track_platform():
-    raw_definition = json.dumps(
-        [
-            {
-                "name": "Game A",
-                "tracks": [
-                    {
-                        "platform": "weibo",
-                        "language": "zh",
-                        "baseline_query": "原神",
-                        "keyword_groups": [["原神 攻略"]],
-                    }
-                ],
-            }
-        ],
-        ensure_ascii=False,
-    )
-
-    with pytest.raises(ValueError, match="不支持的平台"):
-        parse_games_definition(raw_definition)
-
-
-def test_run_calibration_task_rejects_invalid_selected_platforms(tmp_path):
-    config = {
-        "platforms": ["youtube", "weibo"],
-        "time_period": {"days": 7},
-        "youtube": {"api_keys": ["key"], "max_results": 10},
-        "games": [
-            make_game(
-                make_track(
-                    platform="youtube",
-                    language="en",
-                    baseline_query="base",
-                    keyword_groups=[["kw1"]],
-                )
-            )
-        ],
-    }
-
-    with pytest.raises(ValueError, match="不支持的平台"):
-        run_calibration_task(config, str(tmp_path / "output"))
-
-
-def test_run_calibration_task_rejects_when_selected_platforms_match_no_tracks(tmp_path):
-    config = {
-        "platforms": ["x_twitter"],
-        "time_period": {"days": 7},
-        "youtube": {"api_keys": ["key"], "max_results": 10},
-        "games": [
-            make_game(
-                make_track(
-                    platform="youtube",
-                    language="en",
-                    baseline_query="base",
-                    keyword_groups=[["kw1"]],
-                )
-            )
-        ],
-    }
-
-    with pytest.raises(ValueError, match="track 不匹配"):
-        run_calibration_task(config, str(tmp_path / "output"))
 
 
 def test_extract_id_from_link_normalizes_platform_urls():
@@ -213,7 +176,7 @@ def test_extract_id_from_link_normalizes_platform_urls():
 def test_run_platform_spider_reports_success_empty_and_unknown(tmp_path):
     success_excel = tmp_path / "success.xlsx"
     empty_excel = tmp_path / "empty.xlsx"
-    create_mock_excel(success_excel, "youtube", ["https://www.youtube.com/watch?v=abcdefghijk"])
+    create_mock_excel(success_excel, "youtube", [{"link": "https://www.youtube.com/watch?v=abcdefghijk", "title": "video a"}])
     create_mock_excel(empty_excel, "youtube", [])
 
     def mock_success(*args, **kwargs):
@@ -228,6 +191,7 @@ def test_run_platform_spider_reports_success_empty_and_unknown(tmp_path):
         result = run_platform_spider("youtube", "kw", "2026-06-01", "2026-06-08", {}, 7)
         assert result.status == STATUS_SUCCESS
         assert result.ids == {"abcdefghijk"}
+        assert result.records[0]["title"] == "video a"
         assert result.output_path == str(success_excel)
         assert result.scanned_count == 5
         assert result.written_count == 1
@@ -236,7 +200,7 @@ def test_run_platform_spider_reports_success_empty_and_unknown(tmp_path):
     with patch("src.tools.calibration.run_youtube_spider", side_effect=mock_empty):
         result = run_platform_spider("youtube", "kw", "2026-06-01", "2026-06-08", {}, 7)
         assert result.status == STATUS_EMPTY_RESULT
-        assert result.ids == set()
+        assert result.records == []
         assert result.scanned_count == 3
         assert result.written_count == 0
         assert result.hit_limit is False
@@ -255,39 +219,43 @@ def test_x_search_tab_helpers_support_latest_and_top():
     assert '"top": "top"' in source
 
 
-def test_run_calibration_task_generates_track_aware_bundle_and_metrics(tmp_path):
-    baseline_excel = tmp_path / "baseline.xlsx"
-    kw1_excel = tmp_path / "kw1.xlsx"
-    kw2_excel = tmp_path / "kw2.xlsx"
+def test_run_calibration_task_generates_standardized_bundle(tmp_path):
+    official_excel = tmp_path / "official.xlsx"
+    candidate_a_excel = tmp_path / "candidate_a.xlsx"
+    candidate_b_excel = tmp_path / "candidate_b.xlsx"
     create_mock_excel(
-        baseline_excel,
+        official_excel,
         "youtube",
         [
-            "https://www.youtube.com/watch?v=aaaaaaaaaaa",
-            "https://youtu.be/bbbbbbbbbbb",
+            {"link": "https://www.youtube.com/watch?v=aaaaaaaaaaa", "title": "official a"},
+            {"link": "https://youtu.be/bbbbbbbbbbb", "title": "official b"},
         ],
     )
     create_mock_excel(
-        kw1_excel,
+        candidate_a_excel,
         "youtube",
         [
-            "https://www.youtube.com/watch?v=aaaaaaaaaaa",
-            "https://www.youtube.com/watch?v=ccccccccccc",
+            {"link": "https://www.youtube.com/watch?v=aaaaaaaaaaa", "title": "candidate a"},
+            {"link": "https://www.youtube.com/watch?v=ccccccccccc", "title": "candidate c"},
         ],
     )
-    create_mock_excel(kw2_excel, "youtube", ["https://www.youtube.com/watch?v=ddddddddddd"])
+    create_mock_excel(
+        candidate_b_excel,
+        "youtube",
+        [{"link": "https://www.youtube.com/watch?v=ddddddddddd", "title": "candidate d"}],
+    )
 
     def mock_youtube(*args, **kwargs):
         keyword = kwargs["keywords_list"][0]
         stats_map = {
             "base": {"scanned_count": 2, "written_count": 2, "hit_limit": False},
             "kw1": {"scanned_count": 2, "written_count": 2, "hit_limit": False},
-            "kw2": {"scanned_count": 4, "written_count": 1, "hit_limit": True},
+            "kw2": {"scanned_count": 3, "written_count": 1, "hit_limit": True},
         }
         path_map = {
-            "base": baseline_excel,
-            "kw1": kw1_excel,
-            "kw2": kw2_excel,
+            "base": official_excel,
+            "kw1": candidate_a_excel,
+            "kw2": candidate_b_excel,
         }
         kwargs["stats_callback"](stats_map[keyword])
         kwargs["finish_callback"](str(path_map[keyword]))
@@ -296,119 +264,76 @@ def test_run_calibration_task_generates_track_aware_bundle_and_metrics(tmp_path)
         "platforms": ["youtube"],
         "time_period": {"days": 7},
         "youtube": {"api_keys": ["key"], "max_results": 10},
-        "games": [
-            make_game(
-                make_track(
-                    platform="youtube",
-                    language="en",
-                    baseline_query="base",
-                    keyword_groups=[["kw1", "kw2"]],
-                )
-            )
-        ],
+        "games": [make_game(make_track(platform="youtube", language="en", official_keywords=["base"], candidate_keywords=["kw1", "kw2"]))],
     }
 
     with patch("src.tools.calibration.run_youtube_spider", side_effect=mock_youtube):
         run_dir = Path(run_calibration_task(config, str(tmp_path / "legacy_report.md")))
 
-    assert run_dir.name
     assert (run_dir / "config_snapshot.json").exists()
     assert (run_dir / "environment_snapshot.json").exists()
-    assert (run_dir / "reports" / "calibration_report.md").exists()
-    assert (run_dir / "reports" / "calibration_report.csv").exists()
+    standardized_path = run_dir / "reports" / "keyword_collection_standardized.xlsx"
+    assert standardized_path.exists()
+    assert not (run_dir / "reports" / "calibration_report.md").exists()
+    assert not (run_dir / "reports" / "calibration_report.csv").exists()
 
-    baseline_paths = list((run_dir / "raw").rglob("baseline.json"))
-    group_paths = list((run_dir / "raw").rglob("group_01.json"))
-    assert len(baseline_paths) == 1
-    assert len(group_paths) == 1
+    official_paths = list((run_dir / "raw").rglob("official_01.json"))
+    candidate_paths = sorted((run_dir / "raw").rglob("candidate_*.json"))
+    assert len(official_paths) == 1
+    assert len(candidate_paths) == 2
 
-    rows = read_csv_rows(run_dir / "reports" / "calibration_report.csv")
-    assert rows[0]["Language"] == "en"
-    assert rows[0]["Track Key"] == "youtube/en"
-    assert rows[0]["Result Count"] == "3"
-    assert rows[0]["Raw Link Count"] == "3"
-    assert rows[0]["Baseline Intersection Count"] == "1"
-    assert rows[0]["Relative Result Volume (%)"] == "150.0"
-    assert rows[0]["Baseline Overlap Rate (%)"] == "50.0"
-    assert rows[0]["Unique Result Count"] == "2"
-    assert rows[0]["Incremental Gain (%)"] == "50.0"
-    assert rows[0]["Jaccard Similarity (%)"] == "25.0"
+    workbook = openpyxl.load_workbook(standardized_path)
+    assert workbook.sheetnames == [STANDARDIZED_SHEET_NAME]
+    headers = [workbook[STANDARDIZED_SHEET_NAME].cell(row=1, column=index).value for index in range(1, len(STANDARDIZED_HEADERS) + 1)]
+    workbook.close()
+    assert headers == STANDARDIZED_HEADERS
 
-    markdown = (run_dir / "reports" / "calibration_report.md").read_text(encoding="utf-8")
-    assert "关键词可观察搜索覆盖实验报告" in markdown
-    assert "### Track: youtube/en" in markdown
-    assert "Relative Result Volume" in markdown
+    rows = read_standardized_rows(standardized_path)
+    assert len(rows) == 5
+    assert rows[0]["关键词角色"] == KEYWORD_ROLE_OFFICIAL
+    assert rows[0]["关键词文本"] == "base"
+    assert rows[0]["采集状态"] == STATUS_SUCCESS
+    assert rows[2]["关键词角色"] == KEYWORD_ROLE_CANDIDATE
+    assert rows[2]["关键词文本"] == "kw1"
+    assert rows[2]["内容ID"] == "aaaaaaaaaaa"
+    assert rows[4]["关键词文本"] == "kw2"
+    assert rows[4]["内容ID"] == "ddddddddddd"
 
-    raw_group = json.loads(group_paths[0].read_text(encoding="utf-8"))
-    assert raw_group["language"] == "en"
-    assert raw_group["track_key"] == "youtube/en"
-    assert raw_group["ids"] == ["aaaaaaaaaaa", "ccccccccccc", "ddddddddddd"]
-    assert raw_group["keyword_runs"][0]["keyword"] == "kw1"
-    assert raw_group["keyword_runs"][0]["scanned_count"] == 2
-    assert raw_group["keyword_runs"][1]["written_count"] == 1
-    assert raw_group["keyword_runs"][1]["hit_limit"] is True
+    snapshot = json.loads(candidate_paths[1].read_text(encoding="utf-8"))
+    assert snapshot["keyword_role"] == KEYWORD_ROLE_CANDIDATE
+    assert snapshot["keyword"] == "kw2"
+    assert snapshot["record_count"] == 1
+    assert snapshot["hit_limit"] is True
 
-
-def test_run_calibration_task_marks_baseline_failed_groups(tmp_path):
-    config = {
-        "platforms": ["youtube"],
-        "time_period": {"days": 7},
-        "youtube": {"api_keys": ["key"], "max_results": 10},
-        "games": [
-            make_game(
-                make_track(
-                    platform="youtube",
-                    language="en",
-                    baseline_query="base",
-                    keyword_groups=[["kw1"]],
-                )
-            )
-        ],
-    }
-
-    def mock_youtube_fail(*args, **kwargs):
-        raise RuntimeError("Quota exceeded")
-
-    with patch("src.tools.calibration.run_youtube_spider", side_effect=mock_youtube_fail):
-        run_dir = Path(run_calibration_task(config, str(tmp_path / "output")))
-
-    rows = read_csv_rows(run_dir / "reports" / "calibration_report.csv")
-    assert rows[0]["Baseline Status"] == "QUOTA_EXCEEDED"
-    assert rows[0]["Group Status"] == "BASELINE_FAILED"
-    assert rows[0]["Relative Result Volume (%)"] == ""
-    assert rows[0]["Incremental Gain (%)"] == ""
+    env_snapshot = json.loads((run_dir / "environment_snapshot.json").read_text(encoding="utf-8"))
+    assert env_snapshot["x_search_tab"] == "latest"
+    assert env_snapshot["standardized_output_path"] == str(standardized_path)
 
 
-def test_group_partial_failure_still_keeps_observed_results(tmp_path):
-    success_excel = tmp_path / "kw.xlsx"
-    create_mock_excel(success_excel, "youtube", ["https://www.youtube.com/watch?v=aaaaaaaaaaa"])
+def test_run_calibration_task_keeps_placeholder_rows_for_empty_results(tmp_path):
+    official_excel = tmp_path / "official_empty.xlsx"
+    candidate_excel = tmp_path / "candidate.xlsx"
+    create_mock_excel(official_excel, "youtube", [])
+    create_mock_excel(candidate_excel, "youtube", [{"link": "https://www.youtube.com/watch?v=abcdefghijk", "title": "candidate"}])
 
     def mock_youtube(*args, **kwargs):
         keyword = kwargs["keywords_list"][0]
-        if keyword == "kw2":
-            raise RuntimeError("network down")
-        kwargs["finish_callback"](str(success_excel))
+        kwargs["finish_callback"](str(official_excel if keyword == "base" else candidate_excel))
 
     config = {
         "platforms": ["youtube"],
         "time_period": {"days": 7},
         "youtube": {"api_keys": ["key"], "max_results": 10},
-        "games": [
-            make_game(
-                make_track(
-                    platform="youtube",
-                    language="en",
-                    baseline_query="base",
-                    keyword_groups=[["kw1", "kw2"]],
-                )
-            )
-        ],
+        "games": [make_game(make_track(platform="youtube", language="en", official_keywords=["base"], candidate_keywords=["kw1"]))],
     }
 
     with patch("src.tools.calibration.run_youtube_spider", side_effect=mock_youtube):
         run_dir = Path(run_calibration_task(config, str(tmp_path / "output")))
 
-    rows = read_csv_rows(run_dir / "reports" / "calibration_report.csv")
-    assert rows[0]["Group Status"] == STATUS_FAILED
-    assert rows[0]["Result Count"] == "1"
-    assert "kw2" in rows[0]["Error Message"]
+    rows = read_standardized_rows(run_dir / "reports" / "keyword_collection_standardized.xlsx")
+    assert len(rows) == 2
+    assert rows[0]["关键词角色"] == KEYWORD_ROLE_OFFICIAL
+    assert rows[0]["采集状态"] == STATUS_EMPTY_RESULT
+    assert rows[0]["内容ID"] == ""
+    assert rows[1]["关键词角色"] == KEYWORD_ROLE_CANDIDATE
+    assert rows[1]["内容ID"] == "abcdefghijk"

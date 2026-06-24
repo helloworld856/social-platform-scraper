@@ -28,20 +28,20 @@ DEFAULT_GAMES_DEFINITION = json.dumps(
                 {
                     "platform": "youtube",
                     "language": "en",
-                    "baseline_query": "Genshin Impact",
-                    "keyword_groups": [["Genshin guide", "Genshin build"]],
+                    "official_keywords": ["Genshin Impact"],
+                    "candidate_keywords": ["Genshin guide", "Genshin build", "Genshin wish"],
                 },
                 {
                     "platform": "youtube",
                     "language": "ja",
-                    "baseline_query": "原神",
-                    "keyword_groups": [["原神 攻略", "原神 キャラ"]],
+                    "official_keywords": ["原神"],
+                    "candidate_keywords": ["原神 攻略", "原神 キャラ"],
                 },
                 {
                     "platform": "tiktok",
                     "language": "ja",
-                    "baseline_query": "原神",
-                    "keyword_groups": [["原神 攻略", "原神 ガチャ"]],
+                    "official_keywords": ["原神"],
+                    "candidate_keywords": ["原神 攻略", "原神 ガチャ"],
                 },
             ],
         }
@@ -71,7 +71,7 @@ class CalibrationGamesEditor(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(6)
 
-        hint = QLabel("左侧维护游戏，中间维护该游戏下的 track，右侧编辑当前 track。每个 track 独立绑定平台、语言、基准词和关键词组。")
+        hint = QLabel("左侧维护游戏，中间维护该游戏下的 track，右侧编辑当前 track。每个 track 独立绑定平台、语言、官方关键词和候选关键词。")
         hint.setWordWrap(True)
         root.addWidget(hint)
 
@@ -171,22 +171,24 @@ class CalibrationGamesEditor(QWidget):
         self.language_combo.currentTextChanged.connect(self._refresh_current_track_label)
         form.addRow("语言", self.language_combo)
 
-        self.baseline_edit = QLineEdit()
-        self.baseline_edit.setPlaceholderText("例如：Genshin Impact / 原神")
-        form.addRow("基准词", self.baseline_edit)
+        self.official_keywords_edit = QPlainTextEdit()
+        self.official_keywords_edit.setPlaceholderText("每行一个官方关键词，例如：\nGenshin Impact\n原神")
+        self.official_keywords_edit.setMinimumHeight(120)
+        editor_layout.addWidget(QLabel("官方关键词"))
+        editor_layout.addWidget(self.official_keywords_edit)
 
-        self.groups_edit = QPlainTextEdit()
-        self.groups_edit.setPlaceholderText("每行一个关键词组，组内用逗号分隔。\n例如：\n原神 攻略, 原神 角色\nGenshin guide, Genshin build")
-        self.groups_edit.setMinimumHeight(240)
-        editor_layout.addWidget(QLabel("关键词组"))
-        editor_layout.addWidget(self.groups_edit, 1)
+        self.candidate_keywords_edit = QPlainTextEdit()
+        self.candidate_keywords_edit.setPlaceholderText("每行一个候选关键词，例如：\nGenshin guide\nGenshin build")
+        self.candidate_keywords_edit.setMinimumHeight(220)
+        editor_layout.addWidget(QLabel("候选关键词"))
+        editor_layout.addWidget(self.candidate_keywords_edit, 1)
 
     def _empty_track(self) -> dict[str, object]:
         return {
             "platform": "youtube",
             "language": "en",
-            "baseline_query": "",
-            "keyword_groups": [],
+            "official_keywords": [],
+            "candidate_keywords": [],
         }
 
     def _empty_game(self, number: int) -> dict[str, object]:
@@ -205,10 +207,8 @@ class CalibrationGamesEditor(QWidget):
                         {
                             "platform": str(track.get("platform", "")).strip().lower(),
                             "language": str(track.get("language", "")).strip().lower() or "default",
-                            "baseline_query": str(track.get("baseline_query", "")),
-                            "keyword_groups": [
-                                [str(keyword) for keyword in group] for group in track.get("keyword_groups", []) if isinstance(group, list)
-                            ],
+                            "official_keywords": [str(keyword) for keyword in track.get("official_keywords", []) if str(keyword).strip()],
+                            "candidate_keywords": [str(keyword) for keyword in track.get("candidate_keywords", []) if str(keyword).strip()],
                         }
                         for track in game.get("tracks", [])
                         if isinstance(track, dict)
@@ -223,13 +223,13 @@ class CalibrationGamesEditor(QWidget):
         return f"{index + 1}. {platform} / {language}"
 
     def _snapshot_current_track(self) -> dict[str, object]:
-        from src.tools.calibration import parse_keyword_groups_text
+        from src.tools.calibration import parse_keyword_list_text
 
         return {
             "platform": self.platform_combo.currentText().strip().lower(),
             "language": self.language_combo.currentText().strip().lower() or "default",
-            "baseline_query": self.baseline_edit.text().strip(),
-            "keyword_groups": parse_keyword_groups_text(self.groups_edit.toPlainText()),
+            "official_keywords": parse_keyword_list_text(self.official_keywords_edit.toPlainText()),
+            "candidate_keywords": parse_keyword_list_text(self.candidate_keywords_edit.toPlainText()),
         }
 
     def _persist_current_state(self) -> None:
@@ -245,13 +245,13 @@ class CalibrationGamesEditor(QWidget):
             tracks[self._current_track_index] = self._snapshot_current_track()
 
     def _populate_track_editor(self, track: dict[str, object]) -> None:
-        from src.tools.calibration import format_keyword_groups_text
+        from src.tools.calibration import format_keyword_list_text
 
         self._loading = True
         self.platform_combo.setCurrentText(str(track.get("platform", "")))
         self.language_combo.setCurrentText(str(track.get("language", "")))
-        self.baseline_edit.setText(str(track.get("baseline_query", "")))
-        self.groups_edit.setPlainText(format_keyword_groups_text(track.get("keyword_groups", [])))
+        self.official_keywords_edit.setPlainText(format_keyword_list_text(track.get("official_keywords", [])))
+        self.candidate_keywords_edit.setPlainText(format_keyword_list_text(track.get("candidate_keywords", [])))
         self._loading = False
 
     def _reload_game_list(self) -> None:
@@ -276,8 +276,8 @@ class CalibrationGamesEditor(QWidget):
             self.track_list.clear()
             self.platform_combo.setCurrentText("youtube")
             self.language_combo.setCurrentText("en")
-            self.baseline_edit.clear()
-            self.groups_edit.clear()
+            self.official_keywords_edit.clear()
+            self.candidate_keywords_edit.clear()
             self._loading = False
             return
 
@@ -287,7 +287,6 @@ class CalibrationGamesEditor(QWidget):
             tracks.append(self._empty_track())
 
         track_index = max(0, min(track_index, len(tracks) - 1))
-
         self._current_game_index = game_index
         self._current_track_index = track_index
 
@@ -296,7 +295,6 @@ class CalibrationGamesEditor(QWidget):
         self._reload_track_list(tracks)
         self.track_list.setCurrentRow(track_index)
         self._loading = False
-
         self._populate_track_editor(tracks[track_index])
 
     def _on_current_game_changed(self, row: int) -> None:
@@ -331,7 +329,11 @@ class CalibrationGamesEditor(QWidget):
         current_row = self.track_list.currentRow()
         if not (0 <= current_row < self.track_list.count()):
             return
-        label = f"{current_row + 1}. {self.platform_combo.currentText().strip().lower() or 'platform'} / {self.language_combo.currentText().strip().lower() or 'default'}"
+        label = (
+            f"{current_row + 1}. "
+            f"{self.platform_combo.currentText().strip().lower() or 'platform'} / "
+            f"{self.language_combo.currentText().strip().lower() or 'default'}"
+        )
         self.track_list.item(current_row).setText(label)
 
     def _add_game(self) -> None:
@@ -436,7 +438,7 @@ class CalibrationToolWindow(SimpleToolWindow):
 
     def __init__(self) -> None:
         super().__init__(
-            "关键词可观察搜索覆盖实验",
+            "关键词实验数据采集",
             [
                 FieldSpec(
                     "days",
@@ -445,20 +447,20 @@ class CalibrationToolWindow(SimpleToolWindow):
                     default=7,
                     minimum=1,
                     maximum=365,
-                    tooltip="设置采集时间范围。例如填 7，则工具会采集过去 7 天内的数据用于覆盖实验。",
+                    tooltip="设置采集时间范围。例如填 7，则工具会采集过去 7 天内的数据。",
                 ),
                 FieldSpec(
                     "platforms",
                     "运行平台（英文逗号分隔）",
                     default="youtube, tiktok, x_twitter",
-                    tooltip="指定要运行的平台。可选 youtube、tiktok、x_twitter。多个平台用逗号分隔，留空默认全部。",
+                    tooltip="可选 youtube、tiktok、x_twitter。留空默认全部。",
                 ),
                 FieldSpec(
                     "youtube_api_keys",
                     "YouTube API Keys（每行一个）",
                     kind="multiline",
                     placeholder="仅在实际运行 youtube track 时必填",
-                    tooltip="由于 YouTube 配额限制，建议提供多个 Key 换行分隔，工具会自动轮询。",
+                    tooltip="建议提供多个 Key 换行分隔，工具会自动轮询。",
                 ),
                 FieldSpec(
                     "youtube_max_results",
@@ -467,7 +469,6 @@ class CalibrationToolWindow(SimpleToolWindow):
                     default=10,
                     minimum=1,
                     maximum=5000,
-                    tooltip="每个关键词在 YouTube 上最多采集多少条结果。",
                 ),
                 FieldSpec(
                     "tiktok_max_videos",
@@ -476,7 +477,6 @@ class CalibrationToolWindow(SimpleToolWindow):
                     default=10,
                     minimum=1,
                     maximum=5000,
-                    tooltip="每个关键词在 TikTok 上最多采集多少个视频。",
                 ),
                 FieldSpec(
                     "x_max_scrolls",
@@ -485,7 +485,6 @@ class CalibrationToolWindow(SimpleToolWindow):
                     default=2,
                     minimum=1,
                     maximum=5000,
-                    tooltip="X 网页搜索向下滚动的次数。",
                 ),
                 FieldSpec(
                     "x_search_tab",
@@ -493,21 +492,20 @@ class CalibrationToolWindow(SimpleToolWindow):
                     kind="combo",
                     options=("latest", "top"),
                     default="latest",
-                    tooltip="覆盖实验默认建议使用 latest；如需对比高曝光结果，可切换为 top。",
+                    tooltip="默认使用 latest；如需高曝光结果可切换为 top。",
                 ),
                 FieldSpec(
                     "cdp_url",
                     "CDP 调试地址",
                     default="http://localhost:9222",
-                    tooltip="Chrome 远程调试协议（CDP）地址。",
                 ),
                 FieldSpec(
                     "output_path",
                     "输出路径",
                     kind="text",
                     required=True,
-                    default="output/calibration_report.md",
-                    tooltip="输出根目录或兼容旧版的报告文件路径。工具会自动生成 run_id 目录并保存快照、raw 数据和报告。",
+                    default="output/calibration",
+                    tooltip="输出根目录。若仍传文件路径，会自动按旧版兼容规则落到 run_id 目录。",
                 ),
                 FieldSpec(
                     "games_definition",
@@ -515,7 +513,7 @@ class CalibrationToolWindow(SimpleToolWindow):
                     kind="games_editor",
                     required=True,
                     default=DEFAULT_GAMES_DEFINITION,
-                    tooltip="按游戏维护 track。每个 track 独立配置平台、语言、基准词和关键词组。",
+                    tooltip="按游戏维护 track。每个 track 独立配置平台、语言、官方关键词和候选关键词。",
                 ),
             ],
             height=900,
@@ -584,13 +582,15 @@ class CalibrationToolWindow(SimpleToolWindow):
         from src.tools.calibration import parse_games_definition, parse_platforms, validate_selected_platforms
 
         platforms = parse_platforms(values.get("platforms", ""))
-        invalid = []
-        if False:
-            raise ValueError(f"不支持的平台: {', '.join(invalid)}")
-
         games = parse_games_definition(values.get("games_definition", ""))
         validate_selected_platforms(games, platforms)
-        active_platforms = {track["platform"] for game in games for track in game["tracks"] if track["platform"] in platforms}
+
+        active_platforms = {
+            track["platform"]
+            for game in games
+            for track in game["tracks"]
+            if track["platform"] in platforms
+        }
         if "youtube" in active_platforms and not values.get("youtube_api_keys", "").strip():
             raise ValueError("请至少提供一个 YouTube API Key")
 
@@ -598,7 +598,7 @@ class CalibrationToolWindow(SimpleToolWindow):
         from src.tools.calibration import parse_games_definition, parse_platforms, run_calibration_task
 
         platforms = parse_platforms(values.get("platforms", ""))
-        api_keys = [key.strip() for key in values.get("youtube_api_keys", "").split("\n") if key.strip()]
+        api_keys = [key.strip() for key in values.get("youtube_api_keys", "").splitlines() if key.strip()]
         games_config = parse_games_definition(values.get("games_definition", ""))
         self._save_form_values(values)
 

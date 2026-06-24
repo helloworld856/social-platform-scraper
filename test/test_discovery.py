@@ -14,7 +14,7 @@ def test_discover_all_tools():
     tools, _ = discover_tools()
     print(f"发现 {len(tools)} 个工具")
 
-    assert len(tools) == 26, f"期望 26 个工具，实际 {len(tools)}"
+    assert len(tools) == 27, f"期望 27 个工具，实际 {len(tools)}"
 
     # 验证每个工具都有必要字段
     for tool in tools:
@@ -44,12 +44,12 @@ def test_discover_by_category():
     assert actual_categories == expected_categories, f"类别不匹配: {actual_categories}"
 
     # 验证每个类别的工具数量
-    assert len(categories["YouTube"]) == 6, f"YouTube 工具数量错误: {len(categories['YouTube'])}"
+    assert len(categories["YouTube"]) == 5, f"YouTube 工具数量错误: {len(categories['YouTube'])}"
     assert len(categories["X/Twitter"]) == 6, f"X/Twitter 工具数量错误: {len(categories['X/Twitter'])}"
     assert len(categories["TikTok"]) == 7, f"TikTok 工具数量错误: {len(categories['TikTok'])}"
     assert len(categories["Instagram"]) == 1, f"Instagram 工具数量错误: {len(categories['Instagram'])}"
     assert len(categories["Facebook"]) == 2, f"Facebook 工具数量错误: {len(categories['Facebook'])}"
-    assert len(categories["数据处理"]) == 3, f"数据处理工具数量错误: {len(categories['数据处理'])}"
+    assert len(categories["数据处理"]) == 5, f"数据处理工具数量错误: {len(categories['数据处理'])}"
     assert len(categories.get("工具", [])) == 1, f"工具 数量错误: {len(categories.get('工具', []))}"
 
     print("[PASS] 类别统计验证通过")
@@ -67,6 +67,13 @@ def test_discover_specific_tool():
     assert youtube_keyword.entrypoint == "src.platforms.youtube.windows.YouTubeKeywordWindow"
 
     print("[PASS] 特定工具验证通过")
+
+
+def test_discover_hides_legacy_youtube_keyword_pro_entry():
+    tools, _ = discover_tools()
+
+    youtube_keyword_pro = next((t for t in tools if t.tool_id == "youtube_keyword_mining_pro"), None)
+    assert youtube_keyword_pro is None, "youtube_keyword_mining_pro 不应继续作为独立工具显示"
 
 def test_load_manifest_valid():
     """测试加载有效的 manifest 文件"""

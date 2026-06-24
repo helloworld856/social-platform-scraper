@@ -210,6 +210,10 @@ DEFAULT_CONFIGS: dict[str, dict] = {
         "temperature": 0.1,
         "sleep_seconds": 0.5,
     },
+    "keyword_candidate_validator": {
+        "temperature": 0.1,
+        "sleep_seconds": 0.5,
+    },
 }
 
 
