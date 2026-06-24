@@ -48,6 +48,7 @@ class XKeywordWindow(SimpleToolWindow):
                     default="日文 (ja)",
                     options=("不限 (Any)", "中文 (zh)", "英文 (en)", "日文 (ja)", "韩文 (ko)", "俄文 (ru)", "西语 (es)", "法语 (fr)", "德语 (de)"),
                 ),
+                FieldSpec("search_tab", "搜索页签", kind="combo", default="最新 (Latest)", options=("最新 (Latest)", "热门 (Top)")),
                 FieldSpec("limit_time", "是否限制时间？", kind="combo", options=("是", "否"), default="是"),
                 FieldSpec("start_date", "开始日期 YYYY-MM-DD", default=DEFAULT_START_DATE),
                 FieldSpec("end_date", "结束日期 YYYY-MM-DD", default=DEFAULT_END_DATE),
@@ -82,6 +83,7 @@ class XKeywordWindow(SimpleToolWindow):
         }
         adv_params = {
             "lang": lang_map.get(values["lang"], "any"),
+            "search_tab": "top" if values.get("search_tab") == "热门 (Top)" else "latest",
             "limit_time": values["limit_time"],
             "start_date": values["start_date"],
             "end_date": values["end_date"],

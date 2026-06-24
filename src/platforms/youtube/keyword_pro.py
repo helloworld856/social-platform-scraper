@@ -186,7 +186,7 @@ def run_youtube_keyword_pro(api_keys: list[str], keywords_list, max_results, lim
     date_chunk_days = int(config.get("youtube_date_chunk_days", 7))
     date_chunk_hours = int(config.get("youtube_date_chunk_hours", 0))
     search_method = config.get("youtube_search_method", "浏览器优先（省配额）")
-    use_browser = (search_method == "浏览器优先（省配额）")
+    browser_search_enabled = (search_method == "浏览器优先（省配额）")
     browser_scroll_px = int(config.get("youtube_browser_scroll_px", 2500))
     browser_scroll_delay = float(config.get("youtube_browser_scroll_delay", 1.0))
     browser_max_scrolls = int(config.get("youtube_browser_max_scrolls", 100))
@@ -223,8 +223,8 @@ def run_youtube_keyword_pro(api_keys: list[str], keywords_list, max_results, lim
             log_warn(log_callback, "关键词列表为空，无任务可执行。")
             return
 
-        if use_browser and limit_time_bool:
-            use_browser = False
+        if browser_search_enabled and limit_time_bool:
+            browser_search_enabled = False
             log_line(log_callback, "  [模式切换] 启用了时间过滤，自动切换为 API 模式。")
 
         current_run = 0
@@ -281,7 +281,7 @@ def run_youtube_keyword_pro(api_keys: list[str], keywords_list, max_results, lim
 
                 all_video_ids = []
 
-                if use_browser:
+                if browser_search_enabled:
                     from playwright.sync_api import sync_playwright
                     from src.core import connect_existing_chromium, DEFAULT_X_CDP_URL
                     try:
@@ -303,7 +303,6 @@ def run_youtube_keyword_pro(api_keys: list[str], keywords_list, max_results, lim
                             log_line(log_callback, "  [浏览器优先] 未获取到任何视频 ID，将 Fallback 到 API 模式。")
                     except Exception as e:
                         log_warn(log_callback, f"  [浏览器优先] 模式失败 ({e})，将 Fallback 到 API 模式。")
-                        use_browser = False
                     finally:
                         if 'page' in locals() and page:
                             try:

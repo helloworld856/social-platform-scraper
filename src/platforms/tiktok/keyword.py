@@ -117,6 +117,48 @@ def parse_date_range(start_date: str, end_date: str) -> tuple[datetime, datetime
     return start_dt, end_dt
 
 
+def _build_month_day_date(now: datetime, month: int, day: int) -> datetime | None:
+    try:
+        publish_dt = datetime(now.year, month, day)
+    except ValueError:
+        return None
+    if publish_dt.date() > now.date() + timedelta(days=1):
+        publish_dt = publish_dt.replace(year=publish_dt.year - 1)
+    return publish_dt
+
+
+def _parse_relative_publish_date(text: str, now: datetime) -> datetime | None:
+    relative_patterns: list[tuple[str, str]] = [
+        ("seconds", r"(?<!\d)(\d+)\s*(?:seconds?|secs?|sec|秒钟?|秒|초)\s*(?:ago|前|전)?"),
+        ("minutes", r"(?<!\d)(\d+)\s*(?:minutes?|mins?|min|分钟|分鐘|分|분)\s*(?:ago|前|전)?"),
+        ("hours", r"(?<!\d)(\d+)\s*(?:hours?|hrs?|hr|小时|小時|時間|시간)\s*(?:ago|前|전)?"),
+        ("days", r"(?<!\d)(\d+)\s*(?:days?|day|天|日|일)\s*(?:ago|前|전)?"),
+        ("weeks", r"(?<!\d)(\d+)\s*(?:weeks?|week|周|週|週間|주)\s*(?:ago|前|전)?"),
+        ("months", r"(?<!\d)(\d+)\s*(?:months?|month|个月|個月|か月|ヶ月|달)\s*(?:ago|前|전)?"),
+        ("years", r"(?<!\d)(\d+)\s*(?:years?|year|年|년)\s*(?:ago|前|전)?"),
+    ]
+    for unit, pattern in relative_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if not match:
+            continue
+        amount = int(match.group(1))
+        if unit == "seconds":
+            return now - timedelta(seconds=amount)
+        if unit == "minutes":
+            return now - timedelta(minutes=amount)
+        if unit == "hours":
+            return now - timedelta(hours=amount)
+        if unit == "days":
+            return now - timedelta(days=amount)
+        if unit == "weeks":
+            return now - timedelta(weeks=amount)
+        if unit == "months":
+            return now - timedelta(days=amount * 30)
+        if unit == "years":
+            return now - timedelta(days=amount * 365)
+    return None
+
+
 def parse_publish_date(value: str) -> datetime | None:
     """
     正则提取文本中可能包含的发布日期（年-月-日）。
@@ -126,54 +168,37 @@ def parse_publish_date(value: str) -> datetime | None:
         return None
 
     now = datetime.now()
-    match = re.search(r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", text)
-    if match:
+    absolute_patterns = (
+        r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})",
+        r"(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日?",
+        r"(\d{4})\s*년\s*(\d{1,2})\s*월\s*(\d{1,2})\s*일?",
+    )
+    for pattern in absolute_patterns:
+        match = re.search(pattern, text)
+        if not match:
+            continue
         try:
             return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)))
         except ValueError:
             return None
 
-    match = re.search(r"\b(\d{1,2})[-/.](\d{1,2})\b", text)
-    if match:
-        try:
-            publish_dt = datetime(now.year, int(match.group(1)), int(match.group(2)))
-            if publish_dt.date() > now.date() + timedelta(days=1):
-                publish_dt = publish_dt.replace(year=publish_dt.year - 1)
-            return publish_dt
-        except ValueError:
-            return None
+    month_day_patterns = (
+        r"\b(\d{1,2})[-/.](\d{1,2})\b",
+        r"(?<!\d)(\d{1,2})\s*月\s*(\d{1,2})\s*日?(?!\d)",
+        r"(?<!\d)(\d{1,2})\s*월\s*(\d{1,2})\s*일?(?!\d)",
+    )
+    for pattern in month_day_patterns:
+        match = re.search(pattern, text)
+        if match:
+            return _build_month_day_date(now, int(match.group(1)), int(match.group(2)))
 
     lowered = text.lower()
-    if "刚刚" in text or "just now" in lowered:
+    if any(token in text for token in ("刚刚", "剛剛", "刚才", "たった今", "방금")) or "just now" in lowered:
         return now
-    if "昨天" in text or "yesterday" in lowered:
+    if any(token in text for token in ("昨天", "昨日", "어제")) or "yesterday" in lowered:
         return now - timedelta(days=1)
 
-    relative_match = re.search(
-        r"(\d+)\s*(秒|分钟|小时|天|周|月|年|sec|second|minute|min|hour|hr|day|week|month|year|s|m|h|d|w)\s*(前|ago)?",
-        text,
-        re.IGNORECASE,
-    )
-    if not relative_match:
-        return None
-
-    amount = int(relative_match.group(1))
-    unit = relative_match.group(2).lower()
-    if unit in {"秒", "sec", "second", "s"}:
-        return now - timedelta(seconds=amount)
-    if unit in {"分钟", "minute", "min", "m"}:
-        return now - timedelta(minutes=amount)
-    if unit in {"小时", "hour", "hr", "h"}:
-        return now - timedelta(hours=amount)
-    if unit in {"天", "day", "d"}:
-        return now - timedelta(days=amount)
-    if unit in {"周", "week", "w"}:
-        return now - timedelta(weeks=amount)
-    if unit in {"月", "month"}:
-        return now - timedelta(days=amount * 30)
-    if unit in {"年", "year"}:
-        return now - timedelta(days=amount * 365)
-    return None
+    return _parse_relative_publish_date(text, now)
 
 
 def in_date_range(publish_time: str, start_dt: datetime, end_dt: datetime) -> bool:

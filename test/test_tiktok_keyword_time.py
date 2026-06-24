@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import os
 import sys
 import time
 import types
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 if "src.ui.config_dialog" not in sys.modules:
     stub_module = types.ModuleType("src.ui.config_dialog")
@@ -33,6 +36,7 @@ from src.platforms.tiktok.keyword import (
     normalize_publish_time_text,
     parse_publish_date,
 )
+from src.platforms.tiktok.profile_videos import parse_publish_date as parse_profile_video_publish_date
 
 
 class _FakeLocator:
@@ -71,9 +75,12 @@ class _FakePage:
 def test_parse_publish_date_supports_multiple_formats():
     assert parse_publish_date("2026/06/22 12:30") == datetime(2026, 6, 22)
     assert parse_publish_date("2026.06.23") == datetime(2026, 6, 23)
+    assert parse_publish_date("2026年6月22日") == datetime(2026, 6, 22)
 
     current_year = datetime.now().year
     assert parse_publish_date("06-22") == datetime(current_year, 6, 22)
+    assert parse_publish_date("6月22日") == datetime(current_year, 6, 22)
+    assert parse_publish_date("6월 22일") == datetime(current_year, 6, 22)
 
 
 def test_parse_publish_date_supports_relative_time():
@@ -84,6 +91,29 @@ def test_parse_publish_date_supports_relative_time():
     yesterday = parse_publish_date("昨天")
     assert yesterday is not None
     assert yesterday.date() == (datetime.now() - timedelta(days=1)).date()
+
+
+def test_parse_publish_date_supports_localized_relative_time():
+    before_now = datetime.now()
+    japanese_days = parse_publish_date("3日前")
+    assert japanese_days is not None
+    assert before_now - timedelta(days=4) < japanese_days <= datetime.now()
+
+    korean_hours = parse_publish_date("2시간 전")
+    assert korean_hours is not None
+    assert datetime.now() - timedelta(hours=3) < korean_hours <= datetime.now()
+
+    japanese_now = parse_publish_date("たった今")
+    assert japanese_now is not None
+    assert before_now <= japanese_now <= datetime.now()
+
+    assert parse_publish_date("昨日").date() == (datetime.now() - timedelta(days=1)).date()
+    assert parse_publish_date("어제").date() == (datetime.now() - timedelta(days=1)).date()
+
+
+def test_profile_videos_reuses_keyword_publish_date_parser():
+    assert parse_profile_video_publish_date("3日前") is not None
+    assert parse_profile_video_publish_date("6月22日") is not None
 
 
 def test_format_publish_time_handles_millisecond_timestamp():

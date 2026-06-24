@@ -29,6 +29,7 @@ from src.core import (
 )
 from src.core import expand_compact_number, extract_tiktok_video_title
 from src.platforms.tiktok.comments import collect_video_comments
+from src.platforms.tiktok.keyword import parse_publish_date as parse_keyword_publish_date
 
 
 CSV_FIELDS = ["序号", "视频链接", "发布日期", "视频简介", "点赞数", "评论数", "收藏量", "分享数"]
@@ -62,14 +63,7 @@ def parse_publish_date(value: str) -> datetime | None:
     """
     解析发布日期字符串，尝试匹配并提取 'YYYY-MM-DD' 格式，返回 datetime 对象。
     """
-    text = (value or "").strip()
-    match = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", text)
-    if not match:
-        return None
-    try:
-        return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)))
-    except ValueError:
-        return None
+    return parse_keyword_publish_date(value)
 
 
 def in_date_range(publish_time: str, start_dt: datetime, end_dt: datetime) -> bool:
