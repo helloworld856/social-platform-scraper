@@ -1,7 +1,6 @@
 import queue
 import threading
 import time
-import pytest
 from unittest.mock import MagicMock, patch
 
 from src.core.xlsx import MultiSheetXlsxWriter
@@ -298,6 +297,8 @@ def test_youtube_keyword_window_config_forwarding():
     """
     Verify that YouTubeKeywordWindow collects and forwards correct config values (e.g. max_parallel_tabs, delays) to run_youtube_keyword_pro.
     """
+    from PyQt5.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
     from src.platforms.youtube.windows import YouTubeKeywordWindow
     
     window = YouTubeKeywordWindow()

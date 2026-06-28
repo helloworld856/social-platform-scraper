@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import sys
 from unittest.mock import MagicMock, patch
-from pathlib import Path
 
 # Ensure offscreen Qt platform
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

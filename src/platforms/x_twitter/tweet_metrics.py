@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import re
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -21,7 +23,6 @@ from src.core import (
     log_error,
     log_line,
     log_warn,
-    random_cooldown,
     should_stop,
     wait_if_paused,
 )
@@ -248,9 +249,7 @@ def _scrape_single_metric_task(
     total_urls: int,
 ):
     from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-    from src.core import connect_existing_chromium, interruptible_sleep
     from src.platforms.x_twitter.tweet_metrics import clean_tweet_url, collect_tweet_metrics
-    from src.platforms.x_twitter.comments import extract_comments
 
     if should_stop(stop_event):
         return

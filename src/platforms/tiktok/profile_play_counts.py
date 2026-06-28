@@ -4,7 +4,6 @@ import json
 import re
 import time
 import threading
-import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:

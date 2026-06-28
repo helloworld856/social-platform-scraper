@@ -13,7 +13,6 @@ from src.core import (
     log_error,
     log_line,
     log_warn,
-    random_cooldown,
     sanitize_xlsx_cell,
     should_stop,
     wait_if_paused,
@@ -424,8 +423,7 @@ def _scrape_single_profile_task(
     cooldown_max: float = 9.0,
     completed_state: dict = None,
 ):
-    from playwright.sync_api import sync_playwright
-    from src.core import connect_existing_chromium, interruptible_sleep
+    from src.core import interruptible_sleep
     import random
     from src.platforms.x_twitter.profiles import (
         extract_profile_record,

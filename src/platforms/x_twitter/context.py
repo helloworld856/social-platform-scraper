@@ -16,7 +16,6 @@ from src.core import (
     log_error,
     log_line,
     log_warn,
-    random_cooldown,
     sanitize_csv_rows,
     should_stop,
     wait_if_paused,
@@ -610,12 +609,6 @@ def _scrape_single_context_task(
     writer_lock,
     total_pairs: int,
 ):
-    from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-    from src.core import (
-        connect_existing_chromium,
-        sanitize_csv_rows,
-        interruptible_sleep,
-    )
     from src.platforms.x_twitter.context import (
         extract_status_id,
         extract_profile_url_from_tweet_url,

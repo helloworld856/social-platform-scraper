@@ -698,7 +698,7 @@ def _scrape_single_profile_tweets_task(
     truncate_threshold: int,
 ):
     from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
-    from src.core import connect_existing_chromium, interruptible_sleep
+    from src.core import interruptible_sleep
     from src.platforms.x_twitter.profile_tweets import (
         extract_profile_username,
         clean_profile_url,
