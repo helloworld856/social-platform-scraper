@@ -43,15 +43,15 @@ def _parse_date_range(start_str: str, end_str: str):
 CSV_FIELDS = ["序号", "帖子ID", "发布时间", "帖子内容", "浏览量", "点赞量", "转发量", "评论数", "帖子链接", "博主链接"]
 PAGE_LOAD_TIMEOUT = 30000
 INITIAL_LOAD_DELAY = 2.0
-SCROLL_DELAY = 3.2
+SCROLL_DELAY = 1.5
 SCROLL_PX = 2800
 NO_NEW_SCROLL_LIMIT = 10
 DEFAULT_MAX_SCROLLS = 300
 GUARANTEE_MIN_SCROLLS = 15  # 保底滚动次数：即使无新内容也至少滚动这么多次
 SAVE_BATCH_SIZE = 10
-COOLDOWN_MIN_SECONDS = 6.0
-COOLDOWN_MAX_SECONDS = 15.0
-DEFAULT_CONSECUTIVE_DATE_LIMIT = 3
+COOLDOWN_MIN_SECONDS = 1.5
+COOLDOWN_MAX_SECONDS = 3.0
+# (obsolete consecutive_date_limit removed)
 
 BLOCKED_PROFILE_NAMES = {
     "home",
@@ -326,7 +326,6 @@ def collect_profile_tweets(
     max_collect: int | None = None,
     scroll_px=None,
     initial_load_delay=None,
-    consecutive_date_limit=None,
     guarantee_min_scrolls=None,
     page_already_loaded: bool = False,
     date_window_size: int = 20,
@@ -466,6 +465,7 @@ def collect_profile_tweets(
                         detail_page.wait_for_selector('article[data-testid="tweet"]', timeout=30000)
                         interruptible_sleep(2, stop_event)
                         comments = extract_comments(detail_page, normalized_tweet["url"], max_comments, log_callback, stop_event, pause_event=pause_event)
+                        comment_rows = []
                         for comment in comments:
                             comment_row = {
                                 "序号": str(row_offset),
@@ -474,17 +474,17 @@ def collect_profile_tweets(
                                 "评论内容": comment.get("content", ""),
                                 "评论发布时间": comment.get("time", "")
                             }
-                            writer.writerow("评论信息", comment_row)
+                            comment_rows.append(comment_row)
+                        if comment_rows:
+                            writer.writerows("评论信息", comment_rows)
                     except Exception as exc:
                         log_warn(log_callback, f"    提取评论失败：{exc}")
                 
                 if len(pending_rows) >= save_batch_size:
-                    if hasattr(writer, "writerow") and hasattr(writer, "worksheets"):
-                        for r in pending_rows:
-                            writer.writerow("推文信息", r)
+                    if hasattr(writer, "worksheets"):
+                        writer.writerows("推文信息", pending_rows)
                     else:
                         writer.writerows(pending_rows)
-                    writer.save()
                     written_count += len(pending_rows)
                     pending_rows.clear()
                     cooldown_after_batch(written_count, log_callback, stop_event, pause_event=pause_event, save_batch_size=save_batch_size, cooldown_min=cooldown_min, cooldown_max=cooldown_max)
@@ -591,12 +591,10 @@ def collect_profile_tweets(
         interruptible_sleep(scroll_delay + 1.0 if no_new_count else scroll_delay, stop_event)
 
     if writer and pending_rows:
-        if hasattr(writer, "writerow") and hasattr(writer, "worksheets"):
-            for r in pending_rows:
-                writer.writerow("推文信息", r)
+        if hasattr(writer, "worksheets"):
+            writer.writerows("推文信息", pending_rows)
         else:
             writer.writerows(pending_rows)
-        writer.save()
         written_count += len(pending_rows)
         pending_rows.clear()
 
@@ -611,6 +609,188 @@ def build_rows(tweets: list[dict[str, str]]) -> list[dict[str, str]]:
         rows.append(row_from_tweet(index, tweet))
     return rows
 
+
+class ThreadSafeWriterWrapper:
+    def __init__(self, writer, lock):
+        self.writer = writer
+        self.lock = lock
+        self.global_seq = 0
+        self.url_to_seq = {}
+
+    def writerow(self, *args, **kwargs):
+        with self.lock:
+            if len(args) == 2 and isinstance(args[0], str):
+                sheet_name, row = args[0], args[1]
+                self._process_row(sheet_name, row)
+                self.writer.writerow(sheet_name, row)
+            else:
+                row = args[0]
+                self._process_row(None, row)
+                self.writer.writerow(row)
+
+    def writerows(self, *args, **kwargs):
+        with self.lock:
+            if len(args) == 2 and isinstance(args[0], str):
+                sheet_name, rows = args[0], args[1]
+                for row in rows:
+                    self._process_row(sheet_name, row)
+                self.writer.writerows(sheet_name, rows)
+            else:
+                rows = args[0]
+                for row in rows:
+                    self._process_row(None, row)
+                self.writer.writerows(rows)
+
+    def _process_row(self, sheet_name, row):
+        if sheet_name == "推文信息" or (sheet_name is None and "帖子链接" in row):
+            url = row.get("帖子链接") or row.get("url", "")
+            if url:
+                self.global_seq += 1
+                self.url_to_seq[url] = str(self.global_seq)
+                row["序号"] = str(self.global_seq)
+        elif sheet_name == "评论信息":
+            url = row.get("推文链接")
+            if url and url in self.url_to_seq:
+                row["序号"] = self.url_to_seq[url]
+
+    def save(self):
+        with self.lock:
+            self.writer.save()
+
+    @property
+    def worksheet(self):
+        return self.writer.worksheet
+
+    @property
+    def worksheets(self):
+        return self.writer.worksheets
+
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+def _scrape_single_profile_tweets_task(
+    profile_url: str,
+    keywords_text: str,
+    limit_time_bool: bool,
+    start_dt,
+    end_dt,
+    get_comments_bool: bool,
+    max_comments_val: int,
+    cdp_port_or_url: str,
+    max_scrolls: int,
+    log_callback,
+    stop_event,
+    writer,
+    writer_lock,
+    page_load_timeout_val: int,
+    scroll_delay_val: float,
+    no_new_scroll_limit_val: int,
+    save_batch_size_val: int,
+    cooldown_min_val: float,
+    cooldown_max_val: float,
+    scroll_px_val: int,
+    initial_load_delay_val: float,
+    pause_event,
+    guarantee_min_scrolls_val: int,
+    date_window_size: int,
+    profile_index: int,
+    total_profiles: int,
+    truncate_threshold: int,
+):
+    from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+    from src.core import connect_existing_chromium, interruptible_sleep
+    from src.platforms.x_twitter.profile_tweets import (
+        extract_profile_username,
+        clean_profile_url,
+        extract_post_count,
+        collect_profile_tweets,
+    )
+
+    if should_stop(stop_event):
+        return
+    if wait_if_paused(pause_event, stop_event):
+        return
+
+    username = extract_profile_username(profile_url)
+    log_line(log_callback, f"[{profile_index}/{total_profiles}] 开始处理博主主页：{profile_url}")
+
+    browser = None
+    page = None
+    detail_page = None
+
+    try:
+        with sync_playwright() as playwright:
+            try:
+                browser, context = connect_existing_chromium(playwright, cdp_port_or_url)
+            except Exception as exc:
+                log_error(log_callback, f"[{profile_index}/{total_profiles}] 无法连接浏览器：{exc}")
+                return
+
+            page = context.new_page()
+            detail_page = context.new_page() if get_comments_bool else None
+
+            parsed_kws = [k.strip() for k in keywords_text.splitlines() if k.strip()]
+            keyword_list = parsed_kws if parsed_kws else []
+
+            # 获取主页以提取帖文数
+            page.goto(clean_profile_url(profile_url), wait_until="domcontentloaded", timeout=page_load_timeout_val)
+            interruptible_sleep(initial_load_delay_val, stop_event)
+            post_count = None
+            for attempt in range(10):
+                post_count = extract_post_count(page)
+                if post_count is not None:
+                    break
+                if interruptible_sleep(0.5, stop_event):
+                    break
+            
+            if post_count is None:
+                log_line(log_callback, f"[{profile_index}/{total_profiles}] 无法提取博主帖文数量，按全量模式正常采集。")
+            else:
+                log_line(log_callback, f"[{profile_index}/{total_profiles}] 博主帖文数量：{post_count}")
+
+            row_offset = 0
+
+            if post_count is None or post_count <= truncate_threshold:
+                _, _, written_count = collect_profile_tweets(
+                    page, detail_page, profile_url, max_scrolls, limit_time_bool, start_dt, end_dt, get_comments_bool, max_comments_val, log_callback, stop_event, writer=writer, row_offset=row_offset, page_timeout=page_load_timeout_val, scroll_delay=scroll_delay_val, no_new_scroll_limit=no_new_scroll_limit_val, save_batch_size=save_batch_size_val, cooldown_min=cooldown_min_val, cooldown_max=cooldown_max_val, scroll_px=scroll_px_val, initial_load_delay=initial_load_delay_val, pause_event=pause_event, keyword=None, max_collect=None, guarantee_min_scrolls=guarantee_min_scrolls_val, page_already_loaded=True, date_window_size=date_window_size
+                )
+                log_line(log_callback, f"[{profile_index}/{total_profiles}] 完成 @{username} 全量采集：写入 {written_count} 条帖子。")
+            else:
+                log_line(log_callback, f"[{profile_index}/{total_profiles}] 帖文数大于 {truncate_threshold}，首先采集前 {truncate_threshold} 条帖子...")
+                _, _, written_count = collect_profile_tweets(
+                    page, detail_page, profile_url, max_scrolls, limit_time_bool, start_dt, end_dt, get_comments_bool, max_comments_val, log_callback, stop_event, writer=writer, row_offset=row_offset, page_timeout=page_load_timeout_val, scroll_delay=scroll_delay_val, no_new_scroll_limit=no_new_scroll_limit_val, save_batch_size=save_batch_size_val, cooldown_min=cooldown_min_val, cooldown_max=cooldown_max_val, scroll_px=scroll_px_val, initial_load_delay=initial_load_delay_val, pause_event=pause_event, keyword=None, max_collect=truncate_threshold, guarantee_min_scrolls=guarantee_min_scrolls_val, page_already_loaded=True, date_window_size=date_window_size
+                )
+                log_line(log_callback, f"[{profile_index}/{total_profiles}] 完成截断采集：新增写入 {written_count} 条帖子。")
+
+                if keyword_list:
+                    log_line(log_callback, f"[{profile_index}/{total_profiles}] 开始按关键词进行补充采集 (共 {len(keyword_list)} 个关键词)...")
+                    for kw in keyword_list:
+                        if should_stop(stop_event):
+                            break
+                        log_line(log_callback, f"[{profile_index}/{total_profiles}] -> 补充采集关键词: {kw}")
+                        _, _, kw_written = collect_profile_tweets(
+                            page, detail_page, profile_url, max_scrolls, limit_time_bool, start_dt, end_dt, get_comments_bool, max_comments_val, log_callback, stop_event, writer=writer, row_offset=row_offset, page_timeout=page_load_timeout_val, scroll_delay=scroll_delay_val, no_new_scroll_limit=no_new_scroll_limit_val, save_batch_size=save_batch_size_val, cooldown_min=cooldown_min_val, cooldown_max=cooldown_max_val, scroll_px=scroll_px_val, initial_load_delay=initial_load_delay_val, pause_event=pause_event, keyword=kw, max_collect=None, guarantee_min_scrolls=guarantee_min_scrolls_val, page_already_loaded=False, date_window_size=date_window_size
+                        )
+                        log_line(log_callback, f"[{profile_index}/{total_profiles}] 完成关键词 '{kw}' 采集：新增写入 {kw_written} 条。")
+                else:
+                    log_line(log_callback, f"[{profile_index}/{total_profiles}] 未提供补充搜索关键词，跳过补充采集阶段。")
+
+    except PlaywrightTimeoutError:
+        log_warn(log_callback, f"[{profile_index}/{total_profiles}] 跳过：页面加载超时，请确认链接可打开且账号已登录。")
+    except Exception as exc:
+        log_warn(log_callback, f"[{profile_index}/{total_profiles}] 跳过：{exc}")
+    finally:
+        for opened_page in (page, detail_page):
+            try:
+                if opened_page is not None and not opened_page.is_closed():
+                    opened_page.close()
+            except Exception:
+                pass
+        try:
+            if browser:
+                browser.close()
+        except Exception:
+            pass
 
 def run_x_profile_tweets_spider(
     profile_urls_text: str,
@@ -640,13 +820,18 @@ def run_x_profile_tweets_spider(
     initial_load_delay_val = float(config.get("initial_load_delay", INITIAL_LOAD_DELAY))
     max_scrolls = int(config.get("max_scrolls", max_scrolls))
     truncate_threshold = int(config.get("truncate_threshold", 1000))
-    consecutive_date_limit_val = int(config.get("consecutive_date_limit", DEFAULT_CONSECUTIVE_DATE_LIMIT))
     guarantee_min_scrolls_val = int(config.get("guarantee_min_scrolls", GUARANTEE_MIN_SCROLLS))
     date_window_size = int(config.get("date_window_size", 20))
+    max_parallel_tabs = int(config.get("max_parallel_tabs", 3))
 
     completed_path = None
-    page = None
     try:
+        from src.core import ensure_chrome_for_cdp
+        try:
+            ensure_chrome_for_cdp(cdp_port_or_url, log_callback=log_callback)
+        except Exception:
+            pass
+
         if sync_playwright is None:
             log_error(log_callback, "缺少依赖：playwright。请先安装 requirements.txt 中的依赖。")
             return
@@ -667,101 +852,77 @@ def run_x_profile_tweets_spider(
         
         if get_comments_bool:
             comment_fields = ["序号", "推文链接", "评论的点赞量", "评论内容", "评论发布时间"]
-            writer = MultiSheetXlsxWriter(output_path, {"推文信息": CSV_FIELDS, "评论信息": comment_fields})
+            base_writer = MultiSheetXlsxWriter(output_path, {"推文信息": CSV_FIELDS, "评论信息": comment_fields})
         else:
-            writer = XlsxRowWriter(output_path, CSV_FIELDS)
-            
-        row_offset = 0
+            base_writer = XlsxRowWriter(output_path, CSV_FIELDS)
 
-        with sync_playwright() as playwright:
-            log_line(log_callback, "正在连接本地 Chrome...")
-            try:
-                _, context = connect_existing_chromium(playwright, cdp_port_or_url)
-            except Exception as exc:
-                log_error(log_callback, f"无法连接浏览器：{exc}")
-                log_error(log_callback, "连接失败：请确认 Chrome 已自动打开并已登录 X/Twitter。")
-                return
+        writer_lock = threading.Lock()
+        log_lock = threading.Lock()
+        
+        writer = ThreadSafeWriterWrapper(base_writer, writer_lock)
 
-            page = context.new_page()
-            detail_page = context.new_page() if get_comments_bool else None
+        def make_thread_safe_log_callback(original_cb, lock):
+            if original_cb is None:
+                return None
+            def safe_cb(msg: str):
+                with lock:
+                    original_cb(msg)
+            return safe_cb
 
-            parsed_kws = [k.strip() for k in keywords_text.splitlines() if k.strip()]
-            keyword_list = parsed_kws if parsed_kws else []
+        safe_log_callback = make_thread_safe_log_callback(log_callback, log_lock)
 
-            total_profiles = len(profile_urls)
-            profile_index = 0
+        total_profiles = len(profile_urls)
 
-            for profile_url in profile_urls:
+        with ThreadPoolExecutor(max_workers=max_parallel_tabs) as executor:
+            futures = []
+            for profile_index, profile_url in enumerate(profile_urls, 1):
                 if should_stop(stop_event):
-                    log_line(log_callback, "任务已停止。")
                     break
                 if wait_if_paused(pause_event, stop_event):
                     break
+                futures.append(
+                    executor.submit(
+                        _scrape_single_profile_tweets_task,
+                        profile_url=profile_url,
+                        keywords_text=keywords_text,
+                        limit_time_bool=limit_time_bool,
+                        start_dt=start_dt,
+                        end_dt=end_dt,
+                        get_comments_bool=get_comments_bool,
+                        max_comments_val=max_comments_val,
+                        cdp_port_or_url=cdp_port_or_url,
+                        max_scrolls=max_scrolls,
+                        log_callback=safe_log_callback,
+                        stop_event=stop_event,
+                        writer=writer,
+                        writer_lock=writer_lock,
+                        page_load_timeout_val=page_load_timeout_val,
+                        scroll_delay_val=scroll_delay_val,
+                        no_new_scroll_limit_val=no_new_scroll_limit_val,
+                        save_batch_size_val=save_batch_size_val,
+                        cooldown_min_val=cooldown_min_val,
+                        cooldown_max_val=cooldown_max_val,
+                        scroll_px_val=scroll_px_val,
+                        initial_load_delay_val=initial_load_delay_val,
+                        pause_event=pause_event,
+                        guarantee_min_scrolls_val=guarantee_min_scrolls_val,
+                        date_window_size=date_window_size,
+                        profile_index=profile_index,
+                        total_profiles=total_profiles,
+                        truncate_threshold=truncate_threshold,
+                    )
+                )
 
-                profile_index += 1
-                username = extract_profile_username(profile_url)
-                log_line(log_callback, f"[{profile_index}/{total_profiles}] 开始处理博主主页：{profile_url}")
-                
+            for future in as_completed(futures):
                 try:
-                    # 获取主页以提取帖文数
-                    page.goto(clean_profile_url(profile_url), wait_until="domcontentloaded", timeout=page_load_timeout_val)
-                    interruptible_sleep(initial_load_delay_val, stop_event)
-                    post_count = None
-                    for attempt in range(10):
-                        post_count = extract_post_count(page)
-                        if post_count is not None:
-                            break
-                        if interruptible_sleep(0.5, stop_event):
-                            break
-                    
-                    if post_count is None:
-                        log_line(log_callback, "  无法提取博主帖文数量，按全量模式正常采集。")
-                    else:
-                        log_line(log_callback, f"  博主帖文数量：{post_count}")
-
-                    if post_count is None or post_count <= truncate_threshold:
-                        _, row_offset, written_count = collect_profile_tweets(
-                            page, detail_page, profile_url, max_scrolls, limit_time_bool, start_dt, end_dt, get_comments_bool, max_comments_val, log_callback, stop_event, writer=writer, row_offset=row_offset, page_timeout=page_load_timeout_val, scroll_delay=scroll_delay_val, no_new_scroll_limit=no_new_scroll_limit_val, save_batch_size=save_batch_size_val, cooldown_min=cooldown_min_val, cooldown_max=cooldown_max_val, scroll_px=scroll_px_val, initial_load_delay=initial_load_delay_val, pause_event=pause_event, keyword=None, max_collect=None, consecutive_date_limit=consecutive_date_limit_val, guarantee_min_scrolls=guarantee_min_scrolls_val, page_already_loaded=True, date_window_size=date_window_size
-                        )
-                        log_line(log_callback, f"  完成 @{username} 全量采集：写入 {written_count} 条帖子。")
-                    else:
-                        log_line(log_callback, f"  帖文数大于 {truncate_threshold}，首先采集前 {truncate_threshold} 条帖子...")
-                        _, row_offset, written_count = collect_profile_tweets(
-                            page, detail_page, profile_url, max_scrolls, limit_time_bool, start_dt, end_dt, get_comments_bool, max_comments_val, log_callback, stop_event, writer=writer, row_offset=row_offset, page_timeout=page_load_timeout_val, scroll_delay=scroll_delay_val, no_new_scroll_limit=no_new_scroll_limit_val, save_batch_size=save_batch_size_val, cooldown_min=cooldown_min_val, cooldown_max=cooldown_max_val, scroll_px=scroll_px_val, initial_load_delay=initial_load_delay_val, pause_event=pause_event, keyword=None, max_collect=truncate_threshold, consecutive_date_limit=consecutive_date_limit_val, guarantee_min_scrolls=guarantee_min_scrolls_val, page_already_loaded=True, date_window_size=date_window_size
-                        )
-                        log_line(log_callback, f"  完成截断采集：新增写入 {written_count} 条帖子。")
-
-                        if keyword_list:
-                            log_line(log_callback, f"  开始按关键词进行补充采集 (共 {len(keyword_list)} 个关键词)...")
-                            for kw in keyword_list:
-                                if should_stop(stop_event):
-                                    break
-                                log_line(log_callback, f"  -> 补充采集关键词: {kw}")
-                                _, row_offset, kw_written = collect_profile_tweets(
-                                    page, detail_page, profile_url, max_scrolls, limit_time_bool, start_dt, end_dt, get_comments_bool, max_comments_val, log_callback, stop_event, writer=writer, row_offset=row_offset, page_timeout=page_load_timeout_val, scroll_delay=scroll_delay_val, no_new_scroll_limit=no_new_scroll_limit_val, save_batch_size=save_batch_size_val, cooldown_min=cooldown_min_val, cooldown_max=cooldown_max_val, scroll_px=scroll_px_val, initial_load_delay=initial_load_delay_val, pause_event=pause_event, keyword=kw, max_collect=None, consecutive_date_limit=consecutive_date_limit_val, guarantee_min_scrolls=guarantee_min_scrolls_val, page_already_loaded=False, date_window_size=date_window_size
-                                )
-                                log_line(log_callback, f"  完成关键词 '{kw}' 采集：新增写入 {kw_written} 条。")
-                        else:
-                            log_line(log_callback, "  未提供补充搜索关键词，跳过补充采集阶段。")
-
-                except PlaywrightTimeoutError:
-                    log_warn(log_callback, "  跳过：页面加载超时，请确认链接可打开且账号已登录。")
+                    future.result()
                 except Exception as exc:
-                    log_warn(log_callback, f"  跳过：{exc}")
-
-            for opened_page in (page, detail_page):
-                if opened_page is not None and not opened_page.is_closed():
-                    opened_page.close()
+                    log_error(safe_log_callback, f"线程执行异常: {exc}")
 
         completed_path = output_path
         writer.save()
-        log_line(log_callback, f"完成，已保存：{output_path}")
+        log_line(safe_log_callback, f"完成，已保存：{output_path}")
     finally:
-        try:
-
-            if page and not page.is_closed():
-                page.close()
-        except Exception:
-            pass
         if finish_callback:
             finish_callback(completed_path)
+

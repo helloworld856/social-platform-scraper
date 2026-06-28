@@ -5,6 +5,8 @@ import json
 import random
 import re
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 try:
@@ -40,8 +42,8 @@ DETAIL_DELAY_MIN_SECONDS = 2.0
 DETAIL_DELAY_MAX_SECONDS = 5.0
 LINK_BATCH_SIZE = 50
 SAVE_BATCH_SIZE = 10
-BATCH_WAIT_MIN_SECONDS = 10.0
-BATCH_WAIT_MAX_SECONDS = 20.0
+BATCH_WAIT_MIN_SECONDS = 1.5
+BATCH_WAIT_MAX_SECONDS = 3.0
 NO_NEW_SCROLL_LIMIT = 10
 DEFAULT_MAX_SCROLLS = 500
 SCROLL_PX = 3600
@@ -519,6 +521,8 @@ def process_video_batch(
     detail_load_timeout=None,
     detail_delay_min=None,
     detail_delay_max=None,
+    writer_lock=None,
+    global_state=None,
 ) -> tuple[int, int, bool, int]:
     """
     批量爬取当前收集的视频链接：
@@ -576,33 +580,68 @@ def process_video_batch(
             if fetch_play_counts_bool and play_counts_map and vid in play_counts_map:
                 play_count = str(play_counts_map[vid])
                 
-            row_base = row_from_detail(serial_number, detail, play_count) if get_video_info_bool else {"序号": str(serial_number), "视频链接": video_url}
+            if global_state is not None and writer_lock is not None:
+                with writer_lock:
+                    current_serial = global_state["serial_number"]
+                    global_state["serial_number"] += 1
+            else:
+                current_serial = serial_number
+                serial_number += 1
+
+            row_base = row_from_detail(current_serial, detail, play_count) if get_video_info_bool else {"序号": str(current_serial), "视频链接": video_url}
             if fetch_play_counts_bool and not get_video_info_bool:
                 row_base["播放量"] = play_count
 
             # 抓取视频的主楼评论
             if get_comments_bool:
                 comments = collect_video_comments(detail_page, video_url, max_comments, log_callback, stop_event, pause_event=pause_event)
-                writer.writerow("视频信息", sanitize_csv_row(row_base))
-                for comment in comments:
-                    comment_row = {
-                        "序号": str(serial_number),
-                        "视频链接": video_url,
-                        "评论的点赞量": comment.get("like_count", ""),
-                        "评论内容": comment.get("text", ""),
-                        "发布时间": comment.get("create_time", "")
-                    }
-                    writer.writerow("评论信息", sanitize_csv_row(comment_row))
-
-                written_count += 1
+                if writer_lock is not None:
+                    with writer_lock:
+                        writer.writerow("视频信息", sanitize_csv_row(row_base))
+                        for comment in comments:
+                            comment_row = {
+                                "序号": str(current_serial),
+                                "视频链接": video_url,
+                                "评论的点赞量": comment.get("like_count", ""),
+                                "评论内容": comment.get("text", ""),
+                                "发布时间": comment.get("create_time", "")
+                            }
+                            writer.writerow("评论信息", sanitize_csv_row(comment_row))
+                        writer.save()
+                else:
+                    writer.writerow("视频信息", sanitize_csv_row(row_base))
+                    for comment in comments:
+                        comment_row = {
+                            "序号": str(current_serial),
+                            "视频链接": video_url,
+                            "评论的点赞量": comment.get("like_count", ""),
+                            "评论内容": comment.get("text", ""),
+                            "发布时间": comment.get("create_time", "")
+                        }
+                        writer.writerow("评论信息", sanitize_csv_row(comment_row))
+                        
+                if global_state is not None and writer_lock is not None:
+                    with writer_lock:
+                        global_state["written_count"] += 1
+                else:
+                    written_count += 1
                 batch_written += 1
                 log_line(
                     log_callback,
                     f"      写入：点赞 {detail.get('likes') or '空'}，评论 {detail.get('comments') or '空'}，收藏 {detail.get('collects') or '空'}，分享 {detail.get('shares') or '空'}，抓取到主楼评论 {len(comments)} 条。",
                 )
             else:
-                writer.writerow(sanitize_csv_row(row_base))
-                written_count += 1
+                if writer_lock is not None:
+                    with writer_lock:
+                        writer.writerow(sanitize_csv_row(row_base))
+                        writer.save()
+                else:
+                    writer.writerow(sanitize_csv_row(row_base))
+                if global_state is not None and writer_lock is not None:
+                    with writer_lock:
+                        global_state["written_count"] += 1
+                else:
+                    written_count += 1
                 batch_written += 1
                 if get_video_info_bool:
                     log_line(
@@ -611,8 +650,6 @@ def process_video_batch(
                     )
                 else:
                     log_line(log_callback, f"      写入视频链接：{video_url}")
-
-            serial_number += 1
             # 当写入条数到达分批尺寸，进行较长时间的冷却降温
             if batch_written >= save_batch_size:
                 if wait_if_paused(pause_event, stop_event):
@@ -650,10 +687,6 @@ def run_tiktok_profile_videos_spider(
 ):
     """
     TikTok 博主主页视频抓取爬虫入口函数。
-    支持：
-    - 读取多个博主主页；
-    - 基于 Playwright 网络拦截（监控 /api/post/item_list 接口）并行收集视频播放量；
-    - 执行页面滚动以及分批次拉取视频详情与评论逻辑，保存为 Excel 结果报表。
     """
     if config is None:
         config = {}
@@ -669,6 +702,7 @@ def run_tiktok_profile_videos_spider(
     detail_delay_min_val = float(config.get("detail_delay_min", DETAIL_DELAY_MIN_SECONDS))
     detail_delay_max_val = float(config.get("detail_delay_max", DETAIL_DELAY_MAX_SECONDS))
     scroll_px_val = int(config.get("scroll_px", SCROLL_PX))
+    max_parallel_tabs = int(config.get("max_parallel_tabs", 3))
 
     output_path = None
     completed_path = None
@@ -706,87 +740,162 @@ def run_tiktok_profile_videos_spider(
         else:
             writer = XlsxRowWriter(output_path, video_fields)
 
-        written_count = 0
-        serial_number = 1
+        writer_lock = threading.Lock()
+        log_lock = threading.Lock()
+        global_state = {"serial_number": 1, "written_count": 0}
         
         actual_max_scrolls = max_scrolls if max_scrolls > 0 else 999999
         no_new_limit = 5 if not limit_time_bool else no_new_scroll_limit
 
-        with sync_playwright() as playwright:
-            log_line(log_callback, "正在连接本地 Chrome，请确认已登录 TikTok。")
-            try:
-                _, context = connect_existing_chromium(playwright, cdp_port_or_url, log_callback=log_callback)
-            except Exception as exc:
-                log_error(log_callback, f"连接失败：请确认 Chrome 已打开并已登录 TikTok。错误：{exc}")
+        log_line(log_callback, "正在连接并拉起 Chrome...")
+        from src.core import ensure_chrome_for_cdp
+        ensure_chrome_for_cdp(cdp_port_or_url, log_callback=log_callback)
+
+        def make_thread_log(base_log_callback, lock, prefix):
+            def wrapped(msg):
+                if base_log_callback:
+                    with lock:
+                        base_log_callback(f"[{prefix}] {msg}")
+            return wrapped
+
+        def worker(raw_profile_url, index):
+            if should_stop(stop_event):
+                return
+            profile_url = normalize_profile_url(raw_profile_url)
+            if not profile_url:
+                with log_lock:
+                    log_warn(log_callback, f"[{index}/{len(profile_urls)}] 跳过无效主页：{raw_profile_url}")
                 return
 
-            profile_page = context.new_page()
-            detail_page = context.new_page()
+            match = re.search(r"tiktok\.com/(@[^/?#]+)", profile_url)
+            username = match.group(1) if match else f"user_{index}"
+            thread_log = make_thread_log(log_callback, log_lock, username)
+            thread_log(f"[{index}/{len(profile_urls)}] 开始读取主页：{profile_url}")
+            
+            play_counts_map = {}
+            def handle_response(response):
+                if "/api/post/item_list" in response.url and "secUid" in response.url:
+                    try:
+                        text = response.text()
+                        if text.strip():
+                            body = json.loads(text)
+                            for item in body.get("itemList", []):
+                                vid = item.get("id", "")
+                                if vid:
+                                    stats = item.get("stats", {})
+                                    play_counts_map[vid] = stats.get("playCount", 0)
+                    except Exception:
+                        pass
 
-            for profile_index, raw_profile_url in enumerate(profile_urls, 1):
-                if should_stop(stop_event):
-                    break
-                if wait_if_paused(pause_event, stop_event):
-                    break
-                profile_url = normalize_profile_url(raw_profile_url)
-                if not profile_url:
-                    log_warn(log_callback, f"[{profile_index}/{len(profile_urls)}] 跳过无效主页：{raw_profile_url}")
-                    continue
+            browser = None
+            profile_page = None
+            detail_page = None
+            try:
+                with sync_playwright() as playwright:
+                    browser, context = connect_existing_chromium(playwright, cdp_port_or_url, log_callback=thread_log)
+                    profile_page = context.new_page()
+                    detail_page = context.new_page()
 
-                log_line(log_callback, f"[{profile_index}/{len(profile_urls)}] 读取主页：{profile_url}")
-                
-                play_counts_map = {}
-                # 定义网络流量拦截监听器，提取接口响应数据
-                def handle_response(response):
-                    if "/api/post/item_list" in response.url and "secUid" in response.url:
-                        try:
-                            text = response.text()
-                            if text.strip():
-                                body = json.loads(text)
-                                for item in body.get("itemList", []):
-                                    vid = item.get("id", "")
-                                    if vid:
-                                        stats = item.get("stats", {})
-                                        play_counts_map[vid] = stats.get("playCount", 0)
-                        except Exception:
-                            pass
-
-                if fetch_play_counts_bool:
-                    profile_page.on("response", handle_response)
-                try:
+                    if fetch_play_counts_bool:
+                        profile_page.on("response", handle_response)
+                    
                     profile_page.goto(profile_url, wait_until="domcontentloaded", timeout=page_load_timeout)
                     interruptible_sleep(2.5, stop_event)
-                except PlaywrightTimeoutError:
-                    log_warn(log_callback, "  主页加载超时，跳过。")
-                    continue
 
-                seen_links: set[str] = set()
-                pending_links: list[str] = []
-                no_new_count = 0
-                stop_profile = False
-                processed_count = 0
+                    seen_links: set[str] = set()
+                    pending_links: list[str] = []
+                    no_new_count = 0
+                    stop_profile = False
+                    processed_count = 0
 
-                for scroll_index in range(actual_max_scrolls):
-                    if should_stop(stop_event):
-                        break
-                    if wait_if_paused(pause_event, stop_event):
-                        break
+                    for scroll_index in range(actual_max_scrolls):
+                        if should_stop(stop_event):
+                            break
+                        if wait_if_paused(pause_event, stop_event):
+                            break
 
-                    new_links = collect_visible_video_links(profile_page, seen_links)
-                    if new_links:
-                        no_new_count = 0
-                        log_line(log_callback, f"  滚动 {scroll_index + 1}/{actual_max_scrolls}：发现 {len(new_links)} 条新视频链接。")
-                        pending_links.extend(new_links)
-                    else:
-                        no_new_count += 1
+                        new_links = collect_visible_video_links(profile_page, seen_links)
+                        if new_links:
+                            no_new_count = 0
+                            thread_log(f"  滚动 {scroll_index + 1}/{actual_max_scrolls}：发现 {len(new_links)} 条新视频链接。")
+                            pending_links.extend(new_links)
+                        else:
+                            no_new_count += 1
 
-                    # 当堆积的待爬视频数量到达 link_batch_size 批次限制，触发爬取，防止内存积压
-                    while len(pending_links) >= link_batch_size and not stop_profile and not should_stop(stop_event):
-                        batch = pending_links[:link_batch_size]
-                        del pending_links[:link_batch_size]
-                        serial_number, written_count, stop_profile, processed_count = process_video_batch(
+                        while len(pending_links) >= link_batch_size and not stop_profile and not should_stop(stop_event):
+                            batch = pending_links[:link_batch_size]
+                            del pending_links[:link_batch_size]
+                            _, _, stop_profile, processed_count = process_video_batch(
+                                detail_page,
+                                batch,
+                                start_dt,
+                                end_dt,
+                                limit_time_bool,
+                                get_video_info_bool,
+                                get_comments_bool,
+                                max_comments,
+                                writer,
+                                0,
+                                0,
+                                thread_log,
+                                stop_event,
+                                pause_event=pause_event,
+                                save_batch_size=save_batch_size,
+                                batch_wait_min=batch_wait_min,
+                                batch_wait_max=batch_wait_max,
+                                processed_count=processed_count,
+                                play_counts_map=play_counts_map,
+                                fetch_play_counts_bool=fetch_play_counts_bool,
+                                detail_load_timeout=detail_load_timeout_val,
+                                detail_delay_min=detail_delay_min_val,
+                                detail_delay_max=detail_delay_max_val,
+                                writer_lock=writer_lock,
+                                global_state=global_state,
+                            )
+                        if stop_profile:
+                            break
+
+                        if no_new_count >= no_new_limit:
+                            if pending_links and not should_stop(stop_event):
+                                _, _, stop_profile, processed_count = process_video_batch(
+                                    detail_page,
+                                    pending_links,
+                                    start_dt,
+                                    end_dt,
+                                    limit_time_bool,
+                                    get_video_info_bool,
+                                    get_comments_bool,
+                                    max_comments,
+                                    writer,
+                                    0,
+                                    0,
+                                    thread_log,
+                                    stop_event,
+                                    pause_event=pause_event,
+                                    save_batch_size=save_batch_size,
+                                    batch_wait_min=batch_wait_min,
+                                    batch_wait_max=batch_wait_max,
+                                    processed_count=processed_count,
+                                    play_counts_map=play_counts_map,
+                                    fetch_play_counts_bool=fetch_play_counts_bool,
+                                    detail_load_timeout=detail_load_timeout_val,
+                                    detail_delay_min=detail_delay_min_val,
+                                    detail_delay_max=detail_delay_max_val,
+                                    writer_lock=writer_lock,
+                                    global_state=global_state,
+                                )
+                                pending_links = []
+                            thread_log("  连续多次没有新视频链接，结束当前主页。")
+                            break
+
+                        trigger_profile_lazy_load(profile_page, scroll_px=scroll_px_val)
+                        if interruptible_sleep(scroll_interval, stop_event):
+                            break
+
+                    if pending_links and not stop_profile and not should_stop(stop_event):
+                        _, _, stop_profile, processed_count = process_video_batch(
                             detail_page,
-                            batch,
+                            pending_links,
                             start_dt,
                             end_dt,
                             limit_time_bool,
@@ -794,9 +903,9 @@ def run_tiktok_profile_videos_spider(
                             get_comments_bool,
                             max_comments,
                             writer,
-                            serial_number,
-                            written_count,
-                            log_callback,
+                            0,
+                            0,
+                            thread_log,
                             stop_event,
                             pause_event=pause_event,
                             save_batch_size=save_batch_size,
@@ -808,83 +917,44 @@ def run_tiktok_profile_videos_spider(
                             detail_load_timeout=detail_load_timeout_val,
                             detail_delay_min=detail_delay_min_val,
                             detail_delay_max=detail_delay_max_val,
+                            writer_lock=writer_lock,
+                            global_state=global_state,
                         )
-                    if stop_profile:
-                        break
-
-                    # 连续无新视频滚动轮数超过上限，退出滚动循环
-                    if no_new_count >= no_new_limit:
-                        if pending_links and not should_stop(stop_event):
-                            serial_number, written_count, stop_profile, processed_count = process_video_batch(
-                                detail_page,
-                                pending_links,
-                                start_dt,
-                                end_dt,
-                                limit_time_bool,
-                                get_video_info_bool,
-                                get_comments_bool,
-                                max_comments,
-                                writer,
-                                serial_number,
-                                written_count,
-                                log_callback,
-                                stop_event,
-                                pause_event=pause_event,
-                                save_batch_size=save_batch_size,
-                                batch_wait_min=batch_wait_min,
-                                batch_wait_max=batch_wait_max,
-                                processed_count=processed_count,
-                                play_counts_map=play_counts_map,
-                                fetch_play_counts_bool=fetch_play_counts_bool,
-                            )
-                            pending_links = []
-                        log_warn(log_callback, "  连续多次没有新视频链接，结束当前主页。")
-                        break
-
-                    trigger_profile_lazy_load(profile_page, scroll_px=scroll_px_val)
-                    if interruptible_sleep(scroll_interval, stop_event):
-                        break
-
-                # 离开前处理最后一批零碎的链接
-                if pending_links and not stop_profile and not should_stop(stop_event):
-                    serial_number, written_count, stop_profile, processed_count = process_video_batch(
-                        detail_page,
-                        pending_links,
-                        start_dt,
-                        end_dt,
-                        limit_time_bool,
-                        get_video_info_bool,
-                        get_comments_bool,
-                        max_comments,
-                        writer,
-                        serial_number,
-                        written_count,
-                        log_callback,
-                        stop_event,
-                        pause_event=pause_event,
-                        save_batch_size=save_batch_size,
-                        batch_wait_min=batch_wait_min,
-                        batch_wait_max=batch_wait_max,
-                            processed_count=processed_count,
-                            play_counts_map=play_counts_map,
-                            fetch_play_counts_bool=fetch_play_counts_bool,
-                            detail_load_timeout=detail_load_timeout_val,
-                            detail_delay_min=detail_delay_min_val,
-                            detail_delay_max=detail_delay_max_val,
-                        )
-
-            if fetch_play_counts_bool:
+            except Exception as exc:
+                thread_log(f"  发生异常: {exc}")
+            finally:
+                if fetch_play_counts_bool and profile_page:
+                    try:
+                        profile_page.remove_listener("response", handle_response)
+                    except Exception:
+                        pass
+                for opened_page in (profile_page, detail_page):
+                    if opened_page and not opened_page.is_closed():
+                        try:
+                            opened_page.close()
+                        except Exception:
+                            pass
                 try:
-                    profile_page.remove_listener("response", handle_response)
+                    if browser:
+                        browser.close()
                 except Exception:
                     pass
 
-            for opened_page in (profile_page, detail_page):
-                if not opened_page.is_closed():
-                    opened_page.close()
+        with ThreadPoolExecutor(max_workers=max_parallel_tabs) as executor:
+            futures = [executor.submit(worker, url, idx) for idx, url in enumerate(profile_urls, 1)]
+            for future in as_completed(futures):
+                if should_stop(stop_event):
+                    for f in futures:
+                        f.cancel()
+                    break
+                try:
+                    future.result()
+                except Exception as exc:
+                    log_error(log_callback, f"线程执行异常: {exc}")
 
-        writer.save()
+        with writer_lock:
+            writer.save()
         completed_path = output_path
-        log_line(log_callback, f"完成：写入 {written_count} 条，已保存：{output_path}")
+        log_line(log_callback, f"完成：写入 {global_state['written_count']} 条，已保存：{output_path}")
     finally:
         finish_callback(completed_path)

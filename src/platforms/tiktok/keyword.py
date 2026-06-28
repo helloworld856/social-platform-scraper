@@ -728,7 +728,7 @@ def _tiktok_comment_consumer(
                         )
                         # 写文件时加锁以防止多线程并发写入冲突
                         with writer_lock:
-                            comment_count = 0
+                            comment_rows = []
                             for comment in comments:
                                 comment_row = {
                                     "序号": str(serial_number),
@@ -737,11 +737,9 @@ def _tiktok_comment_consumer(
                                     "评论内容": comment.get("text", ""),
                                     "发布时间": comment.get("create_time", ""),
                                 }
-                                writer.writerow("评论信息", sanitize_csv_row(comment_row))
-                                comment_count += 1
-                                # 每写入 20 条保存一次，防止数据丢失
-                                if comment_count % 20 == 0:
-                                    writer.save()
+                                comment_rows.append(sanitize_csv_row(comment_row))
+                            if comment_rows:
+                                writer.writerows("评论信息", comment_rows)
                     except Exception as exc:
                         log(f"评论采集异常: {exc}")
             finally:
@@ -826,7 +824,7 @@ def _scrape_single_tiktok_keyword(
                 # 如果需要采集评论，初始化多表 XLSX 写入器、写锁及线程安全的任务队列
                 if get_comments_bool:
                     comment_fields = ["序号", "视频链接", "评论的点赞量", "评论内容", "发布时间"]
-                    writer = MultiSheetXlsxWriter(output_path, {"视频信息": CSV_FIELDS, "评论信息": comment_fields}, autosave_every=10)
+                    writer = MultiSheetXlsxWriter(output_path, {"视频信息": CSV_FIELDS, "评论信息": comment_fields}, autosave_every=500)
                     writer_lock = threading.Lock()
                     comment_queue = queue.Queue(maxsize=max_queue_size)
                     consumers_ready = threading.Event()
@@ -852,7 +850,7 @@ def _scrape_single_tiktok_keyword(
                         comment_threads.append(t)
                 else:
                     # 仅采集视频信息，使用普通的 XLSX 单表写入器
-                    writer = XlsxRowWriter(output_path, CSV_FIELDS, autosave_every=10)
+                    writer = XlsxRowWriter(output_path, CSV_FIELDS, autosave_every=500)
 
                 serial_number = 1
                 # 打开 TikTok 搜索页面

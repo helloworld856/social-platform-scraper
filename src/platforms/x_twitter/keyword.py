@@ -329,9 +329,8 @@ def append_rows(writer, rows: list[dict], sheet_name: str = "推文信息"):
     if not rows:
         return
     sanitized = sanitize_csv_rows(rows)
-    if hasattr(writer, "writerow") and hasattr(writer, "worksheets"):
-        for row in sanitized:
-            writer.writerow(sheet_name, row)
+    if hasattr(writer, "worksheets"):
+        writer.writerows(sheet_name, sanitized)
     else:
         writer.writerows(sanitized)
 
@@ -396,11 +395,12 @@ def _x_comment_consumer(keyword, queue_obj, cdp_port_or_url, writer, writer_lock
                        comment_refresh_count=3, comment_refresh_interval=5.0):
     """Consumer thread: creates its own Playwright connection + page, pops from queue."""
     log = _make_keyword_log_callback(log_callback, keyword)
+    browser = None
     comments_page = None
     try:
         with sync_playwright() as p:
             try:
-                _, context = connect_existing_chromium(p, cdp_port_or_url)
+                browser, context = connect_existing_chromium(p, cdp_port_or_url)
                 comments_page = context.new_page()
             except Exception as exc:
                 log(f"    评论线程连接浏览器失败: {exc}")
@@ -426,13 +426,14 @@ def _x_comment_consumer(keyword, queue_obj, cdp_port_or_url, writer, writer_lock
                 serial_number, tweet_url, max_scan = item
                 try:
                     comments_page.goto(tweet_url, wait_until="domcontentloaded", timeout=page_timeout)
-                    interruptible_sleep(random.uniform(2, 3), stop_event)
+                    interruptible_sleep(random.uniform(1.0, 1.5), stop_event)
                     _try_reload_if_empty(comments_page, page_timeout, comment_refresh_count, comment_refresh_interval, log, stop_event, "评论页")
-                    interruptible_sleep(random.uniform(3, 5), stop_event)
+                    interruptible_sleep(random.uniform(1.0, 2.0), stop_event)
                     comments = extract_comments(comments_page, tweet_url, max_scan, log,
                                                 stop_event, pause_event=pause_event,
                                                 no_new_scroll_limit=comment_no_new_scroll_limit)
                     with writer_lock:
+                        comment_rows = []
                         for comment in comments:
                             comment_row = {
                                 "序号": str(serial_number),
@@ -441,8 +442,9 @@ def _x_comment_consumer(keyword, queue_obj, cdp_port_or_url, writer, writer_lock
                                 "评论内容": comment.get("content", ""),
                                 "评论发布时间": comment.get("time", ""),
                             }
-                            writer.writerow("评论信息", sanitize_csv_row(comment_row))
-                        writer.save()
+                            comment_rows.append(sanitize_csv_row(comment_row))
+                        if comment_rows:
+                            writer.writerows("评论信息", comment_rows)
                 except Exception as exc:
                     log(f"    提取评论失败：{exc}")
     except Exception as exc:
@@ -454,6 +456,11 @@ def _x_comment_consumer(keyword, queue_obj, cdp_port_or_url, writer, writer_lock
                     comments_page.close()
             except Exception:
                 pass
+        try:
+            if browser:
+                browser.close()
+        except Exception:
+            pass
 
 
 RECOMMENDATION_MARKERS = (
@@ -548,30 +555,44 @@ def _scrape_single_x_keyword(base_keyword, adv_params, port,
             start_dt = datetime.now()
             end_dt = datetime.now()
 
+        browser = None
+        search_page = None
         with sync_playwright() as p:
-            _, context = connect_existing_chromium(p, port)
+            browser, context = connect_existing_chromium(p, port)
             search_page = context.new_page()
 
             if get_comments_bool:
                 comment_fields = ["序号", "推文链接", "评论的点赞量", "评论内容", "评论发布时间"]
-                writer = MultiSheetXlsxWriter(output_path, {"推文信息": CSV_FIELDS, "评论信息": comment_fields}, autosave_every=10)
+                writer = MultiSheetXlsxWriter(output_path, {"推文信息": CSV_FIELDS, "评论信息": comment_fields}, autosave_every=500)
                 writer_lock = threading.Lock()
+                log_lock = threading.Lock()
+
+                def make_thread_safe_log_callback(original_cb, lock):
+                    if original_cb is None:
+                        return None
+                    def safe_cb(msg: str):
+                        with lock:
+                            original_cb(msg)
+                    return safe_cb
+
+                safe_log_callback = make_thread_safe_log_callback(log_callback, log_lock)
+
                 comment_queue = queue.Queue(maxsize=max_queue_size)
                 consumers_ready = threading.Event()
                 for _ in range(max_comment_tabs):
                     t = threading.Thread(
                         target=_x_comment_consumer,
                         args=(base_keyword, comment_queue, port, writer, writer_lock,
-                              log_callback, stop_event, pause_event, max_comments,
-                              consumers_ready, search_page_timeout,
-                              comment_no_new_scroll_limit,
-                              comment_refresh_count, comment_refresh_interval),
+                               safe_log_callback, stop_event, pause_event, max_comments,
+                               consumers_ready, search_page_timeout,
+                               comment_no_new_scroll_limit,
+                               comment_refresh_count, comment_refresh_interval),
                         daemon=True,
                     )
                     t.start()
                     comment_threads.append(t)
             else:
-                writer = XlsxRowWriter(output_path, CSV_FIELDS, autosave_every=10)
+                writer = XlsxRowWriter(output_path, CSV_FIELDS, autosave_every=500)
 
             seen_urls = set()
             current_end_dt = end_dt
@@ -603,7 +624,7 @@ def _scrape_single_x_keyword(base_keyword, adv_params, port,
                 except Exception:
                     log("页面加载超时，继续尝试提取当前已加载内容。")
 
-                if interruptible_sleep(random.uniform(4, 6), stop_event):
+                if interruptible_sleep(random.uniform(1.5, 2.5), stop_event):
                     break
                 _try_reload_if_empty(search_page, search_page_timeout, search_refresh_count, search_refresh_interval, log, stop_event, "搜索页")
                 slice_count = 0
@@ -780,6 +801,11 @@ def _scrape_single_x_keyword(base_keyword, adv_params, port,
                 search_page.close()
             except Exception:
                 pass
+        try:
+            if browser:
+                browser.close()
+        except Exception:
+            pass
 
 
 def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback, stop_event=None, config=None, pause_event=None, stats_callback=None):
@@ -787,8 +813,8 @@ def run_x_spider(keywords_list, adv_params, port, log_callback, finish_callback,
     if config is None:
         config = {}
     search_page_timeout = int(config.get("search_page_timeout", 40000))
-    scroll_cooldown_min = float(config.get("cooldown_min", 5.0))
-    scroll_cooldown_max = float(config.get("cooldown_max", 7.0))
+    scroll_cooldown_min = float(config.get("cooldown_min", 1.0))
+    scroll_cooldown_max = float(config.get("cooldown_max", 2.0))
     no_change_threshold = int(config.get("no_new_scroll_limit", 5))
     max_search_scrolls = int(config.get("max_scrolls", MAX_SEARCH_SCROLLS))
     slice_days = int(config.get("slice_days", 7))

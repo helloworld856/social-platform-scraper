@@ -36,7 +36,7 @@ class XlsxRowWriter:
         output_path: str,
         fieldnames: Iterable[str],
         sheet_name: str = "数据",
-        autosave_every: int = 1,
+        autosave_every: int = 500,
     ):
         """
         Args:
@@ -48,7 +48,7 @@ class XlsxRowWriter:
         self.output_path = str(output_path)
         Path(self.output_path).parent.mkdir(parents=True, exist_ok=True)
         self.fieldnames = list(fieldnames)
-        self.autosave_every = max(1, int(autosave_every or 1))
+        self.autosave_every = max(1, int(autosave_every or 500))
         self._rows_since_save = 0
         self.workbook = Workbook()
         self.worksheet = self.workbook.active
@@ -110,7 +110,7 @@ class MultiSheetXlsxWriter:
         self,
         output_path: str,
         sheets_fields: dict[str, list[str]],
-        autosave_every: int = 1,
+        autosave_every: int = 500,
     ):
         """
         Args:
@@ -121,7 +121,7 @@ class MultiSheetXlsxWriter:
         self.output_path = str(output_path)
         Path(self.output_path).parent.mkdir(parents=True, exist_ok=True)
         self.sheets_fields = sheets_fields
-        self.autosave_every = max(1, int(autosave_every or 1))
+        self.autosave_every = max(1, int(autosave_every or 500))
         self._rows_since_save = 0
 
         self.workbook = Workbook()
@@ -151,6 +151,26 @@ class MultiSheetXlsxWriter:
         ws.append([sanitize_xlsx_cell(row.get(field, "")) for field in fieldnames])
         self._rows_since_save += 1
         if self._rows_since_save >= self.autosave_every:
+            self.save()
+
+    def writerows(self, sheet_name: str, rows: Iterable[Mapping[str, Any]]):
+        """
+        向指定名称的工作表中批量追加多行数据。
+        """
+        if sheet_name not in self.worksheets:
+            import logging
+            logging.getLogger(__name__).warning("writerows: sheet '%s' not registered, rows skipped", sheet_name)
+            return
+        fieldnames = self.sheets_fields[sheet_name]
+        ws = self.worksheets[sheet_name]
+        wrote_rows = False
+        for row in rows:
+            ws.append([sanitize_xlsx_cell(row.get(field, "")) for field in fieldnames])
+            self._rows_since_save += 1
+            wrote_rows = True
+            if self._rows_since_save >= self.autosave_every:
+                self.save()
+        if wrote_rows and self._rows_since_save > 0:
             self.save()
 
     def save(self):

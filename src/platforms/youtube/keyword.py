@@ -112,11 +112,13 @@ class YouTubeClientPool:
     """YouTube API 多 Key 轮换池。配额耗尽时自动切换到下一个 Key。"""
 
     def __init__(self, api_keys: list[str]):
+        import threading
         self.api_keys = [k.strip() for k in api_keys if k.strip()]
         if not self.api_keys:
             raise ValueError("至少需要一个有效的 API Key")
         self.current_idx = 0
         self._clients: dict[str, object] = {}
+        self._lock = threading.Lock()
         self._build_client()
 
     def _build_client(self):
@@ -127,21 +129,24 @@ class YouTubeClientPool:
 
     def refresh_current_client(self):
         """重建当前 Key 的 API client，丢弃可能持有失效 socket 的旧实例。"""
-        key = self.api_keys[self.current_idx]
-        self._clients.pop(key, None)
-        self._build_client()
+        with self._lock:
+            key = self.api_keys[self.current_idx]
+            self._clients.pop(key, None)
+            self._build_client()
 
     @property
     def client(self):
-        return self._current_client
+        with self._lock:
+            return self._current_client
 
     def next_client(self) -> bool:
         """切换到下一个 Key。返回 False 表示所有 Key 已耗尽。"""
-        if self.current_idx + 1 >= len(self.api_keys):
-            return False
-        self.current_idx += 1
-        self._build_client()
-        return True
+        with self._lock:
+            if self.current_idx + 1 >= len(self.api_keys):
+                return False
+            self.current_idx += 1
+            self._build_client()
+            return True
 
 
 def execute_with_retry(request, log_callback=None, stop_event=None):
@@ -493,7 +498,7 @@ def fetch_video_rows(client_pool, keyword: str, video_ids: list[str], stop_event
     return rows
 
 
-def collect_video_ids_with_playwright(page, keyword: str, max_results: int, start_dt: datetime | None = None, end_dt: datetime | None = None, log_callback=None, stop_event=None, pause_event=None, scroll_px: int = 2500, scroll_delay: float = 1.0, max_scrolls: int = 100, page_timeout: int = 45000, no_new_limit: int = 8):
+def collect_video_ids_with_playwright(page, keyword: str, max_results: int, start_dt: datetime | None = None, end_dt: datetime | None = None, log_callback=None, stop_event=None, pause_event=None, scroll_px: int = 2500, scroll_delay: float = 1.0, max_scrolls: int = 100, page_timeout: int = 45000, no_new_limit: int = 8, initial_load_delay: float = 2.0):
     """【浏览器优先模式】利用无头浏览器访问搜索页面并滚动，动态拦截解析页面上的所有视频链接。
 
     此方式不消耗任何 Google API 搜索配额，是极度省配额的首选加载方案。
@@ -506,12 +511,13 @@ def collect_video_ids_with_playwright(page, keyword: str, max_results: int, star
         end_dt: 时间范围截止。
         log_callback: 日志通知。
         stop_event: 中断事件。
-        pause_event: 暂停事件。
+        pause_event: 暂停事件.。。
         scroll_px: 每次向下滚动的像素值。
         scroll_delay: 每次滚动间的等待秒数。
         max_scrolls: 最大滚动轮数。
         page_timeout: 搜索结果页加载超时（毫秒）。
         no_new_limit: 连续无新链接的停止阈值。
+        initial_load_delay: 初始加载延迟（秒）。
 
     Returns:
         list[str]: 抓取去重后的视频 ID 列表。
@@ -527,7 +533,7 @@ def collect_video_ids_with_playwright(page, keyword: str, max_results: int, star
         url = f"https://www.youtube.com/results?search_query={encoded_kw}"
         page.goto(url, wait_until="load", timeout=page_timeout)
 
-        if interruptible_sleep(2.0, stop_event):
+        if interruptible_sleep(initial_load_delay, stop_event):
             return []
 
         try:
@@ -635,6 +641,7 @@ def run_youtube_spider(api_keys: list[str], keywords_list, max_results, limit_ti
     browser_max_scrolls = int(config.get("youtube_browser_max_scrolls", 100))
     browser_page_timeout = int(config.get("youtube_browser_page_timeout", 45000))
     browser_no_new_limit = int(config.get("youtube_browser_no_new_limit", 8))
+    initial_load_delay = float(config.get("youtube_initial_load_delay", 2.0))
     enable_timer = config.get("enable_timer", "否") == "是"
     timer_interval_minutes = int(config.get("timer_interval_minutes", 60))
     timer_max_runs = int(config.get("timer_max_runs", 3))
@@ -712,34 +719,47 @@ def run_youtube_spider(api_keys: list[str], keywords_list, max_results, limit_ti
             run_stamp = time.strftime("%Y%m%d_%H%M%S")
             output_paths.clear()
 
-            for index, keyword in enumerate(keywords_list, 1):
+            max_parallel_tabs = int(config.get("max_parallel_tabs", 3)) if config else 3
+            import threading
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            log_lock = threading.Lock()
+            output_paths_lock = threading.Lock()
+            stats_lock = threading.Lock()
+
+            def make_thread_log(base_log_callback, lock, prefix):
+                def wrapped(msg):
+                    if base_log_callback:
+                        with lock:
+                            base_log_callback(f"[{prefix}] {msg}")
+                return wrapped
+
+            def worker(index, keyword):
+                nonlocal last_run_stats
                 if should_stop(stop_event):
-                    log_line(log_callback, "任务已停止。")
-                    break
+                    return
                 if wait_if_paused(pause_event, stop_event):
-                    break
+                    return
+
+                thread_log = make_thread_log(log_callback, log_lock, f"词 {index}")
+                thread_log(f"搜索关键词：{keyword}")
+
                 output_path = build_output_path(
                     "youtube",
                     f"youtube_keyword_{safe_filename_part(keyword)}_{run_stamp}.xlsx",
                 )
-                output_paths.append(output_path)
+                with output_paths_lock:
+                    output_paths.append(output_path)
+                thread_log(f"输出文件：{output_path}")
 
                 if get_comments_bool:
                     comment_fields = ["序号", "视频链接", "评论的点赞量", "评论内容", "评论发布时间"]
-                    writer = MultiSheetXlsxWriter(output_path, {"视频信息": CSV_FIELDS, "评论信息": comment_fields})
+                    writer = MultiSheetXlsxWriter(output_path, {"视频信息": CSV_FIELDS, "评论信息": comment_fields}, autosave_every=500)
                 else:
-                    writer = XlsxRowWriter(output_path, CSV_FIELDS)
+                    writer = XlsxRowWriter(output_path, CSV_FIELDS, autosave_every=500)
                 serial_number = 1
-                log_line(log_callback, f"[{index}/{len(keywords_list)}] 搜索关键词：{keyword}")
-                log_line(log_callback, f"  输出文件：{output_path}")
-                if limit_time_bool:
-                    log_line(log_callback, f"  日期范围：{start_dt.strftime('%Y-%m-%d %H:%M')} 至 {end_dt.strftime('%Y-%m-%d %H:%M')}")
-                else:
-                    log_line(log_callback, "  日期范围：不限时间")
 
                 all_video_ids = []
 
-                # 浏览器模式优先搜集
                 if use_browser and browser:
                     page = None
                     try:
@@ -747,14 +767,15 @@ def run_youtube_spider(api_keys: list[str], keywords_list, max_results, limit_ti
                         all_video_ids = collect_video_ids_with_playwright(
                             page, keyword, max_results,
                             start_dt=start_dt, end_dt=end_dt,
-                            log_callback=log_callback, stop_event=stop_event, pause_event=pause_event,
+                            log_callback=thread_log, stop_event=stop_event, pause_event=pause_event,
                             scroll_px=browser_scroll_px, scroll_delay=browser_scroll_delay, max_scrolls=browser_max_scrolls,
                             page_timeout=browser_page_timeout, no_new_limit=browser_no_new_limit,
+                            initial_load_delay=initial_load_delay,
                         )
                         if not all_video_ids:
-                            log_line(log_callback, "  [浏览器优先] 未获取到任何视频 ID，将 Fallback 自动切换到 API 模式。")
+                            thread_log("[浏览器优先] 未获取到任何视频 ID，将 Fallback 自动切换到 API 模式。")
                     except Exception as e:
-                        log_warn(log_callback, f"  [浏览器优先] 模式失败 ({e})，将 Fallback 自动切换到 API 模式。")
+                        thread_log(f"[WARN] [浏览器优先] 模式失败 ({e})，将 Fallback 自动切换到 API 模式。")
                     finally:
                         if page:
                             try:
@@ -762,19 +783,18 @@ def run_youtube_spider(api_keys: list[str], keywords_list, max_results, limit_ti
                             except Exception:
                                 pass
 
-                # 若浏览器模式未返回 ID 或获取失败，兜底切换至 API 搜索模式
                 if not all_video_ids:
-                    log_line(log_callback, "  使用 API 搜索模式获取视频 ID 列表中...")
+                    thread_log("使用 API 搜索模式获取视频 ID 列表中...")
                     try:
-                        for batch_ids in iter_search_video_id_batches(client_pool, keyword, max_results, limit_time_bool, start_dt, end_dt, log_callback, stop_event, pause_event, search_batch_size, date_chunk_days, date_chunk_hours, relevance_language):
+                        for batch_ids in iter_search_video_id_batches(client_pool, keyword, max_results, limit_time_bool, start_dt, end_dt, thread_log, stop_event, pause_event, search_batch_size, date_chunk_days, date_chunk_hours, relevance_language):
                             all_video_ids.extend(batch_ids)
                             if len(all_video_ids) >= max_results:
                                 break
                     except Exception as exc:
-                        log_error(log_callback, f"  API 搜索失败: {exc}")
+                        thread_log(f"[ERROR] API 搜索失败: {exc}")
 
                 written_count = 0
-                log_line(log_callback, f"  共获取到 {len(all_video_ids)} 个待查询的视频 ID，开始分批获取详情并写入...")
+                thread_log(f"共获取到 {len(all_video_ids)} 个待查询的视频 ID，开始分批获取详情并写入...")
 
                 for chunk_ids in chunked(all_video_ids, video_batch_size):
                     if should_stop(stop_event):
@@ -782,7 +802,7 @@ def run_youtube_spider(api_keys: list[str], keywords_list, max_results, limit_ti
                     if wait_if_paused(pause_event, stop_event):
                         break
 
-                    rows = fetch_video_rows(client_pool, keyword, chunk_ids, stop_event, pause_event, video_batch_size, log_callback, target_languages)
+                    rows = fetch_video_rows(client_pool, keyword, chunk_ids, stop_event, pause_event, video_batch_size, thread_log, target_languages)
 
                     if written_count + len(rows) > max_results:
                         rows = rows[:max_results - written_count]
@@ -804,20 +824,23 @@ def run_youtube_spider(api_keys: list[str], keywords_list, max_results, limit_ti
                             comment_top_limit,
                             comment_mode,
                             comment_workers,
-                            log_callback,
+                            thread_log,
                             stop_event,
                             pause_event,
                         )
 
+                    rows_to_save = []
+                    comments_to_save = []
                     for row in rows:
                         row["序号"] = str(serial_number)
+                        rows_to_save.append(row)
 
                         if get_comments_bool:
                             try:
                                 video_id = extract_video_id(row["视频链接"])
                                 result = comment_results.get(video_id)
                                 if result and result.status == "error":
-                                    log_warn(log_callback, f"    评论获取失败 ({video_id})：{result.error}")
+                                    thread_log(f"[WARN] 评论获取失败 ({video_id})：{result.error}")
                                 comments = result.comments if result else []
                                 for comment in comments:
                                     comment_row = {
@@ -827,32 +850,47 @@ def run_youtube_spider(api_keys: list[str], keywords_list, max_results, limit_ti
                                         "评论内容": comment["text"],
                                         "评论发布时间": comment.get("published_at", "")
                                     }
-                                    writer.writerow("评论信息", comment_row)
+                                    comments_to_save.append(comment_row)
                             except Exception as exc:
-                                log_warn(log_callback, f"    提取评论失败：{exc}")
+                                thread_log(f"[WARN] 提取评论失败：{exc}")
 
                         serial_number += 1
-                        log_line(log_callback, f"    [{serial_number - 1}] {row['视频链接']}")
+                        thread_log(f"[{serial_number - 1}] {row['视频链接']}")
 
                     if get_comments_bool:
-                        for r in rows:
+                        for r in rows_to_save:
                             writer.writerow("视频信息", r)
+                        if comments_to_save:
+                            writer.writerows("评论信息", comments_to_save)
                     else:
-                        writer.writerows(sanitize_csv_rows(rows))
+                        writer.writerows(sanitize_csv_rows(rows_to_save))
 
                     written_count += len(rows)
-                    log_line(log_callback, f"  已写入 {written_count} 条视频")
+                    thread_log(f"已写入 {written_count} 条视频")
 
                     if written_count >= max_results:
                         break
 
                 writer.save()
-                last_run_stats = {
-                    "scanned_count": len(all_video_ids),
-                    "written_count": written_count,
-                    "hit_limit": bool(max_results and (len(all_video_ids) >= max_results or written_count >= max_results)),
-                }
-                log_line(log_callback, f"  写入完成，共 {written_count} 条视频")
+                with stats_lock:
+                    last_run_stats = {
+                        "scanned_count": len(all_video_ids),
+                        "written_count": written_count,
+                        "hit_limit": bool(max_results and (len(all_video_ids) >= max_results or written_count >= max_results)),
+                    }
+                thread_log(f"写入完成，共 {written_count} 条视频")
+
+            with ThreadPoolExecutor(max_workers=max_parallel_tabs) as executor:
+                futures = [executor.submit(worker, idx, kw) for idx, kw in enumerate(keywords_list, 1)]
+                for future in as_completed(futures):
+                    if should_stop(stop_event):
+                        for f in futures:
+                            f.cancel()
+                        break
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        log_error(log_callback, f"线程执行异常: {exc}")
 
             log_line(log_callback, "完成，已按关键词分别保存：")
             for path in output_paths:

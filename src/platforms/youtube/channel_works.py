@@ -929,6 +929,7 @@ def run_youtube_channel_works_spider(
     comment_mode = normalize_comment_mode(config.get("youtube_comment_mode", COMMENT_MODE_FAST))
     comment_workers = normalize_comment_workers(config.get("youtube_comment_workers", DEFAULT_COMMENT_WORKERS))
     comment_scan_limit = int(config.get("youtube_comment_scan_limit", 500))
+    shorts_related_delay = float(config.get("youtube_shorts_related_delay", 1.0))
 
     completed_path = None
     browser = None
@@ -962,27 +963,31 @@ def run_youtube_channel_works_spider(
             writer = MultiSheetXlsxWriter(output_path, {"作品信息": CSV_FIELDS, "评论信息": comment_fields})
         else:
             writer = XlsxRowWriter(output_path, CSV_FIELDS)
-        serial_number = 1
+        max_parallel_tabs = int(config.get("max_parallel_tabs", 3)) if config else 3
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        writer_lock = threading.Lock()
+        log_lock = threading.Lock()
+        serial_number_lock = threading.Lock()
+        
+        global_serial = [1]
 
-        def ensure_page():
-            nonlocal browser, page, playwright_context
-            if sync_playwright is None:
-                return None
-            if playwright_context is None:
-                log_line(log_callback, "  开始接管本地 Chrome 读取页面...")
-                playwright_context = sync_playwright().start()
-                browser, context = connect_existing_chromium(playwright_context, DEFAULT_X_CDP_URL, log_callback=log_callback)
-                page = context.new_page()
-            return page
+        def make_thread_log(base_log_callback, lock, prefix):
+            def wrapped(msg):
+                if base_log_callback:
+                    with lock:
+                        base_log_callback(f"[{prefix}] {msg}")
+            return wrapped
 
-        for channel_index, channel_url in enumerate(channel_urls, 1):
+        def worker(channel_index, channel_url):
             if should_stop(stop_event):
-                log_line(log_callback, "任务已停止。")
-                break
+                return
             if wait_if_paused(pause_event, stop_event):
-                break
+                return
 
-            log_line(log_callback, f"[{channel_index}/{len(channel_urls)}] 读取作者主页：{channel_url}")
+            thread_log = make_thread_log(log_callback, log_lock, f"频道 {channel_index}")
+            thread_log(f"开始读取作者主页：{channel_url}")
+
             works: list[dict[str, str]] = []
             should_fallback_video_tabs = False
             do_videos = collect_target in ("全部", "仅视频与Shorts")
@@ -991,55 +996,78 @@ def run_youtube_channel_works_spider(
             if do_videos:
                 if client_pool is None:
                     should_fallback_video_tabs = True
-                    log_line(log_callback, "  YouTube API 不可用，尝试用浏览器读取 Videos/Shorts。")
+                    thread_log("YouTube API 不可用，尝试用浏览器读取 Videos/Shorts。")
                 else:
                     try:
-                        video_works = collect_video_works_with_api(client_pool, channel_url, max_video_items, limit_time_bool, start_dt, end_dt, log_callback, stop_event, pause_event, live_stream_policy)
+                        video_works = collect_video_works_with_api(client_pool, channel_url, max_video_items, limit_time_bool, start_dt, end_dt, thread_log, stop_event, pause_event, live_stream_policy)
                         if not video_works:
                             should_fallback_video_tabs = True
-                            log_line(log_callback, "  API 未返回 Videos/Shorts，尝试用浏览器读取。")
+                            thread_log("API 未返回 Videos/Shorts，尝试用浏览器读取。")
                         else:
                             works.extend(video_works)
                     except Exception as exc:
                         should_fallback_video_tabs = True
-                        log_warn(log_callback, f"  YouTube API 读取失败，尝试用浏览器读取 Videos/Shorts：{exc}")
+                        thread_log(f"[WARN] YouTube API 读取失败，尝试用浏览器读取 Videos/Shorts：{exc}")
 
-            if sync_playwright is None:
-                if should_fallback_video_tabs and do_videos:
-                    log_error(log_callback, "  缺少依赖：playwright。无法浏览器 fallback Videos/Shorts。")
-                if do_posts:
-                    log_error(log_callback, "  缺少依赖：playwright。跳过 Posts。")
-            else:
-                if do_videos and should_fallback_video_tabs and not should_stop(stop_event):
-                    try:
-                        active_page = ensure_page()
-                        if active_page is not None:
-                            works.extend(collect_video_tab_with_playwright(active_page, channel_url, "videos", max_post_scrolls, log_callback, stop_event, pause_event, page_timeout, scroll_interval_val, no_new_limit, scroll_px_val, initial_load_delay_val))
+            thread_playwright = None
+            thread_browser = None
+            thread_page = None
+            try:
+                if sync_playwright is not None:
+                    if (should_fallback_video_tabs and do_videos) or do_posts:
+                        thread_log("开始拉起 Playwright 抓取主页...")
+                        thread_playwright = sync_playwright().start()
+                        thread_browser, context = connect_existing_chromium(thread_playwright, DEFAULT_X_CDP_URL, log_callback=thread_log)
+                        thread_page = context.new_page()
+
+                    if do_videos and should_fallback_video_tabs and thread_page and not should_stop(stop_event):
+                        try:
+                            works.extend(collect_video_tab_with_playwright(thread_page, channel_url, "videos", max_post_scrolls, thread_log, stop_event, pause_event, page_timeout, scroll_interval_val, no_new_limit, scroll_px_val, initial_load_delay_val))
                             if not should_stop(stop_event):
-                                works.extend(collect_video_tab_with_playwright(active_page, channel_url, "shorts", max_post_scrolls, log_callback, stop_event, pause_event, page_timeout, scroll_interval_val, no_new_limit, scroll_px_val, initial_load_delay_val))
-                    except PlaywrightTimeoutError:
-                        log_warn(log_callback, "  跳过浏览器 Videos/Shorts：页面加载超时。")
-                    except Exception as exc:
-                        log_warn(log_callback, f"  跳过浏览器 Videos/Shorts：{exc}")
+                                works.extend(collect_video_tab_with_playwright(thread_page, channel_url, "shorts", max_post_scrolls, thread_log, stop_event, pause_event, page_timeout, scroll_interval_val, no_new_limit, scroll_px_val, initial_load_delay_val))
+                        except PlaywrightTimeoutError:
+                            thread_log("[WARN] 跳过浏览器 Videos/Shorts：页面加载超时。")
+                        except Exception as exc:
+                            thread_log(f"[WARN] 跳过浏览器 Videos/Shorts：{exc}")
 
-                if do_posts and not should_stop(stop_event):
-                    try:
-                        active_page = ensure_page()
-                        if active_page is not None:
-                            works.extend(collect_posts_with_playwright(active_page, channel_url, max_post_scrolls, log_callback, stop_event, pause_event, page_timeout, scroll_interval_val, no_new_limit, scroll_px_val, initial_load_delay_val))
-                    except PlaywrightTimeoutError:
-                        log_warn(log_callback, "  跳过 Posts：页面加载超时。")
-                    except Exception as exc:
-                        log_warn(log_callback, f"  跳过 Posts：{exc}")
-
-            base_save_batch_size = int(config.get("save_batch_size", SAVE_BATCH_SIZE))
-            channel_written = 0
-            rows_buffer: list[dict[str, str]] = []
-            if verify_video_type_bool and works and not should_stop(stop_event):
+                    if do_posts and thread_page and not should_stop(stop_event):
+                        try:
+                            works.extend(collect_posts_with_playwright(thread_page, channel_url, max_post_scrolls, thread_log, stop_event, pause_event, page_timeout, scroll_interval_val, no_new_limit, scroll_px_val, initial_load_delay_val))
+                        except PlaywrightTimeoutError:
+                            thread_log("[WARN] 跳过 Posts：页面加载超时。")
+                        except Exception as exc:
+                            thread_log(f"[WARN] 跳过 Posts：{exc}")
+                else:
+                    if should_fallback_video_tabs and do_videos:
+                        thread_log("[ERROR] 缺少依赖：playwright。无法浏览器 fallback Videos/Shorts。")
+                    if do_posts:
+                        thread_log("[ERROR] 缺少依赖：playwright。跳过 Posts。")
+            finally:
                 try:
-                    apply_unified_video_type_check(works, log_callback)
+                    if thread_page and not thread_page.is_closed():
+                        thread_page.close()
+                except Exception:
+                    pass
+                try:
+                    if thread_browser and thread_browser.is_connected():
+                        thread_browser.close()
+                except Exception:
+                    pass
+                try:
+                    if thread_playwright:
+                        thread_playwright.stop()
+                except Exception:
+                    pass
+
+            if not works:
+                thread_log("未获取到任何作品数据。")
+                return
+
+            if verify_video_type_bool and not should_stop(stop_event):
+                try:
+                    apply_unified_video_type_check(works, thread_log)
                 except Exception as exc:
-                    log_warn(log_callback, f"  统一视频类型验证失败，保留原始类型：{exc}")
+                    thread_log(f"[WARN] 统一视频类型验证失败，保留原始类型：{exc}")
 
             comment_results = {}
             if get_comments_bool and api_keys:
@@ -1056,86 +1084,91 @@ def run_youtube_channel_works_spider(
                     max_comments,
                     comment_mode,
                     comment_workers,
-                    log_callback,
+                    thread_log,
                     stop_event,
                     pause_event,
                 )
 
-            def _flush_rows():
-                nonlocal channel_written
-                if not rows_buffer:
-                    return
-                if get_comments_bool:
-                    for r in rows_buffer:
-                        writer.writerow("作品信息", r)
-                else:
-                    writer.writerows(rows_buffer)
-                writer.save()
-                channel_written += len(rows_buffer)
-                rows_buffer.clear()
-
-            for work in works:
-                if should_stop(stop_event):
-                    break
+            rows_to_write = []
+            comments_to_write = []
+            
+            with serial_number_lock:
+                start_serial = global_serial[0]
+                local_serial = start_serial
                 
-                if fetch_shorts_related_bool and work.get("video_type") == "Shorts":
-                    vid = extract_video_id_from_work(work)
-                    if vid:
-                        if interruptible_sleep(1.0, stop_event):
-                            break
-                        log_line(log_callback, f"    获取 Shorts 关联长视频：{vid}")
-                        from src.platforms.youtube.shorts import fetch_short_related_video
-                        rt, rl = fetch_short_related_video(vid)
-                        work["related_title"] = rt
-                        work["related_link"] = rl
+                for work in works:
+                    if should_stop(stop_event):
+                        break
+                    if fetch_shorts_related_bool and work.get("video_type") == "Shorts":
+                        vid = extract_video_id_from_work(work)
+                        if vid:
+                            if interruptible_sleep(shorts_related_delay, stop_event):
+                                break
+                            thread_log(f"获取 Shorts 关联长视频：{vid}")
+                            from src.platforms.youtube.shorts import fetch_short_related_video
+                            rt, rl = fetch_short_related_video(vid)
+                            work["related_title"] = rt
+                            work["related_link"] = rl
 
-                rows_buffer.append(row_from_work(serial_number, work, channel_url))
+                    row = row_from_work(local_serial, work, channel_url)
+                    rows_to_write.append(row)
 
-                if get_comments_bool and comment_results:
-                    try:
-                        work_link = work.get("link", "")
-                        video_id = _extract_video_id_from_href(work_link)
+                    if get_comments_bool and comment_results:
+                        try:
+                            work_link = work.get("link", "")
+                            video_id = _extract_video_id_from_href(work_link)
 
-                        if video_id:
-                            result = comment_results.get(video_id)
-                            if result and result.status == "error":
-                                log_warn(log_callback, f"    评论获取失败 ({video_id})：{result.error}")
-                            comments = result.comments if result else []
-                            for comment in comments:
-                                comment_row = {
-                                    "序号": str(serial_number),
-                                    "编号": str(serial_number),
-                                    "视频链接": work_link,
-                                    "作品链接": work_link,
-                                    "评论的点赞量": str(comment["like_count"]),
-                                    "评论内容": comment["text"],
-                                    "发布时间": comment.get("published_at", ""),
-                                    "评论发布时间": comment.get("published_at", "")
-                                }
-                                writer.writerow("评论信息", comment_row)
-                    except Exception as exc:
-                        log_warn(log_callback, f"    提取评论失败：{exc}")
+                            if video_id:
+                                result = comment_results.get(video_id)
+                                if result and result.status == "error":
+                                    thread_log(f"[WARN] 评论获取失败 ({video_id})：{result.error}")
+                                comments = result.comments if result else []
+                                for comment in comments:
+                                    comment_row = {
+                                        "序号": str(local_serial),
+                                        "编号": str(local_serial),
+                                        "视频链接": work_link,
+                                        "作品链接": work_link,
+                                        "评论的点赞量": str(comment["like_count"]),
+                                        "评论内容": comment["text"],
+                                        "发布时间": comment.get("published_at", ""),
+                                        "评论发布时间": comment.get("published_at", "")
+                                    }
+                                    comments_to_write.append(comment_row)
+                        except Exception as exc:
+                            thread_log(f"[WARN] 提取评论失败：{exc}")
 
-                serial_number += 1
+                    local_serial += 1
+                
+                global_serial[0] = local_serial
 
-                # API 来源作品数据量大，过去强制 5000 阈值会让整条频道的行长期滞留内存，
-                # 频道处理中途硬崩溃会丢失全部未落盘行。降到 200 兼顾写盘频率与持久性。
-                current_batch_size = base_save_batch_size if work.get("source") == "playwright" else max(base_save_batch_size, 200)
-                if len(rows_buffer) >= current_batch_size:
-                    _flush_rows()
+            with writer_lock:
+                if rows_to_write:
+                    if get_comments_bool:
+                        for r in rows_to_write:
+                            writer.writerow("作品信息", r)
+                        if comments_to_write:
+                            writer.writerows("评论信息", comments_to_write)
+                    else:
+                        writer.writerows(rows_to_write)
+                    writer.save()
+            thread_log(f"作者主页完成：写入 {len(rows_to_write)} 条作品。")
 
-            _flush_rows()
-            log_line(log_callback, f"  作者主页完成：写入 {channel_written} 条。")
-
-        if page and not page.is_closed():
-            page.close()
-        if browser and browser.is_connected():
-            browser.close()
-        if playwright_context is not None:
-            playwright_context.stop()
+        with ThreadPoolExecutor(max_workers=max_parallel_tabs) as executor:
+            futures = [executor.submit(worker, idx, url) for idx, url in enumerate(channel_urls, 1)]
+            for future in as_completed(futures):
+                if should_stop(stop_event):
+                    for f in futures:
+                        f.cancel()
+                    break
+                try:
+                    future.result()
+                except Exception as exc:
+                    log_error(log_callback, f"线程执行异常: {exc}")
 
         completed_path = output_path
-        writer.save()
+        with writer_lock:
+            writer.save()
         log_line(log_callback, f"完成，已保存：{output_path}")
     except Exception as exc:
         log_error(log_callback, f"运行失败：{exc}")

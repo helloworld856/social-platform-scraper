@@ -12,6 +12,9 @@ from __future__ import annotations
 import json
 import re
 import time
+import threading
+import random
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import partial
 from typing import Any
 from urllib.parse import urlencode, urlparse
@@ -33,7 +36,6 @@ from src.core import (
     log_error,
     log_line,
     log_warn,
-    random_cooldown,
     sanitize_csv_row,
     sanitize_csv_rows,
     should_stop,
@@ -386,7 +388,7 @@ def looks_blocked_or_captcha(page) -> bool:
         return False
 
 
-def open_comment_panel(page) -> bool:
+def open_comment_panel(page, stop_event=None) -> bool:
     """
     备用 DOM 提取的前置条件：点击视频页面上的评论图标，展开右侧评论抽屉面板。
     - 遍历多种已知的图标/文本元素选择器并尝试点击；
@@ -405,7 +407,7 @@ def open_comment_panel(page) -> bool:
             locator = page.locator(selector).first
             if locator.count() > 0:
                 locator.click(timeout=2500)
-                time.sleep(1.2)
+                interruptible_sleep(1.2, stop_event)
                 return True
         except Exception:
             continue
@@ -440,7 +442,7 @@ def open_comment_panel(page) -> bool:
             }"""
         )
         if clicked:
-            time.sleep(1.2)
+            interruptible_sleep(1.2, stop_event)
             return True
     except Exception:
         pass
@@ -932,7 +934,7 @@ def collect_video_comments(page, video_url: str, max_scan_comments: int, log_cal
     page.on("response", collector.handle_response)
     try:
         page.goto(video_url, wait_until="domcontentloaded", timeout=_page_timeout)
-        time.sleep(2.5)
+        interruptible_sleep(2.5, stop_event)
         if looks_blocked_or_captcha(page):
             log_warn(log_callback, "  跳过：疑似验证码或风控页面。")
             return []
@@ -940,7 +942,7 @@ def collect_video_comments(page, video_url: str, max_scan_comments: int, log_cal
         api_added = fetch_comments_via_page_api(page, video_id, collector, log_callback, stop_event=stop_event, pause_event=pause_event, max_scroll_rounds=_max_scroll_rounds)
         opened = False
         if len(collector.comments) == 0:
-            opened = open_comment_panel(page)
+            opened = open_comment_panel(page, stop_event=stop_event)
         if not opened and api_added == 0 and len(collector.comments) < collector.max_scan_comments:
             log_line(log_callback, "  评论入口未能打开，改用页面上下文评论接口。")
             fetch_comments_via_page_api(page, video_id, collector, log_callback, stop_event=stop_event, pause_event=pause_event, max_scroll_rounds=_max_scroll_rounds)
@@ -1039,8 +1041,7 @@ def run_tiktok_top_comments_spider(
     TikTok 视频高点赞评论爬虫主任务入口。
     1. 从 TXT 中读取并解析去重后的视频链接列表。
     2. 新建或接管本地已登录 Chrome 的 CDP 会话。
-    3. 依次对视频调用 `collect_video_comments` 采集主楼评论并根据点赞降序保存至 Excel。
-    4. 实现分批强制休眠机制（`VIDEO_BATCH_COOLDOWN_EVERY`），有效对抗 TikTok 全局速率限制（风控阈值），降低被封风险。
+    3. 并发对视频调用 `collect_video_comments` 采集主楼评论并根据点赞降序保存至 Excel。
     """
     if config is None:
         config = {}
@@ -1050,12 +1051,13 @@ def run_tiktok_top_comments_spider(
     config_max_scroll_rounds = int(config.get("max_scroll_rounds", MAX_SCROLL_ROUNDS))
     comment_wait_timeout_val = int(config.get("comment_wait_timeout", COMMENT_WAIT_TIMEOUT))
     no_new_scroll_limit_val = int(config.get("no_new_scroll_limit", NO_NEW_SCROLL_LIMIT))
-    video_batch_cooldown_every_val = int(config.get("video_batch_cooldown_every", VIDEO_BATCH_COOLDOWN_EVERY))
-    video_batch_cooldown_min_val = float(config.get("video_batch_cooldown_min", VIDEO_BATCH_COOLDOWN_MIN))
-    video_batch_cooldown_max_val = float(config.get("video_batch_cooldown_max", VIDEO_BATCH_COOLDOWN_MAX))
+    max_parallel_tabs = int(config.get("max_parallel_tabs", 3))
+
+    video_batch_cooldown_every = int(config.get("video_batch_cooldown_every", VIDEO_BATCH_COOLDOWN_EVERY))
+    video_batch_cooldown_min = float(config.get("video_batch_cooldown_min", VIDEO_BATCH_COOLDOWN_MIN))
+    video_batch_cooldown_max = float(config.get("video_batch_cooldown_max", VIDEO_BATCH_COOLDOWN_MAX))
 
     completed_path = None
-    page = None
     try:
         if sync_playwright is None:
             log_line(log_callback, "缺少依赖：playwright。请先在当前运行环境执行 pip install -r requirements.txt，并执行 python -m playwright install chromium。")
@@ -1069,71 +1071,116 @@ def run_tiktok_top_comments_spider(
         max_scan_comments = max(comment_top_limit, int(max_scan_comments or DEFAULT_SCAN_LIMIT))
         output_path = build_output_path("tiktok", f"tiktok_top_comments_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
         writer = XlsxRowWriter(output_path, CSV_FIELDS)
+        writer_lock = threading.Lock()
+        log_lock = threading.Lock()
+
         log_line(log_callback, f"输出文件：{output_path}")
         log_line(log_callback, f"最多扫描主楼评论数：{max_scan_comments}，每个视频输出点赞量前 {comment_top_limit} 条。")
+        log_line(log_callback, "正在连接并拉起 Chrome...")
 
-        with sync_playwright() as playwright:
-            log_line(log_callback, "正在连接本地 Chrome...")
-            try:
-                _, context = connect_existing_chromium(playwright, cdp_port_or_url, log_callback=log_callback)
-            except Exception as exc:
-                log_error(log_callback, f"连接失败：请确认 Chrome 已自动打开并已登录 TikTok。错误：{exc}")
+        # 启动多线程前，预先启动 Chrome，建立 CDP 调试端口连接
+        from src.core import ensure_chrome_for_cdp
+        ensure_chrome_for_cdp(cdp_port_or_url, log_callback=log_callback)
+
+        def make_thread_log(base_log_callback, lock, prefix):
+            def wrapped(msg):
+                if base_log_callback:
+                    with lock:
+                        base_log_callback(f"[{prefix}] {msg}")
+            return wrapped
+
+        completed_count = 0
+        completed_lock = threading.Lock()
+
+        def worker(entry, progress_index):
+            if should_stop(stop_event):
+                return
+            if wait_if_paused(pause_event, stop_event):
                 return
 
-            page = context.new_page()
-            for progress_index, entry in enumerate(entries, 1):
-                if should_stop(stop_event):
-                    log_line(log_callback, "任务已停止。")
-                    break
-                if wait_if_paused(pause_event, stop_event):
-                    break
+            video_index = entry["编号"]
+            video_url = entry["视频链接"]
+            thread_log = make_thread_log(log_callback, log_lock, f"视频 {video_index}")
+            thread_log(f"[{progress_index}/{len(entries)}] 开始读取评论：{video_url}")
 
-                video_index = entry["编号"]
-                video_url = entry["视频链接"]
-                log_line(log_callback, f"[{progress_index}/{len(entries)}] 读取评论：{video_url}")
-                try:
-                    comments = collect_video_comments(page, video_url, max_scan_comments, log_callback, stop_event, pause_event=pause_event, comment_top_limit=comment_top_limit, page_load_timeout=config_page_load_timeout, scroll_pause=config_scroll_pause, max_scroll_rounds=config_max_scroll_rounds, comment_wait_timeout=comment_wait_timeout_val, no_new_scroll_limit=no_new_scroll_limit_val)
+            browser = None
+            page = None
+            try:
+                with sync_playwright() as playwright:
+                    browser, context = connect_existing_chromium(playwright, cdp_port_or_url, log_callback=thread_log)
+                    page = context.new_page()
+
+                    comments = collect_video_comments(
+                        page,
+                        video_url,
+                        max_scan_comments,
+                        thread_log,
+                        stop_event,
+                        pause_event=pause_event,
+                        comment_top_limit=comment_top_limit,
+                        page_load_timeout=config_page_load_timeout,
+                        scroll_pause=config_scroll_pause,
+                        max_scroll_rounds=config_max_scroll_rounds,
+                        comment_wait_timeout=comment_wait_timeout_val,
+                        no_new_scroll_limit=no_new_scroll_limit_val,
+                    )
                     rows = build_top_rows(video_index, video_url, comments, comment_top_limit=comment_top_limit)
                     if not rows:
                         rows = [empty_video_row(video_index, video_url)]
-                    writer.writerows(sanitize_csv_rows(rows))
-                    writer.save()
+                    with writer_lock:
+                        writer.writerows(sanitize_csv_rows(rows))
+                        writer.save()
                     written_count = len([row for row in rows if row.get("评论内容") and row.get("评论内容") != "该视频无评论"])
-                    log_line(log_callback, f"  完成：扫描主楼评论 {len(comments)} 条，写入 {written_count} 条并已保存。")
-                except PlaywrightTimeoutError:
+                    thread_log(f"完成：扫描主楼评论 {len(comments)} 条，写入 {written_count} 条并已保存。")
+            except PlaywrightTimeoutError:
+                with writer_lock:
                     writer.writerow(sanitize_csv_row(empty_video_row(video_index, video_url)))
                     writer.save()
-                    log_warn(log_callback, "  跳过：页面加载超时，已写入空评论占位行并保存。")
-                except Exception as exc:
+                thread_log("[WARN] 跳过：页面加载超时，已写入空评论占位行并保存。")
+            except Exception as exc:
+                with writer_lock:
                     writer.writerow(sanitize_csv_row(empty_video_row(video_index, video_url)))
                     writer.save()
-                    log_warn(log_callback, f"  跳过：{exc}，已写入空评论占位行并保存。")
+                thread_log(f"[WARN] 跳过：{exc}，已写入空评论占位行并保存。")
+            finally:
+                try:
+                    if page and not page.is_closed():
+                        page.close()
+                except Exception:
+                    pass
+                try:
+                    if browser:
+                        browser.close()
+                except Exception:
+                    pass
 
-                if (
-                    progress_index < len(entries)
-                    and progress_index % video_batch_cooldown_every_val == 0
-                    and random_cooldown(
-                        log_callback=log_callback,
-                        stop_event=stop_event,
-                        min_seconds=video_batch_cooldown_min_val,
-                        max_seconds=video_batch_cooldown_max_val,
-                        reason=f"已连续处理 {video_batch_cooldown_every_val} 个视频，降低 TikTok 访问频率",
-                    )
-                ):
-                    log_line(log_callback, "任务已停止。")
+                # Cooldown logic
+                with completed_lock:
+                    nonlocal completed_count
+                    completed_count += 1
+                    current_completed = completed_count
+
+                if current_completed % video_batch_cooldown_every == 0 and current_completed < len(entries):
+                    cooldown_time = random.uniform(video_batch_cooldown_min, video_batch_cooldown_max)
+                    log_line(log_callback, f"已处理 {current_completed} 个视频，触发批量冷却，休眠 {cooldown_time:.1f} 秒...")
+                    interruptible_sleep(cooldown_time, stop_event)
+
+        with ThreadPoolExecutor(max_workers=max_parallel_tabs) as executor:
+            futures = [executor.submit(worker, entry, idx) for idx, entry in enumerate(entries, 1)]
+            for future in as_completed(futures):
+                if should_stop(stop_event):
+                    for f in futures:
+                        f.cancel()
                     break
-
-            if page and not page.is_closed():
-                page.close()
+                try:
+                    future.result()
+                except Exception as exc:
+                    log_error(log_callback, f"线程执行异常: {exc}")
 
         completed_path = output_path
-        writer.save()
+        with writer_lock:
+            writer.save()
         log_line(log_callback, f"完成，已保存：{output_path}")
     finally:
-        try:
-            if page and not page.is_closed():
-                page.close()
-        except Exception:
-            pass
         finish_callback(completed_path)
 

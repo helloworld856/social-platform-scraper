@@ -192,6 +192,7 @@ def run_youtube_keyword_pro(api_keys: list[str], keywords_list, max_results, lim
     browser_max_scrolls = int(config.get("youtube_browser_max_scrolls", 100))
     browser_page_timeout = int(config.get("youtube_browser_page_timeout", 45000))
     browser_no_new_limit = int(config.get("youtube_browser_no_new_limit", 8))
+    youtube_initial_load_delay = float(config.get("youtube_initial_load_delay", 2.0))
     enable_timer = config.get("enable_timer", "否") == "是"
     timer_interval_minutes = int(config.get("timer_interval_minutes", 60))
     timer_max_runs = int(config.get("timer_max_runs", 3))
@@ -202,8 +203,6 @@ def run_youtube_keyword_pro(api_keys: list[str], keywords_list, max_results, lim
 
     output_path = None
     output_paths: list[str] = []
-    playwright_context = None
-    browser = None
     try:
         limit_time_bool = limit_time_str == "是"
         get_comments_bool = get_comments_str == "是"
@@ -258,83 +257,105 @@ def run_youtube_keyword_pro(api_keys: list[str], keywords_list, max_results, lim
             run_stamp = time.strftime("%Y%m%d_%H%M%S")
             output_paths.clear()
 
-            for index, keyword in enumerate(keywords_list, 1):
+            max_parallel_tabs = int(config.get("max_parallel_tabs", 3)) if config else 3
+            import threading
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            log_lock = threading.Lock()
+            output_paths_lock = threading.Lock()
+            register_lock = threading.Lock()
+
+            def make_thread_log(base_log_callback, lock, prefix):
+                def wrapped(msg):
+                    if base_log_callback:
+                        with lock:
+                            base_log_callback(f"[{prefix}] {msg}")
+                return wrapped
+
+            def worker(index, keyword):
                 if should_stop(stop_event):
-                    log_line(log_callback, "任务已停止。")
-                    break
+                    return
                 if wait_if_paused(pause_event, stop_event):
-                    break
-                output_path = build_output_path(
+                    return
+
+                thread_log = make_thread_log(log_callback, log_lock, f"词 {index}")
+                thread_log(f"搜索关键词：{keyword}")
+
+                output_path_local = build_output_path(
                     "youtube",
                     f"youtube_keyword_pro_{safe_filename_part(keyword)}_{run_stamp}.xlsx",
                 )
-                output_paths.append(output_path)
+                with output_paths_lock:
+                    output_paths.append(output_path_local)
+                thread_log(f"输出文件：{output_path_local}")
 
                 if get_comments_bool:
                     comment_fields = ["序号", "视频链接", "评论的点赞量", "评论内容", "评论发布时间"]
-                    writer = MultiSheetXlsxWriter(output_path, {"视频信息": CSV_FIELDS_PRO, "评论信息": comment_fields}, autosave_every=500)
+                    writer = MultiSheetXlsxWriter(output_path_local, {"视频信息": CSV_FIELDS_PRO, "评论信息": comment_fields}, autosave_every=500)
                 else:
-                    writer = XlsxRowWriter(output_path, CSV_FIELDS_PRO, autosave_every=500)
+                    writer = XlsxRowWriter(output_path_local, CSV_FIELDS_PRO, autosave_every=500)
                 serial_number = 1
-                log_line(log_callback, f"[{index}/{len(keywords_list)}] 搜索关键词：{keyword}")
-                log_line(log_callback, f"  输出文件：{output_path}")
 
                 all_video_ids = []
 
                 if browser_search_enabled:
                     from playwright.sync_api import sync_playwright
                     from src.core import connect_existing_chromium, DEFAULT_X_CDP_URL
+                    thread_playwright = None
+                    thread_browser = None
+                    page = None
                     try:
-                        if not playwright_context:
-                            playwright_context = sync_playwright().start()
-                        if not browser:
-                            browser, _ = connect_existing_chromium(playwright_context, DEFAULT_X_CDP_URL, log_callback=log_callback)
-                        log_line(log_callback, "  [浏览器优先] Chromium 已连接。")
+                        thread_playwright = sync_playwright().start()
+                        thread_browser, _ = connect_existing_chromium(thread_playwright, DEFAULT_X_CDP_URL, log_callback=thread_log)
+                        thread_log("  [浏览器优先] Chromium 已连接。")
                         
-                        page = browser.new_page()
+                        page = thread_browser.new_page()
                         all_video_ids = collect_video_ids_with_playwright(
                             page, keyword, max_results,
                             start_dt=start_dt, end_dt=end_dt,
-                            log_callback=log_callback, stop_event=stop_event, pause_event=pause_event,
+                            log_callback=thread_log, stop_event=stop_event, pause_event=pause_event,
                             scroll_px=browser_scroll_px, scroll_delay=browser_scroll_delay, max_scrolls=browser_max_scrolls,
                             page_timeout=browser_page_timeout, no_new_limit=browser_no_new_limit,
+                            initial_load_delay=youtube_initial_load_delay,
                         )
                         if not all_video_ids:
-                            log_line(log_callback, "  [浏览器优先] 未获取到任何视频 ID，将 Fallback 到 API 模式。")
+                            thread_log("  [浏览器优先] 未获取到任何视频 ID，将 Fallback 到 API 模式。")
                     except Exception as e:
-                        log_warn(log_callback, f"  [浏览器优先] 模式失败 ({e})，将 Fallback 到 API 模式。")
+                        thread_log(f"  [浏览器优先] 模式失败 ({e})，将 Fallback 到 API 模式。")
                     finally:
-                        if 'page' in locals() and page:
+                        if page:
                             try:
                                 page.close()
                             except Exception:
                                 pass
-                        # 关闭浏览器防止在定时模式下长连接断开
-                        if browser:
+                        if thread_browser:
                             try:
-                                browser.close()
+                                thread_browser.close()
                             except Exception:
                                 pass
-                            browser = None
+                        if thread_playwright:
+                            try:
+                                thread_playwright.stop()
+                            except Exception:
+                                pass
 
                 if not all_video_ids:
-                    log_line(log_callback, "  使用 API 搜索模式获取视频 ID 列表中...")
+                    thread_log("  使用 API 搜索模式获取视频 ID 列表中...")
                     try:
-                        for batch_ids in iter_search_video_id_batches(client_pool, keyword, max_results, limit_time_bool, start_dt, end_dt, log_callback, stop_event, pause_event, search_batch_size, date_chunk_days, date_chunk_hours, relevance_language):
+                        for batch_ids in iter_search_video_id_batches(client_pool, keyword, max_results, limit_time_bool, start_dt, end_dt, thread_log, stop_event, pause_event, search_batch_size, date_chunk_days, date_chunk_hours, relevance_language):
                             all_video_ids.extend(batch_ids)
                             if len(all_video_ids) >= max_results:
                                 break
                     except Exception as exc:
-                        log_error(log_callback, f"  API 搜索失败: {exc}")
+                        thread_log(f"  API 搜索失败: {exc}")
 
                 written_count = 0
-                log_line(log_callback, f"  共获取到 {len(all_video_ids)} 个视频 ID，开始获取详细信息...")
+                thread_log(f"  共获取到 {len(all_video_ids)} 个视频 ID，开始获取详细信息...")
 
                 for chunk_ids in chunked(all_video_ids, video_batch_size):
                     if should_stop(stop_event) or wait_if_paused(pause_event, stop_event):
                         break
 
-                    rows = fetch_video_rows_pro(client_pool, keyword, chunk_ids, stop_event, pause_event, video_batch_size, log_callback, target_languages)
+                    rows = fetch_video_rows_pro(client_pool, keyword, chunk_ids, stop_event, pause_event, video_batch_size, thread_log, target_languages)
 
                     if written_count + len(rows) > max_results:
                         rows = rows[:max_results - written_count]
@@ -344,12 +365,12 @@ def run_youtube_keyword_pro(api_keys: list[str], keywords_list, max_results, lim
 
                     # 并行1：收集该批次频道 ID，获取粉丝数
                     channel_ids = [row["_channel_id"] for row in rows if row.get("_channel_id")]
-                    subscriber_map = fetch_channel_subscribers_batch(client_pool, channel_ids, log_callback, stop_event, pause_event)
+                    subscriber_map = fetch_channel_subscribers_batch(client_pool, channel_ids, thread_log, stop_event, pause_event)
                     
                     # 并行2：检测长短视频类型
                     video_type_map = {}
                     if check_video_type_bool:
-                        log_line(log_callback, f"  检测这 {len(rows)} 个视频的类型（长视频 / Shorts）...")
+                        thread_log(f"  检测这 {len(rows)} 个视频的类型（长视频 / Shorts）...")
                         batch_vids = [row["_video_id"] for row in rows if row.get("_video_id")]
                         video_type_map = check_video_type_bulk(batch_vids)
 
@@ -368,7 +389,7 @@ def run_youtube_keyword_pro(api_keys: list[str], keywords_list, max_results, lim
                             comment_top_limit,
                             comment_mode,
                             comment_workers,
-                            log_callback,
+                            thread_log,
                             stop_event,
                             pause_event,
                         )
@@ -387,7 +408,7 @@ def run_youtube_keyword_pro(api_keys: list[str], keywords_list, max_results, lim
                             try:
                                 result = comment_results.get(vid)
                                 if result and result.status == "error":
-                                    log_warn(log_callback, f"    评论获取失败 ({vid})：{result.error}")
+                                    thread_log(f"    评论获取失败 ({vid})：{result.error}")
                                 comments = result.comments if result else []
                                 if not comments:
                                     writer.writerow("评论信息", {"序号": row["序号"], "视频链接": row["视频链接"], "评论内容": "无评论或被禁用"})
@@ -403,13 +424,13 @@ def run_youtube_keyword_pro(api_keys: list[str], keywords_list, max_results, lim
                                         writer.writerow("评论信息", comment_row)
                             except Exception as exc:
                                 if "commentsDisabled" in str(exc) or "403" in str(exc):
-                                    log_warn(log_callback, f"    该视频 ({vid}) 评论已被禁用或无法访问。")
+                                    thread_log(f"    该视频 ({vid}) 评论已被禁用或无法访问。")
                                 else:
-                                    log_warn(log_callback, f"    提取评论失败 ({vid})：{exc}")
+                                    thread_log(f"    提取评论失败 ({vid})：{exc}")
                                 writer.writerow("评论信息", {"序号": row["序号"], "视频链接": row["视频链接"], "评论内容": "获取失败"})
 
                         serial_number += 1
-                        log_line(log_callback, f"    [{serial_number - 1}] {row['视频链接']} ({row['视频类型']}) - 粉丝数: {row['作者粉丝数']}")
+                        thread_log(f"    [{serial_number - 1}] {row['视频链接']} ({row['视频类型']}) - 粉丝数: {row['作者粉丝数']}")
 
                     if get_comments_bool:
                         for r in sanitize_csv_rows(rows):
@@ -418,17 +439,30 @@ def run_youtube_keyword_pro(api_keys: list[str], keywords_list, max_results, lim
                         writer.writerows(sanitize_csv_rows(rows))
 
                     written_count += len(rows)
-                    log_line(log_callback, f"  已写入 {written_count} 条视频")
+                    thread_log(f"  已写入 {written_count} 条视频")
 
                     if written_count >= max_results:
                         break
 
                 writer.save()
-                log_line(log_callback, f"  写入完成，共 {written_count} 条视频")
+                thread_log(f"  写入完成，共 {written_count} 条视频")
 
                 if target_days:
-                    register_job(output_path, target_days)
-                    log_line(log_callback, f"  [快照注册] 成功为该文件注册了自动快照计划: {target_days}日")
+                    with register_lock:
+                        register_job(output_path_local, target_days)
+                    thread_log(f"  [快照注册] 成功为该文件注册了自动快照计划: {target_days}日")
+
+            with ThreadPoolExecutor(max_workers=max_parallel_tabs) as executor:
+                futures = [executor.submit(worker, idx, kw) for idx, kw in enumerate(keywords_list, 1)]
+                for future in as_completed(futures):
+                    if should_stop(stop_event):
+                        for f in futures:
+                            f.cancel()
+                        break
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        log_error(log_callback, f"线程执行异常: {exc}")
 
             log_line(log_callback, "完成，已按关键词分别保存：")
             for path in output_paths:
@@ -444,16 +478,5 @@ def run_youtube_keyword_pro(api_keys: list[str], keywords_list, max_results, lim
 
     except Exception as exc:
         log_error(log_callback, f"运行失败：{exc}")
-        output_path = None
     finally:
-        if browser:
-            try:
-                browser.close()
-            except Exception:
-                pass
-        if playwright_context:
-            try:
-                playwright_context.stop()
-            except Exception:
-                pass
-        finish_callback(output_paths[-1] if output_paths else output_path)
+        finish_callback(output_paths[-1] if output_paths else None)

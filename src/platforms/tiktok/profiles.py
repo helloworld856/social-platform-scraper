@@ -3,6 +3,8 @@ from __future__ import annotations
 import random
 import re
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from playwright.sync_api import sync_playwright
 
@@ -11,10 +13,10 @@ from src.core import (
     build_output_path,
     connect_existing_chromium,
     expand_compact_number,
+    interruptible_sleep,
     log_error,
     log_line,
     log_warn,
-    random_cooldown,
     sanitize_csv_row,
     should_stop,
     wait_if_paused,
@@ -87,18 +89,18 @@ def get_first_text(page, selectors: list[str], timeout: int = 2500) -> str:
             continue
     return ""
 
-def extract_profile_row(page, profile_url: str, page_load_timeout: int = 35000, captcha_wait: int = 12) -> dict[str, str]:
+def extract_profile_row(page, profile_url: str, page_load_timeout: int = 35000, captcha_wait: int = 12, stop_event=None) -> dict[str, str]:
     """
     进入指定的博主主页，检测人机验证码，并安全提取博主名称、ID、粉丝量、博主简介等元数据。
     如果账号不存在或已注销，进行优雅的错误处理并返回标识字段。
     """
     page.goto(profile_url, wait_until="domcontentloaded", timeout=page_load_timeout)
-    time.sleep(random.uniform(3.4, 6.2))
+    interruptible_sleep(random.uniform(1.5, 2.5), stop_event)
 
     try:
         # 检测是否弹出人机验证页面，若有则睡眠指定秒数供人工操作
         if "captcha" in page.url or page.locator("div[id^='captcha']").count() > 0:
-            time.sleep(captcha_wait)
+            interruptible_sleep(captcha_wait, stop_event)
     except Exception:
         pass
 
@@ -133,16 +135,18 @@ def extract_profile_row(page, profile_url: str, page_load_timeout: int = 35000, 
 def run_tiktok_profile_spider(txt_path: str, cdp_port_or_url: str, log_callback, finish_callback, stop_event=None, pause_event=None, config=None):
     """
     TikTok 博主主页基础元数据爬虫主入口。
-    顺序遍历 TXT 文件中的博主链接，提取基础元数据并保存至对应的 Excel 报表中，
-    支持随机频控降温和动态配置超时及验证码等待秒数。
+    并发遍历 TXT 文件中的博主链接，提取基础元数据并保存至对应的 Excel 报表中，
+    通过 ThreadPoolExecutor 进行并发提取，使用 Lock 保护写入与日志。
     """
     if config is None:
         config = {}
     page_load_timeout = int(config.get("page_load_timeout", 35000))
     captcha_wait = int(config.get("captcha_wait", 12))
-    cooldown_every_val = int(config.get("cooldown_every", 5))
-    cooldown_min_val = float(config.get("cooldown_min", 3.0))
-    cooldown_max_val = float(config.get("cooldown_max", 8.0))
+    max_parallel_tabs = int(config.get("max_parallel_tabs", 3))
+
+    cooldown_every = int(config.get("cooldown_every", 3))
+    cooldown_min = float(config.get("cooldown_min", 4.0))
+    cooldown_max = float(config.get("cooldown_max", 9.0))
 
     output_path = None
     completed_path = None
@@ -154,46 +158,90 @@ def run_tiktok_profile_spider(txt_path: str, cdp_port_or_url: str, log_callback,
 
         output_path = build_output_path("tiktok", f"tiktok_profiles_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
         writer = XlsxRowWriter(output_path, CSV_FIELDS)
+        writer_lock = threading.Lock()
+        log_lock = threading.Lock()
 
-        with sync_playwright() as p:
-            log_line(log_callback, "正在连接本地 Chrome...")
-            try:
-                _, context = connect_existing_chromium(p, cdp_port_or_url)
-            except Exception as exc:
-                log_error(log_callback, f"连接失败：请确认 Chrome 已自动打开并已登录 TikTok。错误：{exc}")
+        log_line(log_callback, "正在连接并拉起 Chrome...")
+        from src.core import ensure_chrome_for_cdp
+        ensure_chrome_for_cdp(cdp_port_or_url, log_callback=log_callback)
+
+        def make_thread_log(base_log_callback, lock, prefix):
+            def wrapped(msg):
+                if base_log_callback:
+                    with lock:
+                        base_log_callback(f"[{prefix}] {msg}")
+            return wrapped
+
+        completed_count = 0
+        completed_lock = threading.Lock()
+
+        def worker(profile_url, index):
+            if should_stop(stop_event):
                 return
-
-            page = context.new_page()
-            for index, profile_url in enumerate(profile_urls, 1):
-                if should_stop(stop_event):
-                    log_line(log_callback, "任务已停止。")
-                    break
-                if wait_if_paused(pause_event, stop_event):
-                    break
-                log_line(log_callback, f"[{index}/{len(profile_urls)}] 提取博主信息：{profile_url}")
+            if wait_if_paused(pause_event, stop_event):
+                return
+            
+            thread_log = make_thread_log(log_callback, log_lock, profile_id_from_url(profile_url) or f"user_{index}")
+            thread_log(f"[{index}/{len(profile_urls)}] 开始提取博主信息：{profile_url}")
+            
+            browser = None
+            page = None
+            try:
+                with sync_playwright() as p:
+                    browser, context = connect_existing_chromium(p, cdp_port_or_url)
+                    page = context.new_page()
+                    row = extract_profile_row(page, profile_url, page_load_timeout=page_load_timeout, captcha_wait=captcha_wait, stop_event=stop_event)
+                    thread_log(f"完成：{row['博主名称']} | {row['博主ID']} | 粉丝 {row['粉丝量'] or '未提取'}")
+            except Exception as exc:
+                row = {
+                    "博主主页链接": profile_url,
+                    "博主名称": "抓取失败",
+                    "博主ID": profile_id_from_url(profile_url),
+                    "粉丝量": "",
+                    "作者简介": str(exc),
+                }
+                thread_log(f"[ERROR] 失败：{exc}")
+            finally:
+                if page and not page.is_closed():
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
                 try:
-                    row = extract_profile_row(page, profile_url, page_load_timeout=page_load_timeout, captcha_wait=captcha_wait)
-                    log_line(log_callback, f"  完成：{row['博主名称']} | {row['博主ID']} | 粉丝 {row['粉丝量'] or '未提取'}")
-                except Exception as exc:
-                    row = {
-                        "博主主页链接": profile_url,
-                        "博主名称": "抓取失败",
-                        "博主ID": profile_id_from_url(profile_url),
-                        "粉丝量": "",
-                        "作者简介": str(exc),
-                    }
-                    log_error(log_callback, f"  失败：{exc}")
-
+                    if browser:
+                        browser.close()
+                except Exception:
+                    pass
+            
+            with writer_lock:
                 writer.writerow(sanitize_csv_row(row))
-                # 每抓取 5 个博主主页进行随机冷却，以避免触发高频风控限制
-                if index % cooldown_every_val == 0:
-                    if random_cooldown(log_callback, stop_event, cooldown_min_val, cooldown_max_val):
-                        break
+                writer.save()
 
-            if not page.is_closed():
-                page.close()
+            # Cooldown logic
+            with completed_lock:
+                nonlocal completed_count
+                completed_count += 1
+                current_completed = completed_count
 
-        writer.save()
+            if current_completed % cooldown_every == 0 and current_completed < len(profile_urls):
+                cooldown_time = random.uniform(cooldown_min, cooldown_max)
+                log_line(log_callback, f"已处理 {current_completed} 个博主，触发批量冷却，休眠 {cooldown_time:.1f} 秒...")
+                interruptible_sleep(cooldown_time, stop_event)
+
+        with ThreadPoolExecutor(max_workers=max_parallel_tabs) as executor:
+            futures = [executor.submit(worker, url, idx) for idx, url in enumerate(profile_urls, 1)]
+            for future in as_completed(futures):
+                if should_stop(stop_event):
+                    for f in futures:
+                        f.cancel()
+                    break
+                try:
+                    future.result()
+                except Exception as exc:
+                    log_error(log_callback, f"线程执行异常: {exc}")
+
+        with writer_lock:
+            writer.save()
         log_line(log_callback, f"完成，已保存：{output_path}")
         completed_path = output_path
     finally:

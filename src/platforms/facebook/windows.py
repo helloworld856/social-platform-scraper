@@ -116,6 +116,7 @@ class FacebookKeywordSearchWindow(SimpleToolWindow):
                 "save_batch_size",
                 "max_posts",
                 "collect_comments",
+                "comment_top_limit",
                 "cooldown_min",
                 "cooldown_max",
             )

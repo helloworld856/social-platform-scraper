@@ -51,6 +51,7 @@ class YouTubeKeywordWindow(SimpleToolWindow):
 
     def tool_config_params(self):
         return [
+            ConfigParam("max_parallel_tabs", "并发数", kind="int", default=3, minimum=1, maximum=5, tooltip="同时并发搜索关键词的数量"),
             ConfigParam("max_results", "最多搜索结果数", kind="int", default=5000, minimum=1, maximum=5000),
             ConfigParam(
                 "youtube_search_method",
@@ -75,13 +76,15 @@ class YouTubeKeywordWindow(SimpleToolWindow):
             ConfigParam("youtube_browser_max_scrolls", "浏览器最大滚动次数", kind="int", default=100, minimum=10, maximum=500),
             ConfigParam("youtube_browser_page_timeout", "浏览器页面加载超时(毫秒)", kind="int", default=45000, minimum=10000, maximum=120000, step=1000),
             ConfigParam("youtube_browser_no_new_limit", "浏览器无新内容停止阈值", kind="int", default=8, minimum=2, maximum=50),
+            ConfigParam("youtube_initial_load_delay", "初始页面加载等待(秒)", kind="float", default=2.0, minimum=0.5, maximum=10.0, step=0.1, decimals=1,
+                        tooltip="浏览器模式下打开YouTube搜索页后的初始等待缓冲秒数，较慢的网络可适当调大。"),
             ConfigParam("comment_top_limit", "单个视频导出热度前N条评论", kind="int", default=100, minimum=1, maximum=1000),
         ]
 
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
         from src.platforms.youtube.keyword_pro import run_youtube_keyword_pro
 
-        config = {k: v for k, v in values.items() if k.startswith("youtube_") or k in ("max_results", "comment_top_limit", "enable_timer", "timer_interval_minutes", "timer_max_runs")}
+        config = {k: v for k, v in values.items() if k.startswith("youtube_") or k in ("max_results", "comment_top_limit", "enable_timer", "timer_interval_minutes", "timer_max_runs", "max_parallel_tabs")}
         return run_youtube_keyword_pro(
             _lines(values["api_key"]),
             _lines(values["keywords"]),
@@ -122,10 +125,16 @@ class YouTubeProfilesWindow(SimpleToolWindow):
             ],
         )
 
+    def tool_config_params(self):
+        return [
+            ConfigParam("max_parallel_tabs", "并发数", kind="int", default=3, minimum=1, maximum=5, tooltip="同时处理的博主主页数量"),
+        ]
+
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
         from src.platforms.youtube.profiles import run_channel_spider
 
-        return run_channel_spider(_lines(values["api_key"]), self._text_to_tempfile(values["txt_path"]), log_callback, finish_callback, stop_event, pause_event=pause_event)
+        config = {"max_parallel_tabs": values.get("max_parallel_tabs", 3)}
+        return run_channel_spider(_lines(values["api_key"]), self._text_to_tempfile(values["txt_path"]), log_callback, finish_callback, stop_event, pause_event=pause_event, config=config)
 
 
 class YouTubeContextWindow(SimpleToolWindow):
@@ -142,6 +151,7 @@ class YouTubeContextWindow(SimpleToolWindow):
 
     def tool_config_params(self):
         return [
+            ConfigParam("max_parallel_tabs", "并发数", kind="int", default=3, minimum=1, maximum=5, tooltip="同时处理的视频对数量"),
             ConfigParam("context_size", "目标视频前后各取几条", kind="int", default=5, minimum=1, maximum=20),
             ConfigParam("max_upload_pages", "最多翻页数", kind="int", default=200, minimum=10, maximum=1000),
             ConfigParam("check_video_type", "是否检测长短视频类型？", kind="combo", options=("是", "否"), default="是"),
@@ -150,7 +160,7 @@ class YouTubeContextWindow(SimpleToolWindow):
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
         from src.platforms.youtube.context import run_youtube_paired_context_spider
 
-        config = {k: v for k, v in values.items() if k in ("context_size", "max_upload_pages", "check_video_type")}
+        config = {k: v for k, v in values.items() if k in ("context_size", "max_upload_pages", "check_video_type", "max_parallel_tabs")}
         return run_youtube_paired_context_spider(_lines(values["api_key"]), self._text_to_tempfile(values["txt_path"]), log_callback, finish_callback, stop_event, config=config, pause_event=pause_event)
 
 
@@ -193,6 +203,7 @@ class YouTubeChannelWorksWindow(SimpleToolWindow):
 
     def tool_config_params(self):
         return [
+            ConfigParam("max_parallel_tabs", "并发数", kind="int", default=3, minimum=1, maximum=5, tooltip="同时处理的博主数量"),
             ConfigParam("max_video_items", "最多作品数", kind="int", default=5000, minimum=1, maximum=5000),
             ConfigParam("max_post_scrolls", "帖子最大滚动次数", kind="int", default=200, minimum=1, maximum=5000),
             ConfigParam("initial_load_delay", "初始加载等待(秒)", kind="float", default=1.8, minimum=0.5, maximum=10.0, step=0.1, decimals=1),
@@ -200,12 +211,14 @@ class YouTubeChannelWorksWindow(SimpleToolWindow):
                         tooltip="深扫模式下每视频最多扫描的评论数。快速模式下受\"最多获取评论数\"约束。"),
             ConfigParam("youtube_comment_mode", "评论采集模式", kind="combo", options=("快速模式", "深扫模式"), default="快速模式"),
             ConfigParam("youtube_comment_workers", "评论并发数", kind="int", default=5, minimum=1, maximum=10),
+            ConfigParam("youtube_shorts_related_delay", "Shorts关联长视频提取延迟(秒)", kind="float", default=1.0, minimum=0.0, maximum=10.0, step=0.5, decimals=1,
+                        tooltip="抓取 Shorts 关联的长视频时的限速延迟秒数。"),
         ]
 
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):
         from src.platforms.youtube.channel_works import run_youtube_channel_works_spider
 
-        config = {k: v for k, v in values.items() if k.startswith("youtube_") or k in ("max_video_items", "page_load_timeout", "scroll_interval", "no_new_scroll_limit", "scroll_px", "max_post_scrolls", "save_batch_size", "initial_load_delay", "verify_video_type")}
+        config = {k: v for k, v in values.items() if k.startswith("youtube_") or k in ("max_video_items", "page_load_timeout", "scroll_interval", "no_new_scroll_limit", "scroll_px", "max_post_scrolls", "save_batch_size", "initial_load_delay", "verify_video_type", "max_parallel_tabs")}
         return run_youtube_channel_works_spider(
             _lines(values["api_key"]),
             values["channel_urls"],
@@ -250,6 +263,8 @@ class YouTubeCommentsWindow(SimpleToolWindow):
             ConfigParam("youtube_api_page_size", "评论每页条数", kind="int", default=100, minimum=1, maximum=100),
             ConfigParam("youtube_comment_mode", "评论采集模式", kind="combo", options=("快速模式", "深扫模式"), default="快速模式"),
             ConfigParam("youtube_comment_workers", "评论并发数", kind="int", default=5, minimum=1, maximum=10),
+            ConfigParam("youtube_shorts_related_delay", "Shorts关联长视频提取延迟(秒)", kind="float", default=1.0, minimum=0.0, maximum=10.0, step=0.5, decimals=1,
+                        tooltip="抓取 Shorts 关联的长视频时的限速延迟秒数。"),
         ]
 
     def run_task(self, values, log_callback, finish_callback, stop_event, pause_event):

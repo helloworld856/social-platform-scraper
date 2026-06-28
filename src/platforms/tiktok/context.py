@@ -13,6 +13,8 @@ import json
 import re
 import time
 import urllib.parse
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from playwright.sync_api import sync_playwright
 
@@ -25,7 +27,6 @@ from src.core import (
     log_error,
     log_line,
     log_warn,
-    random_cooldown,
     resolve_tiktok_card_container,
     sanitize_csv_rows,
     should_stop,
@@ -867,14 +868,7 @@ def write_rows(writer: XlsxRowWriter, rows: list[dict[str, str]]):
 def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callback, stop_event=None, pause_event=None, config=None):
     """
     TikTok 上下文作品采集任务的主入口调度器。
-    - 处理配置参数（单边上下文数量、翻页大小与页数限制、滚动距离与休眠时间）。
-    - 连接或接管已登录的本地 Chrome CDP 浏览器。
-    - 遍历输入的视频 URL：
-      1. 通过 `resolve_target_video_context` 跳转目标视频并定位其 secUid；
-      2. 若 secUid 解析成功，优先走 API 极速提取模式（通过 fetch_json_via_page）；
-      3. 若没有获取到 secUid，或接口因校验风控等问题抛出错误，则自动捕获异常并降级无缝走 `fallback_rows_from_profile` 主页滚动网格匹配兜底模式；
-      4. 提取到上下文行之后清洗并写入 Excel。
-      5. 执行分段强制休眠（`random_cooldown`），保护账号安全。
+    - 并发对目标视频进行定位与其前后发布时间轴相邻的前 N 条 and 后 N 条视频（上下文作品）的抓取。
     """
     if config is None:
         config = {}
@@ -883,42 +877,54 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
     max_api_pages = int(config.get("max_api_pages", MAX_API_PAGES))
     max_profile_scrolls = int(config.get("max_profile_scrolls", MAX_PROFILE_SCROLLS))
     profile_scroll_pause = float(config.get("scroll_interval", PROFILE_SCROLL_PAUSE))
+    max_parallel_tabs = int(config.get("max_parallel_tabs", 3))
 
     output_path = None
     completed_path = None
     try:
         pairs = parse_input_pairs(txt_path)
         if not pairs:
-            log_warn(log_callback, "TXT 中没有有效的\u201c视频链接 博主链接\u201d行。")
+            log_warn(log_callback, "TXT 中没有有效的“视频链接 博主链接”行。")
             return
 
         output_path = build_output_path("tiktok", f"tiktok_context_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
         writer = XlsxRowWriter(output_path, CSV_FIELDS)
+        writer_lock = threading.Lock()
+        log_lock = threading.Lock()
 
-        with sync_playwright() as p:
-            log_line(log_callback, "正在连接本地 Chrome...")
-            try:
-                _, context = connect_existing_chromium(p, cdp_port_or_url)
-            except Exception as exc:
-                log_error(log_callback, f"连接失败：请确认 Chrome 已自动打开并已登录 TikTok。错误：{exc}")
+        log_line(log_callback, "正在连接并拉起 Chrome...")
+        from src.core import ensure_chrome_for_cdp
+        ensure_chrome_for_cdp(cdp_port_or_url, log_callback=log_callback)
+
+        def make_thread_log(base_log_callback, lock, prefix):
+            def wrapped(msg):
+                if base_log_callback:
+                    with lock:
+                        base_log_callback(f"[{prefix}] {msg}")
+            return wrapped
+
+        def worker(pair, index):
+            if should_stop(stop_event):
+                return
+            if wait_if_paused(pause_event, stop_event):
                 return
 
-            target_page = context.new_page()
+            target_video_url, profile_url = pair
+            thread_log = make_thread_log(log_callback, log_lock, f"任务 {index}")
+            thread_log(f"[{index}/{len(pairs)}] 定位 TikTok 目标视频：{target_video_url}")
+
+            target_page = None
             profile_page = None
             detail_page = None
+            try:
+                with sync_playwright() as p:
+                    _, context = connect_existing_chromium(p, cdp_port_or_url)
+                    target_page = context.new_page()
 
-            for index, (target_video_url, profile_url) in enumerate(pairs, 1):
-                if should_stop(stop_event):
-                    log_line(log_callback, "任务已停止。")
-                    break
-                if wait_if_paused(pause_event, stop_event):
-                    break
-                log_line(log_callback, f"[{index}/{len(pairs)}] 定位 TikTok 目标视频：{target_video_url}")
-                try:
                     resolved_video_url, target_video_id, resolved_profile_url = resolve_target_video_context(target_page, target_video_url)
                     if not target_video_id:
-                        log_warn(log_callback, "  跳过：无法解析视频 ID。")
-                        continue
+                        thread_log("[WARN] 跳过：无法解析视频 ID。")
+                        return
 
                     metadata = extract_target_metadata(target_page, target_video_id, resolved_profile_url or profile_url)
                     target_profile_url = extract_profile_url_from_video_url(target_video_url)
@@ -937,45 +943,58 @@ def run_scraper(txt_path: str, cdp_port_or_url: str, log_callback, finish_callba
                     sec_uid = metadata.get("sec_uid", "")
                     if sec_uid:
                         try:
-                            log_line(log_callback, "  使用 API 快速定位投稿列表。")
-                            items, target_index = collect_author_items_via_api(target_page, sec_uid, target_video_id, log_callback, context_size, api_page_size, max_api_pages)
+                            thread_log("使用 API 快速定位投稿列表。")
+                            items, target_index = collect_author_items_via_api(target_page, sec_uid, target_video_id, thread_log, context_size, api_page_size, max_api_pages)
                             if target_index >= 0:
                                 rows = rows_from_api_items(items, target_index, matched_profile_url, resolved_video_url, context_size)
-                                log_line(log_callback, f"  API 命中目标视频，准备写入 {len(rows)} 条。")
+                                thread_log(f"API 命中目标视频，准备写入 {len(rows)} 条。")
                             else:
-                                log_warn(log_callback, "  API 未命中目标视频，切换到主页兜底。")
+                                thread_log("[WARN] API 未命中目标视频，切换到主页兜底。")
                         except Exception as exc:
-                            log_error(log_callback, f"  API 路线失败，切换到主页兜底：{exc}")
+                            thread_log(f"[ERROR] API 路线失败，切换到主页兜底：{exc}")
                     else:
-                        log_line(log_callback, "  未从目标视频页解析到 secUid，切换到主页兜底。")
+                        thread_log("未从目标视频页解析到 secUid，切换到主页兜底。")
 
                     # 极速 API 路线不可用或未命中时，无缝切换至主页滚动兜底路线
                     if not rows:
-                        if profile_page is None:
-                            profile_page = context.new_page()
-                        if detail_page is None:
-                            detail_page = context.new_page()
-                        rows = fallback_rows_from_profile(profile_page, detail_page, profile_candidates, target_video_id, resolved_video_url, log_callback, stop_event, pause_event, context_size, max_profile_scrolls, profile_scroll_pause)
+                        profile_page = context.new_page()
+                        detail_page = context.new_page()
+                        rows = fallback_rows_from_profile(profile_page, detail_page, profile_candidates, target_video_id, resolved_video_url, thread_log, stop_event, pause_event, context_size, max_profile_scrolls, profile_scroll_pause)
 
                     if not rows:
-                        log_warn(log_callback, "  跳过：API 和主页兜底都没有定位到目标视频。")
-                        continue
+                        thread_log("[WARN] 跳过：API 和主页兜底都没有定位到目标视频。")
+                        return
 
-                    write_rows(writer, rows)
-                    log_line(log_callback, f"  完成：写入 {len(rows)} 条。")
-                    if index % 3 == 0:
-                        if random_cooldown(log_callback, stop_event, 3.0, 8.0):
-                            break
+                    with writer_lock:
+                        write_rows(writer, rows)
+                        writer.save()
+                    thread_log(f"完成：写入 {len(rows)} 条。")
+            except Exception as exc:
+                thread_log(f"[ERROR] 处理失败：{exc}")
+            finally:
+                for opened_page in (target_page, profile_page, detail_page):
+                    if opened_page is not None and not opened_page.is_closed():
+                        try:
+                            opened_page.close()
+                        except Exception:
+                            pass
+
+        with ThreadPoolExecutor(max_workers=max_parallel_tabs) as executor:
+            futures = [executor.submit(worker, pair, idx) for idx, pair in enumerate(pairs, 1)]
+            for future in as_completed(futures):
+                if should_stop(stop_event):
+                    for f in futures:
+                        f.cancel()
+                    break
+                try:
+                    future.result()
                 except Exception as exc:
-                    log_error(log_callback, f"  处理失败：{exc}")
+                    log_error(log_callback, f"线程执行异常: {exc}")
 
-            for opened_page in (target_page, profile_page, detail_page):
-                if opened_page is not None and not opened_page.is_closed():
-                    opened_page.close()
-
-        writer.save()
-        log_line(log_callback, f"完成，已保存：{output_path}")
         completed_path = output_path
+        with writer_lock:
+            writer.save()
+        log_line(log_callback, f"完成，已保存：{output_path}")
     finally:
         finish_callback(completed_path)
 

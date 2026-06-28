@@ -168,36 +168,65 @@ def run_channel_spider(api_keys: list[str], txt_file_path, log_callback, finish_
         client_pool = YouTubeClientPool(api_keys)
         output_path = build_output_path("youtube", f"youtube_profiles_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
 
+        max_parallel_tabs = int(config.get("max_parallel_tabs", 3)) if config else 3
         writer = XlsxRowWriter(output_path, CSV_FIELDS)
-        for index, profile_url in enumerate(profile_urls, 1):
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        writer_lock = threading.Lock()
+        log_lock = threading.Lock()
+
+        def make_thread_log(base_log_callback, lock, prefix):
+            def wrapped(msg):
+                if base_log_callback:
+                    with lock:
+                        base_log_callback(f"[{prefix}] {msg}")
+            return wrapped
+
+        def worker(index, profile_url):
             if should_stop(stop_event):
-                log_line(log_callback, "任务已停止。")
-                break
+                return
             if wait_if_paused(pause_event, stop_event):
-                break
-            log_line(log_callback, f"[{index}/{len(profile_urls)}] 解析作者：{profile_url}")
+                return
+
+            thread_log = make_thread_log(log_callback, log_lock, f"通道 {index}")
+            thread_log(f"开始解析作者：{profile_url}")
             try:
                 item = resolve_channel(client_pool, profile_url)
                 if not item:
-                    log_warn(log_callback, "  未找到作者信息")
-                    writer.writerow(
-                        sanitize_csv_row({
-                            "作者主页链接": profile_url,
-                            "作者名称": "未找到",
-                            "作者ID": "",
-                            "粉丝量": "",
-                            "作者简介": "",
-                        })
-                    )
-                    continue
+                    thread_log("[WARN] 未找到作者信息")
+                    with writer_lock:
+                        writer.writerow(
+                            sanitize_csv_row({
+                                "作者主页链接": profile_url,
+                                "作者名称": "未找到",
+                                "作者ID": "",
+                                "粉丝量": "",
+                                "作者简介": "",
+                            })
+                        )
+                    return
 
                 row = channel_row(profile_url, item)
-                writer.writerow(sanitize_csv_row(row))
-                log_line(log_callback, f"  成功：{row['作者名称']} | 粉丝量：{row['粉丝量']}")
+                with writer_lock:
+                    writer.writerow(sanitize_csv_row(row))
+                thread_log(f"成功：{row['作者名称']} | 粉丝量：{row['粉丝量']}")
             except Exception as exc:
-                log_warn(log_callback, f"  解析失败：{exc}")
+                thread_log(f"[WARN] 解析失败：{exc}")
 
-        writer.save()
+        with ThreadPoolExecutor(max_workers=max_parallel_tabs) as executor:
+            futures = [executor.submit(worker, idx, url) for idx, url in enumerate(profile_urls, 1)]
+            for future in as_completed(futures):
+                if should_stop(stop_event):
+                    for f in futures:
+                        f.cancel()
+                    break
+                try:
+                    future.result()
+                except Exception as exc:
+                    log_error(log_callback, f"线程执行异常: {exc}")
+
+        with writer_lock:
+            writer.save()
 
         log_line(log_callback, f"完成，已保存：{output_path}")
     except Exception as exc:

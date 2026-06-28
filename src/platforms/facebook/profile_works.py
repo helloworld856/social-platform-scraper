@@ -739,98 +739,114 @@ def run_facebook_profile_works_spider(
     cooldown_max_val = float(config.get("cooldown_max", 3.0))
     force_exact = (force_exact_time_str == "是")
 
-    output_path = None
+    browser = None
+    playwright_context = None
+    page = None
     try:
         with sync_playwright() as p:
-            browser, playwright_context = connect_existing_chromium(p, DEFAULT_X_CDP_URL, log_callback=log_callback)
-            if not browser:
-                log_error(log_callback, "无法连接到本地浏览器，请确保以调试模式启动 Chrome。")
-                return
+            try:
+                browser, playwright_context = connect_existing_chromium(p, DEFAULT_X_CDP_URL, log_callback=log_callback)
+                if not browser:
+                    log_error(log_callback, "无法连接到本地浏览器，请确保以调试模式启动 Chrome。")
+                    return
 
-            page = playwright_context.new_page()
+                page = playwright_context.new_page()
 
-            for profile_index, profile_url in enumerate(urls, 1):
-                if should_stop(stop_event):
-                    break
+                for profile_index, profile_url in enumerate(urls, 1):
+                    if should_stop(stop_event):
+                        break
 
-                log_line(log_callback, f"[{profile_index}/{len(urls)}] 读取主页：{profile_url}")
+                    log_line(log_callback, f"[{profile_index}/{len(urls)}] 读取主页：{profile_url}")
 
-                # ── 先初始化 XLSX（滚动前就建好，边滚边写防丢数据）────
-                output_path = _get_output_path(profile_url)
-                sheets_fields = {"帖子内容": FIELDNAMES}
-                if collect_comments_bool:
-                    sheets_fields["评论详情"] = ["原帖链接", "评论内容", "抓取时间", "是否主楼"]
-                writer = MultiSheetXlsxWriter(output_path, sheets_fields)
+                    # ── 先初始化 XLSX（滚动前就建好，边滚边写防丢数据）────
+                    output_path = _get_output_path(profile_url)
+                    sheets_fields = {"帖子内容": FIELDNAMES}
+                    if collect_comments_bool:
+                        sheets_fields["评论详情"] = ["原帖链接", "评论内容", "抓取时间", "是否主楼"]
+                    writer = MultiSheetXlsxWriter(output_path, sheets_fields)
 
-                # ── 阶段一：主页滚动 + 即时写入帖子 ──────────────────
-                posts = scroll_and_extract_posts(
-                    page=page,
-                    profile_url=profile_url,
-                    max_scrolls=max_scrolls,
-                    log_callback=log_callback,
-                    stop_event=stop_event,
-                    pause_event=pause_event,
-                    scroll_delay_val=scroll_delay_val,
-                    no_new_limit=no_new_limit,
-                    max_posts=max_posts,
-                    page_timeout=page_timeout,
-                    scroll_px=scroll_px,
-                    force_exact=force_exact,
-                    post_writer=writer,
-                    save_batch_size=save_batch_size,
-                    limit_time_bool=limit_time_bool,
-                    start_dt=start_dt,
-                    end_dt=end_dt,
-                )
+                    # ── 阶段一：主页滚动 + 即时写入帖子 ──────────────────
+                    posts = scroll_and_extract_posts(
+                        page=page,
+                        profile_url=profile_url,
+                        max_scrolls=max_scrolls,
+                        log_callback=log_callback,
+                        stop_event=stop_event,
+                        pause_event=pause_event,
+                        scroll_delay_val=scroll_delay_val,
+                        no_new_limit=no_new_limit,
+                        max_posts=max_posts,
+                        page_timeout=page_timeout,
+                        scroll_px=scroll_px,
+                        force_exact=force_exact,
+                        post_writer=writer,
+                        save_batch_size=save_batch_size,
+                        limit_time_bool=limit_time_bool,
+                        start_dt=start_dt,
+                        end_dt=end_dt,
+                    )
 
-                # 统计已写入行数（不含被时间过滤剔除的）
-                total_written = len([p for p in posts
-                                     if not (limit_time_bool and start_dt and end_dt
-                                             and parse_fb_time_string(p.get("published_at", ""))
-                                             and not in_date_range(parse_fb_time_string(p.get("published_at", "")), start_dt, end_dt))])
+                    # 统计已写入行数（不含被时间过滤剔除的）
+                    total_written = len([p for p in posts
+                                         if not (limit_time_bool and start_dt and end_dt
+                                                 and parse_fb_time_string(p.get("published_at", ""))
+                                                 and not in_date_range(parse_fb_time_string(p.get("published_at", "")), start_dt, end_dt))])
 
-                if not posts:
-                    log_warn(log_callback, f"未抓到任何帖子: {profile_url}")
-                    continue
+                    if not posts:
+                        log_warn(log_callback, f"未抓到任何帖子: {profile_url}")
+                        continue
 
-                # ── 阶段二：评论（仅打开帖子详情页）─────────────────
-                comments_written = 0
-                if collect_comments_bool:
-                    for post_data in posts:
-                        if should_stop(stop_event):
-                            break
-                        if wait_if_paused(pause_event, stop_event):
-                            break
-                        # 被时间过滤的帖子也跳过评论
-                        if limit_time_bool and start_dt and end_dt:
-                            pub_dt = parse_fb_time_string(post_data.get("published_at", ""))
-                            if pub_dt and not in_date_range(pub_dt, start_dt, end_dt):
-                                continue
-                        try:
-                            comments = _extract_comments_from_detail(page, post_data["url"], comment_top_limit)
-                            for c_row in comments:
-                                writer.writerow("评论详情", c_row)
-                                comments_written += 1
-                            if comments:
-                                log_line(log_callback, f"  评论: {len(comments)} 条 → {post_data['url'][:60]}")
-                        except Exception as e:
-                            log_error(log_callback, f"  评论提取失败: {e}")
-                        delay = random.uniform(cooldown_min_val, cooldown_max_val)
-                        interruptible_sleep(delay, stop_event)
+                    # ── 阶段二：评论（仅打开帖子详情页）─────────────────
+                    comments_written = 0
+                    if collect_comments_bool:
+                        for post_data in posts:
+                            if should_stop(stop_event):
+                                break
+                            if wait_if_paused(pause_event, stop_event):
+                                break
+                            # 被时间过滤的帖子也跳过评论
+                            if limit_time_bool and start_dt and end_dt:
+                                pub_dt = parse_fb_time_string(post_data.get("published_at", ""))
+                                if pub_dt and not in_date_range(pub_dt, start_dt, end_dt):
+                                    continue
+                            try:
+                                comments = _extract_comments_from_detail(page, post_data["url"], comment_top_limit)
+                                for c_row in comments:
+                                    writer.writerow("评论详情", c_row)
+                                    comments_written += 1
+                                if comments:
+                                    log_line(log_callback, f"  评论: {len(comments)} 条 → {post_data['url'][:60]}")
+                            except Exception as e:
+                                log_error(log_callback, f"  评论提取失败: {e}")
+                            delay = random.uniform(cooldown_min_val, cooldown_max_val)
+                            interruptible_sleep(delay, stop_event)
 
-                writer.save()
-                msg = f"完成 {profile_url}：帖子 {total_written} 条"
-                if collect_comments_bool:
-                    msg += f"，评论 {comments_written} 条"
-                log_line(log_callback, msg)
-                if finish_callback:
-                    finish_callback(output_path)
-
-            page.close()
-            playwright_context.close()
-            browser.close()
+                    writer.save()
+                    msg = f"完成 {profile_url}：帖子 {total_written} 条"
+                    if collect_comments_bool:
+                        msg += f"，评论 {comments_written} 条"
+                    log_line(log_callback, msg)
+                    if finish_callback:
+                        finish_callback(output_path)
+            finally:
+                if page:
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
+                if playwright_context:
+                    try:
+                        playwright_context.close()
+                    except Exception:
+                        pass
+                if browser:
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
     except Exception as e:
         log_error(log_callback, f"运行异常: {e}")
+        raise e
     finally:
         if finish_callback:
             finish_callback(output_path)

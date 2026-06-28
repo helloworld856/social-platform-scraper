@@ -558,6 +558,7 @@ def run_youtube_video_metrics_spider(api_keys: list[str], txt_path: str, fetch_s
     api_page_size = int(config.get("youtube_api_page_size", 100))
     comment_mode = normalize_comment_mode(config.get("youtube_comment_mode", COMMENT_MODE_FAST))
     comment_workers = normalize_comment_workers(config.get("youtube_comment_workers", DEFAULT_COMMENT_WORKERS))
+    shorts_related_delay = float(config.get("youtube_shorts_related_delay", 1.0))
 
     output_path = None
     completed_path = None
@@ -666,7 +667,7 @@ def run_youtube_video_metrics_spider(api_keys: list[str], txt_path: str, fetch_s
             
             rt, rl = "", ""
             if fetch_shorts_related_bool and detected_type == "Shorts":
-                if interruptible_sleep(1.0, stop_event):
+                if interruptible_sleep(shorts_related_delay, stop_event):
                     break
                 log_line(log_callback, f"  获取 Shorts 关联长视频：{video_id}")
                 from src.platforms.youtube.shorts import fetch_short_related_video

@@ -410,27 +410,75 @@ def run_youtube_paired_context_spider(api_keys: list[str], txt_path: str, log_ca
         output_path = build_output_path("youtube", f"youtube_context_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
         writer = XlsxRowWriter(output_path, OUTPUT_FIELDS)
         client_pool = YouTubeClientPool(api_keys)
-        channel_cache: dict[str, dict] = {}
-        written_count = 0
-        for index, (target_video_url, profile_url) in enumerate(pairs, 1):
+        
+        max_parallel_tabs = int(config.get("max_parallel_tabs", 3)) if config else 3
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        class ThreadSafeDict(dict):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self._lock = threading.Lock()
+            def get(self, key, default=None):
+                with self._lock:
+                    return super().get(key, default)
+            def __setitem__(self, key, value):
+                with self._lock:
+                    super().__setitem__(key, value)
+            def __getitem__(self, key):
+                with self._lock:
+                    return super().__getitem__(key)
+
+        channel_cache = ThreadSafeDict()
+        writer_lock = threading.Lock()
+        log_lock = threading.Lock()
+        written_count = [0]
+
+        def make_thread_log(base_log_callback, lock, prefix):
+            def wrapped(msg):
+                if base_log_callback:
+                    with lock:
+                        base_log_callback(f"[{prefix}] {msg}")
+            return wrapped
+
+        def worker(index, target_video_url, profile_url):
             if should_stop(stop_event):
-                log_line(log_callback, "任务已停止。")
-                break
+                return
             if wait_if_paused(pause_event, stop_event):
-                break
-            log_line(log_callback, f"[{index}/{len(pairs)}] 定位 YouTube 目标视频: {target_video_url}")
+                return
+
+            thread_log = make_thread_log(log_callback, log_lock, f"对 {index}")
+            thread_log(f"定位 YouTube 目标视频: {target_video_url}")
             try:
-                rows = build_pair_rows(client_pool, target_video_url, profile_url, channel_cache, log_callback, stop_event, pause_event, context_size, max_upload_pages, check_video_type_bool)
+                rows = build_pair_rows(client_pool, target_video_url, profile_url, channel_cache, thread_log, stop_event, pause_event, context_size, max_upload_pages, check_video_type_bool)
                 if rows:
-                    writer.writerows(sanitize_csv_rows(rows))
-                    written_count += len(rows)
-                log_line(log_callback, f"  完成：写入 {len(rows)} 条前后视频，累计 {written_count} 条。")
+                    with writer_lock:
+                        writer.writerows(sanitize_csv_rows(rows))
+                        written_count[0] += len(rows)
+                    thread_log(f"完成：写入 {len(rows)} 条前后视频，当前累计 {written_count[0]} 条。")
+                else:
+                    thread_log("未获取到前后视频数据。")
             except HttpError as e:
-                log_error(log_callback, f"  YouTube API 错误：{e}")
+                thread_log(f"[ERROR] YouTube API 错误：{e}")
             except Exception as e:
-                log_error(log_callback, f"  处理失败：{e}")
-        writer.save()
-        if written_count <= 0:
+                thread_log(f"[ERROR] 处理失败：{e}")
+
+        with ThreadPoolExecutor(max_workers=max_parallel_tabs) as executor:
+            futures = [executor.submit(worker, idx, url, p_url) for idx, (url, p_url) in enumerate(pairs, 1)]
+            for future in as_completed(futures):
+                if should_stop(stop_event):
+                    for f in futures:
+                        f.cancel()
+                    break
+                try:
+                    future.result()
+                except Exception as exc:
+                    log_error(log_callback, f"线程执行异常: {exc}")
+
+        with writer_lock:
+            writer.save()
+
+        if written_count[0] <= 0:
             log_warn(log_callback, "没有提取到数据。")
         log_line(log_callback, f"完成，已保存：{output_path}")
     except Exception as exc:

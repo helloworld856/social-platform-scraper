@@ -231,6 +231,107 @@ def collect_tweet_metrics(page, tweet_url: str, page_timeout=None, page_ready_wa
     }
 
 
+def _scrape_single_metric_task(
+    index: int,
+    tweet_url: str,
+    cdp_port_or_url: str,
+    get_comments_bool: bool,
+    scan_limit: int,
+    tweet_comment_top_limit: int,
+    page_load_timeout_val: int,
+    page_ready_wait_val: float,
+    log_callback,
+    stop_event,
+    pause_event,
+    writer,
+    writer_lock,
+    total_urls: int,
+):
+    from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+    from src.core import connect_existing_chromium, interruptible_sleep
+    from src.platforms.x_twitter.tweet_metrics import clean_tweet_url, collect_tweet_metrics
+    from src.platforms.x_twitter.comments import extract_comments
+
+    if should_stop(stop_event):
+        return
+    if wait_if_paused(pause_event, stop_event):
+        return
+
+    normalized_url = clean_tweet_url(tweet_url)
+    row = {
+        "序号": str(index),
+        "推文链接": normalized_url,
+        "推文的内容": "",
+        "浏览量": "",
+        "评论数": "",
+        "点赞量": "",
+        "转发量": "",
+        "标签": "",
+    }
+    log_line(log_callback, f"[{index}/{total_urls}] 读取推文：{normalized_url}")
+
+    browser = None
+    page = None
+    try:
+        with sync_playwright() as playwright:
+            try:
+                browser, context = connect_existing_chromium(playwright, cdp_port_or_url)
+            except Exception as e:
+                log_error(log_callback, f"[{index}/{total_urls}] 连接失败：{e}")
+                return
+
+            page = context.new_page()
+            try:
+                row.update(collect_tweet_metrics(page, normalized_url, page_timeout=page_load_timeout_val, page_ready_wait=page_ready_wait_val, stop_event=stop_event, log_callback=log_callback))
+                
+                if get_comments_bool:
+                    try:
+                        comments = extract_comments(page, normalized_url, scan_limit, log_callback, stop_event, pause_event=pause_event)
+                        comments.sort(key=lambda item: int(item.get("likes", "0") or 0), reverse=True)
+                        comment_rows = []
+                        for comment in comments[:tweet_comment_top_limit]:
+                            comment_row = {
+                                "序号": row["序号"],
+                                "推文链接": normalized_url,
+                                "评论的点赞量": comment.get("likes", ""),
+                                "评论内容": comment.get("content", ""),
+                                "评论发布时间": comment.get("time", "")
+                            }
+                            comment_rows.append(comment_row)
+                        if comment_rows:
+                            with writer_lock:
+                                writer.writerows("评论信息", comment_rows)
+                    except Exception as exc:
+                        log_line(log_callback, f"[{index}/{total_urls}] 提取评论失败：{exc}")
+                        
+            except PlaywrightTimeoutError:
+                log_error(log_callback, f"[{index}/{total_urls}] 页面加载超时，写入空指标行。")
+            except Exception as exc:
+                log_error(log_callback, f"[{index}/{total_urls}] 处理失败，写入空指标行：{exc}")
+
+            with writer_lock:
+                if get_comments_bool:
+                    writer.writerow("推文信息", row)
+                else:
+                    writer.writerow(row)
+                writer.save()
+            log_line(log_callback, f"[{index}/{total_urls}] 完成：已写入。")
+
+    except Exception as exc:
+        log_error(log_callback, f"[{index}/{total_urls}] 异常: {exc}")
+    finally:
+        try:
+            if page and not page.is_closed():
+                page.close()
+        except Exception:
+            pass
+        try:
+            if browser:
+                browser.close()
+        except Exception:
+            pass
+
+
 def run_x_tweet_metrics_spider(
     txt_path: str,
     get_comments_str: str,
@@ -247,13 +348,16 @@ def run_x_tweet_metrics_spider(
     page_load_timeout_val = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
     page_ready_wait_val = float(config.get("page_ready_wait", 2.5))
     tweet_comment_top_limit = int(config.get("comment_top_limit", 100))
-    cooldown_every_val = int(config.get("cooldown_every", COOLDOWN_EVERY))
-    cooldown_min_val = float(config.get("cooldown_min", COOLDOWN_MIN_SECONDS))
-    cooldown_max_val = float(config.get("cooldown_max", COOLDOWN_MAX_SECONDS))
+    max_parallel_tabs = int(config.get("max_parallel_tabs", 3))
 
     completed_path = None
-    page = None
     try:
+        from src.core import ensure_chrome_for_cdp
+        try:
+            ensure_chrome_for_cdp(cdp_port_or_url, log_callback=log_callback)
+        except Exception:
+            pass
+
         if sync_playwright is None:
             log_error(log_callback, "缺少依赖：playwright。请先安装 requirements.txt 中的依赖。")
             return
@@ -269,83 +373,59 @@ def run_x_tweet_metrics_spider(
         output_path = build_output_path("x", f"x_tweet_metrics_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
         if get_comments_bool:
             comment_fields = ["序号", "推文链接", "评论的点赞量", "评论内容", "评论发布时间"]
-            writer = MultiSheetXlsxWriter(output_path, {"推文信息": CSV_FIELDS, "评论信息": comment_fields}, autosave_every=20)
+            writer = MultiSheetXlsxWriter(output_path, {"推文信息": CSV_FIELDS, "评论信息": comment_fields}, autosave_every=500)
         else:
-            writer = XlsxRowWriter(output_path, CSV_FIELDS, autosave_every=20)
+            writer = XlsxRowWriter(output_path, CSV_FIELDS, autosave_every=500)
 
-        with sync_playwright() as playwright:
-            log_line(log_callback, "正在连接本地 Chrome...")
-            try:
-                _, context = connect_existing_chromium(playwright, cdp_port_or_url)
-            except Exception as exc:
-                log_error(log_callback, f"无法连接浏览器：{exc}")
-                log_error(log_callback, "连接失败：请确认 Chrome 已自动打开并已登录 X/Twitter。")
-                return
+        writer_lock = threading.Lock()
+        log_lock = threading.Lock()
 
-            page = context.new_page()
+        def make_thread_safe_log_callback(original_cb, lock):
+            if original_cb is None:
+                return None
+            def safe_cb(msg: str):
+                with lock:
+                    original_cb(msg)
+            return safe_cb
+
+        safe_log_callback = make_thread_safe_log_callback(log_callback, log_lock)
+
+        with ThreadPoolExecutor(max_workers=max_parallel_tabs) as executor:
+            futures = []
             for index, tweet_url in enumerate(tweet_urls, 1):
                 if should_stop(stop_event):
-                    log_line(log_callback, "任务已停止。")
                     break
                 if wait_if_paused(pause_event, stop_event):
                     break
+                futures.append(
+                    executor.submit(
+                        _scrape_single_metric_task,
+                        index=index,
+                        tweet_url=tweet_url,
+                        cdp_port_or_url=cdp_port_or_url,
+                        get_comments_bool=get_comments_bool,
+                        scan_limit=scan_limit,
+                        tweet_comment_top_limit=tweet_comment_top_limit,
+                        page_load_timeout_val=page_load_timeout_val,
+                        page_ready_wait_val=page_ready_wait_val,
+                        log_callback=safe_log_callback,
+                        stop_event=stop_event,
+                        pause_event=pause_event,
+                        writer=writer,
+                        writer_lock=writer_lock,
+                        total_urls=len(tweet_urls),
+                    )
+                )
 
-                normalized_url = clean_tweet_url(tweet_url)
-                row = {
-                    "序号": str(index),
-                    "推文链接": normalized_url,
-                    "推文的内容": "",
-                    "浏览量": "",
-                    "评论数": "",
-                    "点赞量": "",
-                    "转发量": "",
-                    "标签": "",
-                }
-                log_line(log_callback, f"[{index}/{len(tweet_urls)}] 读取推文：{normalized_url}")
+            for future in as_completed(futures):
                 try:
-                    row.update(collect_tweet_metrics(page, normalized_url, page_timeout=page_load_timeout_val, page_ready_wait=page_ready_wait_val, stop_event=stop_event, log_callback=log_callback))
-                    
-                    if get_comments_bool:
-                        try:
-                            comments = extract_comments(page, normalized_url, scan_limit, log_callback, stop_event, pause_event=pause_event)
-                            comments.sort(key=lambda item: int(item.get("likes", "0") or 0), reverse=True)
-                            for comment in comments[:tweet_comment_top_limit]:
-                                comment_row = {
-                                    "序号": row["序号"],
-                                    "推文链接": normalized_url,
-                                    "评论的点赞量": comment.get("likes", ""),
-                                    "评论内容": comment.get("content", ""),
-                                    "评论发布时间": comment.get("time", "")
-                                }
-                                writer.writerow("评论信息", comment_row)
-                        except Exception as exc:
-                            log_line(log_callback, f"  提取评论失败：{exc}")
-                            
-                except PlaywrightTimeoutError:
-                    log_error(log_callback, "  页面加载超时，写入空指标行。")
+                    future.result()
                 except Exception as exc:
-                    log_error(log_callback, f"  处理失败，写入空指标行：{exc}")
-
-                if get_comments_bool:
-                    writer.writerow("推文信息", row)
-                else:
-                    writer.writerow(row)
-                log_line(log_callback, "  完成：已写入。")
-                if index < len(tweet_urls) and index % cooldown_every_val == 0:
-                    if random_cooldown(log_callback, stop_event, cooldown_min_val, cooldown_max_val):
-                        break
-
-            if page and not page.is_closed():
-                page.close()
+                    log_error(safe_log_callback, f"线程执行异常: {exc}")
 
         completed_path = output_path
         writer.save()
         log_line(log_callback, f"完成，已保存：{output_path}")
     finally:
-        try:
-            if page and not page.is_closed():
-                page.close()
-        except Exception:
-            pass
         if finish_callback:
             finish_callback(completed_path)

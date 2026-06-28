@@ -400,17 +400,146 @@ def update_writer_row(writer: XlsxRowWriter, row_number: int, record: dict, fiel
         writer.worksheet.cell(row=row_number, column=column_number).value = sanitize_xlsx_cell(row.get(field, ""))
     writer.save()
 
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+def _scrape_single_profile_task(
+    index: int,
+    link: str,
+    is_profile_mode: bool,
+    cdp_port_or_url: str,
+    page_load_timeout: int,
+    tweet_ready_timeout: int,
+    log_callback,
+    stop_event,
+    pause_event,
+    writer,
+    writer_lock,
+    best_by_author,
+    row_by_author,
+    output_fields,
+    total_links: int,
+    cooldown_every: int = 3,
+    cooldown_min: float = 4.0,
+    cooldown_max: float = 9.0,
+    completed_state: dict = None,
+):
+    from playwright.sync_api import sync_playwright
+    from src.core import connect_existing_chromium, interruptible_sleep
+    import random
+    from src.platforms.x_twitter.profiles import (
+        extract_profile_record,
+        extract_tweet_author_record,
+        output_row,
+        update_writer_row,
+    )
+
+    if should_stop(stop_event):
+        return
+    if wait_if_paused(pause_event, stop_event):
+        return
+
+    browser = None
+    tweet_page = None
+    profile_page = None
+
+    try:
+        with sync_playwright() as playwright:
+            try:
+                browser, context = connect_existing_chromium(playwright, cdp_port_or_url)
+            except Exception as e:
+                log_error(log_callback, f"[{index}/{total_links}] 连接失败：{e}")
+                return
+
+            tweet_page = context.new_page() if not is_profile_mode else None
+            profile_page = context.new_page()
+
+            if is_profile_mode:
+                log_line(log_callback, f"[{index}/{total_links}] 处理博主链接：{link}")
+                record = extract_profile_record(profile_page, link, log_callback, page_timeout=page_load_timeout, stop_event=stop_event)
+            else:
+                log_line(log_callback, f"[{index}/{total_links}] 处理推文：{link}")
+                record = extract_tweet_author_record(tweet_page, profile_page, link, log_callback, page_timeout=page_load_timeout, tweet_ready_timeout=tweet_ready_timeout, stop_event=stop_event)
+
+            if not record:
+                return
+
+            with writer_lock:
+                account_key = record["账号ID"].lower()
+                old_record = best_by_author.get(account_key)
+                if old_record is None:
+                    writer.writerow(output_row(record, output_fields))
+                    best_by_author[account_key] = record
+                    row_by_author[account_key] = writer.worksheet.max_row
+                    
+                    # Update '序号' to be globally sequential
+                    seq_num = len(best_by_author)
+                    writer.worksheet.cell(row=row_by_author[account_key], column=1).value = str(seq_num)
+                    record["序号"] = str(seq_num)
+                    
+                    if is_profile_mode:
+                        log_line(log_callback, f"  写入作者 {account_key or '未知'}。")
+                    else:
+                        log_line(log_callback, f"  写入作者 {account_key or '未知'}，当前推文浏览量 {record.get('_view_text') or '未知'}。")
+                elif not is_profile_mode and record["_view_value"] > old_record.get("_view_value", 0):
+                    best_by_author[account_key] = record
+                    record["序号"] = old_record.get("序号", "")
+                    update_writer_row(writer, row_by_author[account_key], record, output_fields)
+                    log_line(log_callback, 
+                        f"  更新作者 {record['账号ID']}：更高浏览量 {record.get('_view_text') or '未知'}。"
+                    )
+                else:
+                    if is_profile_mode:
+                        log_line(log_callback, f"  跳过：作者 {record['账号ID']} 已处理过。")
+                    else:
+                        log_line(log_callback, f"  跳过：作者 {record['账号ID']} 已有更高浏览量推文。")
+                writer.save()
+
+    except Exception as exc:
+        log_error(log_callback, f"[{index}/{total_links}] 异常: {exc}")
+    finally:
+        for opened_page in (tweet_page, profile_page):
+            try:
+                if opened_page is not None and not opened_page.is_closed():
+                    opened_page.close()
+            except Exception:
+                pass
+        try:
+            if browser:
+                browser.close()
+        except Exception:
+            pass
+
+        # Cooldown logic
+        if completed_state is not None:
+            with completed_state["lock"]:
+                completed_state["count"] += 1
+                current_completed = completed_state["count"]
+
+            if current_completed % cooldown_every == 0 and current_completed < total_links:
+                cooldown_time = random.uniform(cooldown_min, cooldown_max)
+                log_line(log_callback, f"已处理 {current_completed} 个链接，触发批量冷却，休眠 {cooldown_time:.1f} 秒...")
+                interruptible_sleep(cooldown_time, stop_event)
+
 def run_scraper(txt_path: str, input_mode: str, cdp_port_or_url: str, log_callback, finish_callback, stop_event=None, config=None, pause_event=None):
     if config is None:
         config = {}
     page_load_timeout = int(config.get("page_load_timeout", PAGE_LOAD_TIMEOUT))
     tweet_ready_timeout = int(config.get("tweet_ready_timeout", TWEET_READY_TIMEOUT))
-    cooldown_min = float(config.get("cooldown_min", 2.0))
-    cooldown_max = float(config.get("cooldown_max", 5.0))
-    cooldown_every_val = int(config.get("cooldown_every", 5))
+    max_parallel_tabs = int(config.get("max_parallel_tabs", 3))
+
+    cooldown_every = int(config.get("cooldown_every", 3))
+    cooldown_min = float(config.get("cooldown_min", 4.0))
+    cooldown_max = float(config.get("cooldown_max", 9.0))
 
     output_path = None
     try:
+        from src.core import ensure_chrome_for_cdp
+        try:
+            ensure_chrome_for_cdp(cdp_port_or_url, log_callback=log_callback)
+        except Exception:
+            pass
+
         is_profile_mode = input_mode == "博主链接"
         
         if is_profile_mode:
@@ -426,75 +555,73 @@ def run_scraper(txt_path: str, input_mode: str, cdp_port_or_url: str, log_callba
                 log_warn(log_callback, "TXT 中没有有效的推文链接。")
                 return
 
-        with sync_playwright() as p:
-            log_line(log_callback, "正在连接本地 Chrome...")
-            try:
-                _, context = connect_existing_chromium(p, cdp_port_or_url)
-            except Exception as e:
-                log_error(log_callback, f"连接失败：请确认 Chrome 已自动打开并已登录 X/Twitter。错误：{e}")
-                return
+        output_path = build_output_path("x", f"x_profiles_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
+        writer = XlsxRowWriter(output_path, output_fields)
+        best_by_author: dict[str, dict] = {}
+        row_by_author: dict[str, int] = {}
 
-            tweet_page = context.new_page() if not is_profile_mode else None
-            profile_page = context.new_page()
-            output_path = build_output_path("x", f"x_profiles_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
-            writer = XlsxRowWriter(output_path, output_fields)
-            best_by_author: dict[str, dict] = {}
-            row_by_author: dict[str, int] = {}
-            written_count = 0
+        writer_lock = threading.Lock()
+        log_lock = threading.Lock()
 
+        def make_thread_safe_log_callback(original_cb, lock):
+            if original_cb is None:
+                return None
+            def safe_cb(msg: str):
+                with lock:
+                    original_cb(msg)
+            return safe_cb
+
+        safe_log_callback = make_thread_safe_log_callback(log_callback, log_lock)
+
+        completed_state = {
+            "count": 0,
+            "lock": threading.Lock()
+        }
+
+        with ThreadPoolExecutor(max_workers=max_parallel_tabs) as executor:
+            futures = []
             for index, link in enumerate(links, 1):
                 if should_stop(stop_event):
-                    log_line(log_callback, "任务已停止。")
                     break
                 if wait_if_paused(pause_event, stop_event):
                     break
-                
-                if is_profile_mode:
-                    log_line(log_callback, f"[{index}/{len(links)}] 处理博主链接：{link}")
-                    record = extract_profile_record(profile_page, link, log_callback, page_timeout=page_load_timeout, stop_event=stop_event)
-                else:
-                    log_line(log_callback, f"[{index}/{len(links)}] 处理推文：{link}")
-                    record = extract_tweet_author_record(tweet_page, profile_page, link, log_callback, page_timeout=page_load_timeout, tweet_ready_timeout=tweet_ready_timeout, stop_event=stop_event)
-                
-                if not record:
-                    continue
-
-                account_key = record["账号ID"].lower()
-                old_record = best_by_author.get(account_key)
-                if old_record is None:
-                    writer.writerow(output_row(record, output_fields))
-                    best_by_author[account_key] = record
-                    row_by_author[account_key] = writer.worksheet.max_row
-                    written_count += 1
-                    if is_profile_mode:
-                        log_line(log_callback, f"  写入作者 {account_key or '未知'}。")
-                    else:
-                        log_line(log_callback, f"  写入作者 {account_key or '未知'}，当前推文浏览量 {record.get('_view_text') or '未知'}。")
-                elif not is_profile_mode and record["_view_value"] > old_record.get("_view_value", 0):
-                    best_by_author[account_key] = record
-                    update_writer_row(writer, row_by_author[account_key], record, output_fields)
-                    log_line(log_callback, 
-                        f"  更新作者 {record['账号ID']}：更高浏览量 {record.get('_view_text') or '未知'}。"
+                futures.append(
+                    executor.submit(
+                        _scrape_single_profile_task,
+                        index=index,
+                        link=link,
+                        is_profile_mode=is_profile_mode,
+                        cdp_port_or_url=cdp_port_or_url,
+                        page_load_timeout=page_load_timeout,
+                        tweet_ready_timeout=tweet_ready_timeout,
+                        log_callback=safe_log_callback,
+                        stop_event=stop_event,
+                        pause_event=pause_event,
+                        writer=writer,
+                        writer_lock=writer_lock,
+                        best_by_author=best_by_author,
+                        row_by_author=row_by_author,
+                        output_fields=output_fields,
+                        total_links=len(links),
+                        cooldown_every=cooldown_every,
+                        cooldown_min=cooldown_min,
+                        cooldown_max=cooldown_max,
+                        completed_state=completed_state,
                     )
-                else:
-                    if is_profile_mode:
-                        log_line(log_callback, f"  跳过：作者 {record['账号ID']} 已处理过。")
-                    else:
-                        log_line(log_callback, f"  跳过：作者 {record['账号ID']} 已有更高浏览量推文。")
-                
-                # 按配置的冷却间隔应用随机休眠
-                if index % cooldown_every_val == 0:
-                    if random_cooldown(log_callback, stop_event, cooldown_min, cooldown_max):
-                        break
+                )
 
-            for opened_page in (tweet_page, profile_page):
-                if opened_page is not None and not opened_page.is_closed():
-                    opened_page.close()
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as exc:
+                    log_error(safe_log_callback, f"线程执行异常: {exc}")
 
         if not output_path:
-            log_warn(log_callback, "没有提取到可输出的数据。")
+            log_warn(safe_log_callback, "没有提取到可输出的数据。")
             return
-        writer.save()
-        log_line(log_callback, f"完成，已保存：{output_path}")
+            
+        with writer_lock:
+            writer.save()
+        log_line(safe_log_callback, f"完成，已保存：{output_path}")
     finally:
         finish_callback(output_path)
