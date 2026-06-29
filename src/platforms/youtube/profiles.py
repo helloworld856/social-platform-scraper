@@ -7,173 +7,236 @@
 
 from __future__ import annotations
 
-import time
+import os
+from pathlib import Path
 from urllib.parse import urlparse
-
-from src.platforms.youtube.keyword import YouTubeClientPool, execute_with_retry
 from googleapiclient.errors import HttpError
 
-from src.core import XlsxRowWriter, build_output_path, log_error, log_line, log_warn, sanitize_csv_row, should_stop, wait_if_paused
+from src.core import (
+    ArtifactRef,
+    RunError,
+    RunOutcome,
+    RunStatus,
+    XlsxRowWriter,
+    build_run_output_dir,
+    generate_run_id,
+    log_error,
+    log_line,
+    sanitize_csv_row,
+    should_stop,
+    wait_if_paused,
+)
+from src.platforms.youtube.keyword import YouTubeClientPool, execute_with_retry
 
-# Excel 输出表头定义
-CSV_FIELDS = ["作者主页链接", "作者名称", "作者ID", "粉丝量", "作者简介"]
+# Excel 输出表头与诊断字段定义
+CSV_FIELDS = [
+    "输入链接", "作者主页链接", "作者名称", "作者ID", "粉丝量", "作者简介",
+    "input_url", "normalized_url", "resolution_method", "resolved_channel_id", "resolution_status", "error_code", "error_message"
+]
 
-def normalize_youtube_url(url: str) -> str:
-    """归一化 YouTube URL 链接，清除 Query 参数和锚点。
 
-    Args:
-        url: 原始 URL。
+def validate_and_normalize_youtube_url(url: str) -> tuple[str, str, str]:
+    """严格验证并归一化 YouTube 频道主页 URL。
 
-    Returns:
-        str: 规整后的标准 URL。
-    """
-    value = (url or "").strip()
-    if not value:
-        return ""
-    if value.startswith("//"):
-        return "https:" + value
-    if not value.startswith("http"):
-        return "https://" + value
-    return value.split("?")[0].split("#")[0].rstrip("/")
-
-def parse_channel_url(url: str) -> tuple[str, str]:
-    """解析 YouTube 频道 URL 类型，提取对应的特征识别值。
-
-    支持以下频道链接格式：
-    - ID 模式: youtube.com/channel/UC... (返回 UC...)
-    - 用户名模式: youtube.com/user/username (返回 username)
-    - 唯一标识模式: youtube.com/@handle (返回 @handle)
-    - 自定义/短链接模式: youtube.com/c/custom_name (返回 custom_name)
-
-    Args:
-        url: 频道的 URL。
+    仅接受标准域名且路径为 /channel/<id>, /@<handle>, 或 /user/<name> 的主页链接。
+    拒绝伪造域名、纯域名、视频、播放列表及不可直接验证的自定义别名 /c/ 路径。
 
     Returns:
-        tuple[str, str]: (识别键类型, 特征识别值)。
+        tuple[str, str, str]: (标准化URL, 解析方式, 识别特征值)。
     """
-    normalized = normalize_youtube_url(url)
-    parsed = urlparse(normalized)
-    parts = [part for part in parsed.path.split("/") if part]
+    raw_url = (url or "").strip()
+    if not raw_url:
+        raise ValueError("invalid_url: URL为空")
+
+    if raw_url.startswith("//"):
+        url_to_parse = "https:" + raw_url
+    elif not raw_url.startswith("http"):
+        url_to_parse = "https://" + raw_url
+    else:
+        url_to_parse = raw_url
+
+    try:
+        parsed = urlparse(url_to_parse)
+    except Exception as exc:
+        raise ValueError(f"invalid_url: URL解析异常: {exc}")
+
+    netloc = parsed.netloc.lower()
+    if not netloc:
+        raise ValueError("invalid_url: 缺少域名标识")
+
+    # 1. 域名校验：必须为 youtube.com 或以 .youtube.com 结尾，排除 youtu.be 或伪造域名
+    if netloc != "youtube.com" and not netloc.endswith(".youtube.com"):
+        raise ValueError(f"invalid_url: 不支持的域名 {netloc}")
+
+    path = parsed.path.rstrip("/")
+    if not path or path == "/":
+        raise ValueError("invalid_url: 仅包含域名，无有效路径")
+
+    parts = [p for p in path.split("/") if p]
     if not parts:
-        return "", ""
+        raise ValueError("invalid_url: 仅包含域名，无有效路径")
 
-    first = parts[0]
-    if first == "channel" and len(parts) >= 2:
-        return "id", parts[1]
-    if first == "user" and len(parts) >= 2:
-        return "username", parts[1]
-    if first.startswith("@"):
-        return "handle", first
-    if first in {"c", "custom"} and len(parts) >= 2:
-        return "search", parts[1]
-    return "search", first.lstrip("@")
+    # 2. 过滤不支持的视频、播放列表或短视频等资源链接
+    if parts[0] in {"watch", "playlist", "shorts", "embed", "v", "shared"}:
+        raise ValueError(f"invalid_url: 不支持的资源链接类型 {parts[0]}")
 
-def resolve_channel(client_pool, profile_url: str) -> dict:
+    # 3. /channel/<channel_id> 路径校验
+    if parts[0] == "channel":
+        if len(parts) < 2 or not parts[1].strip():
+            raise ValueError("invalid_url: 缺失 channel_id")
+        channel_id = parts[1].strip()
+        if not channel_id.startswith("UC"):
+            raise ValueError("invalid_url: channel_id 格式不符合 UC... 规范")
+        return f"https://www.youtube.com/channel/{channel_id}", "channel_id", channel_id
+
+    # 4. /@<handle> 路径校验
+    if parts[0].startswith("@"):
+        handle = parts[0].strip()
+        if len(handle) < 2:
+            raise ValueError("invalid_url: handle 标识不完整")
+        return f"https://www.youtube.com/channel/{handle}", "handle", handle
+
+    # 5. /user/<username> 路径校验
+    if parts[0] == "user":
+        if len(parts) < 2 or not parts[1].strip():
+            raise ValueError("invalid_url: 缺失 username")
+        username = parts[1].strip()
+        return f"https://www.youtube.com/user/{username}", "username", username
+
+    # 6. 拒绝 /c/ 或 custom 别名等不可验证或需二次搜索路径
+    if parts[0] in {"c", "custom"}:
+        raise ValueError(f"invalid_url: 不支持自定义别名 /c/ 或 /custom/ 路径: {parts[0]}")
+
+    raise ValueError("invalid_url: 未知的 YouTube 路径格式，无法直接解析")
+
+
+def classify_api_error(exc: Exception) -> str:
+    """将 API 请求异常归类为具体的标准错误标识代码。"""
+    if isinstance(exc, HttpError):
+        status = exc.resp.status
+        content = exc.content.decode("utf-8", errors="ignore") if exc.content else ""
+        if status in [403, 429]:
+            if "quota" in content.lower() or "limit" in content.lower():
+                return "quota_exhausted"
+            return "forbidden_resource"
+        if status in [400, 401]:
+            return "auth_invalid"
+        if status == 404:
+            return "not_found"
+        if status >= 500:
+            return "transient_network"
+        return "unknown"
+
+    exc_str = str(exc).lower()
+    if "timeout" in exc_str or "connection" in exc_str or "http" in exc_str:
+        return "transient_network"
+    return "unknown"
+
+
+def resolve_channel(client_pool: YouTubeClientPool, normalized_url: str, hint_type: str, hint_value: str) -> dict:
     """调用 YouTube API 解析并获取频道的原始元数据。
-
-    根据 URL 特征匹配调用相应的 API 参数（id / forUsername / forHandle）；
-    若非标准结构则采用搜索 API 进行模糊检索定位。
 
     Args:
         client_pool: YouTubeClientPool 实例。
-        profile_url: 频道的 URL。
+        normalized_url: 标准化的主页。
+        hint_type: 识别类型 (channel_id / handle / username)。
+        hint_value: 对应的特征键值。
 
     Returns:
         dict: API 返回的频道元数据字典，若未找到则返回空字典。
     """
-    hint_type, hint_value = parse_channel_url(profile_url)
-    if not hint_value:
-        return {}
-
     def _execute_req(build_req):
         while True:
             try:
                 return execute_with_retry(build_req(), None)
             except HttpError as e:
-                if e.resp.status in [403, 429]:
+                err_code = classify_api_error(e)
+                # 只有可确认的配额或认证错误才允许 Key 轮换
+                if err_code in ["quota_exhausted", "auth_invalid"]:
                     if client_pool.next_client():
                         continue
                 raise e
 
-    if hint_type == "id":
+    if hint_type == "channel_id":
         response = _execute_req(lambda: client_pool.client.channels().list(part="snippet,statistics", id=hint_value))
     elif hint_type == "username":
         response = _execute_req(lambda: client_pool.client.channels().list(part="snippet,statistics", forUsername=hint_value))
     elif hint_type == "handle":
         response = _execute_req(lambda: client_pool.client.channels().list(part="snippet,statistics", forHandle=hint_value))
     else:
-        # 针对自定义别名等非标准路径进行频道搜索
-        search_response = _execute_req(lambda: client_pool.client.search().list(
-            part="id",
-            q=hint_value,
-            type="channel",
-            maxResults=1,
-        ))
-        items = search_response.get("items", [])
-        if not items:
-            return {}
-        channel_id = items[0].get("id", {}).get("channelId", "")
-        if not channel_id:
-            return {}
-        response = _execute_req(lambda: client_pool.client.channels().list(part="snippet,statistics", id=channel_id))
+        return {}
 
     items = response.get("items", [])
     return items[0] if items else {}
 
+
 def channel_row(profile_url: str, item: dict) -> dict:
-    """提取频道元数据字典为符合保存格式的规范字典。
-
-    Args:
-        profile_url: 作者的主页原始 URL。
-        item: API 返回的频道原始字典。
-
-    Returns:
-        dict: 清洗规范化后的导出数据行。
-    """
+    """提取频道元数据字典为符合保存格式的规范字典。"""
     snippet = item.get("snippet", {})
     stats = item.get("statistics", {})
     channel_id = item.get("id", "")
     description = (snippet.get("description") or "").replace("\n", " | ").replace("\r", "").strip()
     return {
-        "作者主页链接": normalize_youtube_url(profile_url),
+        "作者主页链接": profile_url,
         "作者名称": snippet.get("title", ""),
         "作者ID": channel_id,
         "粉丝量": stats.get("subscriberCount", "已隐藏"),
         "作者简介": description,
     }
 
-def run_channel_spider(api_keys: list[str], txt_file_path, log_callback, finish_callback, stop_event=None, config=None, pause_event=None):
+
+def run_channel_spider(
+    api_keys: list[str],
+    txt_file_path,
+    log_callback,
+    finish_callback,
+    stop_event=None,
+    config=None,
+    pause_event=None,
+) -> RunOutcome:
     """运行 YouTube 频道/博主元数据获取任务的驱动入口函数。
 
-    Args:
-        api_key: YouTube API 密钥。
-        txt_file_path: 存放作者主页链接的 TXT 文件路径。
-        log_callback: 运行状态日志回调函数。
-        finish_callback: 结束任务时的回调函数，接收导出的文件路径作为参数。
-        stop_event: 线程停止事件信号。
-        config: 任务参数配置字典。
-        pause_event: 线程暂停事件信号。
+    每次执行在 output/youtube_profiles/<run_id>/ 目录下生成独立产物与报告。
     """
-    output_path = None
+    import threading
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    actual_run_id = generate_run_id()
+    run_dir = build_run_output_dir("youtube_profiles", actual_run_id)
+    final_xlsx_path = run_dir / "youtube_profiles.xlsx"
+    final_report_path = run_dir / "youtube_profiles_report.json"
+
+    outcome = RunOutcome(
+        run_id=actual_run_id,
+        tool_id="youtube_profiles",
+        status=RunStatus.SUCCEEDED,
+    )
+
     try:
+        if not os.path.exists(txt_file_path):
+            raise FileNotFoundError(f"输入文件 {txt_file_path} 不存在")
+
         with open(txt_file_path, "r", encoding="utf-8-sig") as f:
-            profile_urls = [normalize_youtube_url(line.strip()) for line in f if line.strip() and not line.strip().startswith("#")]
+            profile_urls = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
 
-        profile_urls = [url for url in profile_urls if "youtube.com" in url or "youtu.be" in url]
+        outcome.stats.input_count = len(profile_urls)
+
         if not profile_urls:
-            log_warn(log_callback, "TXT 中没有有效的 YouTube 作者主页链接。")
-            return
+            outcome.status = RunStatus.FAILED
+            outcome.errors.append(RunError(code="invalid_url", message="TXT 输入文件中没有发现任何博主链接。"))
+            outcome.save_to_json(final_report_path)
+            finish_callback(outcome)
+            return outcome
 
-        # 实例化 YouTube V3 API 服务客户端
+        # 实例化 YouTube V3 API 服务客户端池
         client_pool = YouTubeClientPool(api_keys)
-        output_path = build_output_path("youtube", f"youtube_profiles_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
 
         max_parallel_tabs = int(config.get("max_parallel_tabs", 3)) if config else 3
-        writer = XlsxRowWriter(output_path, CSV_FIELDS)
-        import threading
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        writer = XlsxRowWriter(str(final_xlsx_path), CSV_FIELDS)
+
         writer_lock = threading.Lock()
         log_lock = threading.Lock()
+        stats_lock = threading.Lock()
 
         def make_thread_log(base_log_callback, lock, prefix):
             def wrapped(msg):
@@ -182,37 +245,116 @@ def run_channel_spider(api_keys: list[str], txt_file_path, log_callback, finish_
                         base_log_callback(f"[{prefix}] {msg}")
             return wrapped
 
-        def worker(index, profile_url):
+        def worker(index, input_url):
             if should_stop(stop_event):
                 return
-            if wait_if_paused(pause_event, stop_event):
-                return
+            wait_if_paused(pause_event, stop_event)
 
             thread_log = make_thread_log(log_callback, log_lock, f"通道 {index}")
-            thread_log(f"开始解析作者：{profile_url}")
+            thread_log(f"开始解析作者：{input_url}")
+
+            norm_url = ""
+            res_method = ""
+            res_val = ""
+            resolved_id = ""
+            res_status = "failed"
+            err_code = ""
+            err_msg = ""
+
             try:
-                item = resolve_channel(client_pool, profile_url)
+                # 1. 本地合法性校验
+                norm_url, res_method, res_val = validate_and_normalize_youtube_url(input_url)
+
+                # 2. 获取 API 结果
+                item = resolve_channel(client_pool, norm_url, res_method, res_val)
                 if not item:
-                    thread_log("[WARN] 未找到作者信息")
-                    with writer_lock:
-                        writer.writerow(
-                            sanitize_csv_row({
-                                "作者主页链接": profile_url,
-                                "作者名称": "未找到",
-                                "作者ID": "",
-                                "粉丝量": "",
-                                "作者简介": "",
-                            })
-                        )
-                    return
+                    raise ValueError("not_found: 频道在 YouTube 官方平台不存在或已被删除")
 
-                row = channel_row(profile_url, item)
+                row = channel_row(norm_url, item)
+                resolved_id = row["作者ID"]
+                res_status = "success"
+
                 with writer_lock:
-                    writer.writerow(sanitize_csv_row(row))
+                    writer.writerow(
+                        sanitize_csv_row({
+                            "输入链接": input_url,
+                            "作者主页链接": norm_url,
+                            "作者名称": row["作者名称"],
+                            "作者ID": resolved_id,
+                            "粉丝量": row["粉丝量"],
+                            "作者简介": row["作者简介"],
+                            "input_url": input_url,
+                            "normalized_url": norm_url,
+                            "resolution_method": res_method,
+                            "resolved_channel_id": resolved_id,
+                            "resolution_status": res_status,
+                            "error_code": "",
+                            "error_message": "",
+                        })
+                    )
                 thread_log(f"成功：{row['作者名称']} | 粉丝量：{row['粉丝量']}")
-            except Exception as exc:
-                thread_log(f"[WARN] 解析失败：{exc}")
+                with stats_lock:
+                    outcome.stats.success_count += 1
 
+            except ValueError as ve:
+                err_msg = str(ve)
+                if ":" in err_msg:
+                    parts = err_msg.split(":", 1)
+                    err_code = parts[0].strip()
+                    err_msg = parts[1].strip()
+                else:
+                    err_code = "invalid_url"
+
+                thread_log(f"[WARN] 解析失败 ({err_code})：{err_msg}")
+                with writer_lock:
+                    writer.writerow(
+                        sanitize_csv_row({
+                            "输入链接": input_url,
+                            "作者主页链接": "",
+                            "作者名称": "未找到",
+                            "作者ID": "",
+                            "粉丝量": "",
+                            "作者简介": "",
+                            "input_url": input_url,
+                            "normalized_url": "",
+                            "resolution_method": "",
+                            "resolved_channel_id": "",
+                            "resolution_status": "failed",
+                            "error_code": err_code,
+                            "error_message": err_msg,
+                        })
+                    )
+                with stats_lock:
+                    outcome.stats.failed_count += 1
+                    outcome.errors.append(RunError(code=err_code, message=err_msg, item=input_url))
+
+            except Exception as exc:
+                err_code = classify_api_error(exc)
+                err_msg = str(exc)
+                thread_log(f"[WARN] 请求异常 ({err_code})：{err_msg}")
+                with writer_lock:
+                    writer.writerow(
+                        sanitize_csv_row({
+                            "输入链接": input_url,
+                            "作者主页链接": "",
+                            "作者名称": "未找到",
+                            "作者ID": "",
+                            "粉丝量": "",
+                            "作者简介": "",
+                            "input_url": input_url,
+                            "normalized_url": "",
+                            "resolution_method": "",
+                            "resolved_channel_id": "",
+                            "resolution_status": "failed",
+                            "error_code": err_code,
+                            "error_message": err_msg,
+                        })
+                    )
+                with stats_lock:
+                    outcome.stats.failed_count += 1
+                    outcome.errors.append(RunError(code=err_code, message=err_msg, item=input_url))
+
+        # 并发跑任务
         with ThreadPoolExecutor(max_workers=max_parallel_tabs) as executor:
             futures = [executor.submit(worker, idx, url) for idx, url in enumerate(profile_urls, 1)]
             for future in as_completed(futures):
@@ -223,14 +365,45 @@ def run_channel_spider(api_keys: list[str], txt_file_path, log_callback, finish_
                 try:
                     future.result()
                 except Exception as exc:
-                    log_error(log_callback, f"线程执行异常: {exc}")
+                    log_error(log_callback, f"线程执行抛错: {exc}")
 
-        with writer_lock:
-            writer.save()
+        # 主动落盘
+        writer.save()
 
-        log_line(log_callback, f"完成，已保存：{output_path}")
+        # 中断状态判别
+        if should_stop(stop_event):
+            outcome.status = RunStatus.CANCELLED
+            outcome.errors.append(RunError(code="RUN_CANCELLED", message="博主采集任务被用户中止"))
+            # 若无有效数据，删除半成品 XLSX 文件
+            if outcome.stats.success_count == 0:
+                Path(final_xlsx_path).unlink(missing_ok=True)
+            outcome.save_to_json(final_report_path)
+            finish_callback(outcome)
+            return outcome
+
+        # 根据最终统计更新终态
+        if outcome.stats.success_count == 0:
+            outcome.status = RunStatus.FAILED
+            outcome.errors.append(RunError(code="not_found", message="没有找到任何有效的博主信息"))
+            Path(final_xlsx_path).unlink(missing_ok=True)
+        elif outcome.stats.failed_count > 0:
+            outcome.status = RunStatus.PARTIAL
+            outcome.output_path = str(final_xlsx_path)
+            outcome.artifacts.append(ArtifactRef(path=str(final_xlsx_path), label="YouTube博主信息数据"))
+        else:
+            outcome.status = RunStatus.SUCCEEDED
+            outcome.output_path = str(final_xlsx_path)
+            outcome.artifacts.append(ArtifactRef(path=str(final_xlsx_path), label="YouTube博主信息数据"))
+
+        outcome.save_to_json(final_report_path)
+        outcome.artifacts.append(ArtifactRef(path=str(final_report_path), label="任务执行报告"))
+        log_line(log_callback, f"完成，执行报告与结果已保存，RunID: {actual_run_id}")
+
     except Exception as exc:
-        log_error(log_callback, f"运行失败：{exc}")
-        output_path = None
-    finally:
-        finish_callback(output_path)
+        outcome.status = RunStatus.FAILED
+        outcome.errors.append(RunError(code="unknown", message=str(exc)))
+        outcome.save_to_json(final_report_path)
+        log_error(log_callback, f"运行发生异常崩溃：{exc}")
+
+    finish_callback(outcome)
+    return outcome
