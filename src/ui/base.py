@@ -522,6 +522,41 @@ class SimpleToolWindow(QWidget):
     def _finish_success(self, output_path) -> None:
         """主线程槽：处理线程完美退出，恢复按钮状态并弹窗通告。"""
         self._set_state("idle")
+        
+        # 本地导入以防止循环依赖
+        from src.core.outcome import RunOutcome
+        
+        if isinstance(output_path, RunOutcome):
+            outcome = output_path
+            if outcome.status == "cancelled" or self.stop_event.is_set():
+                self.append_log("已取消：任务已停止，未标记为导出完成。")
+                QMessageBox.warning(self, "已取消", "任务已停止，未标记为导出完成。")
+                return
+
+            main_xlsx = outcome.output_path
+            
+            if outcome.status == "succeeded":
+                msg = f"成功：全部输入已完成。\n\n结果已保存到：\n{main_xlsx}" if main_xlsx else "成功：全部输入已完成。"
+                self.append_log("任务执行成功。")
+                QMessageBox.information(self, "完成", msg)
+            elif outcome.status == "partial":
+                stats = outcome.stats
+                msg = f"部分成功：{stats.success_count}/{stats.input_count} 个输入有效，详见报告。\n\n"
+                if main_xlsx:
+                    msg += f"部分结果已保存到：\n{main_xlsx}\n\n"
+                # 寻找报告文件
+                report_ref = next((a for a in outcome.artifacts if "report" in a.path.lower() or "报告" in a.label), None)
+                if report_ref:
+                    msg += f"报告已保存到：\n{report_ref.path}"
+                self.append_log(f"任务部分成功：{stats.success_count} 成功, {stats.failed_count} 失败, {stats.skipped_count} 跳过")
+                QMessageBox.warning(self, "部分成功", msg)
+            elif outcome.status == "failed":
+                err_msg = "\n".join([f"- {e.code}: {e.message}" for e in outcome.errors[:5]])
+                msg = f"失败：未生成有效结果，详见错误报告。\n\n错误摘要：\n{err_msg}"
+                self.append_log("任务执行失败，无有效结果输出。")
+                QMessageBox.critical(self, "失败", msg)
+            return
+
         if self.stop_event.is_set():
             self.append_log("任务已停止。")
             return
