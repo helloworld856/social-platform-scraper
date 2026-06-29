@@ -8,15 +8,24 @@
 from __future__ import annotations
 
 import argparse
-import time
+import os
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
 
-from src.core import build_output_path, sanitize_xlsx_cell
+from src.core import (
+    ArtifactRef,
+    RunError,
+    RunOutcome,
+    RunStatus,
+    build_run_output_dir,
+    generate_run_id,
+    sanitize_xlsx_cell,
+    should_stop,
+    wait_if_paused,
+)
 
-
-# 平台别名至归一化前缀的映射映射表
+# 平台别名至归一化前缀的映射表
 PLATFORM_PREFIX = {
     "youtube": "youtube",
     "tiktok": "tiktok",
@@ -26,14 +35,7 @@ PLATFORM_PREFIX = {
 
 
 def normalize_platform(platform: str) -> str:
-    """归一化平台标识名称。
-
-    Args:
-        platform: 原始平台名称。
-
-    Returns:
-        str: 映射后的标准前缀（例如 "x"），默认返回 "merged"。
-    """
+    """归一化平台标识名称。"""
     value = (platform or "").strip().lower()
     if value in PLATFORM_PREFIX:
         return PLATFORM_PREFIX[value]
@@ -41,29 +43,17 @@ def normalize_platform(platform: str) -> str:
 
 
 def find_xlsx_files(folder: str | Path, keyword: str, output_file: str | Path | None = None) -> list[Path]:
-    """扫描指定目录下符合名称关键字条件的所有 Excel (.xlsx) 文件，并过滤掉临时文件及输出目标自身。
-
-    Args:
-        folder: 待扫描的目录路径。
-        keyword: 文件名过滤关键字（不区分大小写）。
-        output_file: 正在输出的目标文件路径，若存在则将其排除，防止自循环读写。
-
-    Returns:
-        list[Path]: 排序后的符合条件的 Excel 文件 Path 列表。
-    """
+    """扫描指定目录下符合名称关键字条件的所有 Excel (.xlsx) 文件，并过滤掉临时文件及输出目标自身。"""
     folder_path = Path(folder)
     keyword = (keyword or "").strip().lower()
     output_name = Path(output_file).name.lower() if output_file else ""
     files: list[Path] = []
     for path in sorted(folder_path.glob("*.xlsx")):
         name = path.name.lower()
-        # 1. 过滤掉与输出文件名相同的文件，防止产生重复吞噬
         if output_name and name == output_name:
             continue
-        # 2. 过滤掉 Windows/Excel 临时自动保存文件（如 ~$data.xlsx）
         if path.name.startswith("~$"):
             continue
-        # 3. 过滤掉文件名不含过滤关键字的文件
         if keyword and keyword not in name:
             continue
         files.append(path)
@@ -71,16 +61,8 @@ def find_xlsx_files(folder: str | Path, keyword: str, output_file: str | Path | 
 
 
 def _normalize_headers(raw_headers) -> list[str]:
-    """表头行数据清洗与规范化，去除两端空白，丢弃尾部空单元格。
-
-    Args:
-        raw_headers: 原始表头数据元组或列表。
-
-    Returns:
-        list[str]: 规范化处理后的表头字符串列表。
-    """
+    """表头行数据清洗与规范化，去除两端空白，丢弃尾部空单元格。"""
     headers = [str(value).strip() if value is not None else "" for value in raw_headers]
-    # 从末尾移除可能存在的空字符表头
     while headers and not headers[-1]:
         headers.pop()
     return headers
@@ -91,103 +73,277 @@ def merge_xlsx_files(
     keyword: str = "keyword",
     platform: str = "merged",
     output_file: str | Path | None = None,
-) -> tuple[str, int, int]:
-    """合并指定文件夹下的多个 Excel 文件，对齐表头，维护统一自增序号，防止注入。
+    schema_mode: str = "union_schema",  # "strict" or "union_schema"
+    run_id: str | None = None,
+    stop_event = None,
+    pause_event = None,
+) -> RunOutcome:
+    """合并指定文件夹下的多个 Excel 文件，支持 strict 模式和 union_schema 并集模式。
 
-    支持对不规则表头或缺失“序号”的原始文件进行补全及位置对齐，
-    在写入合并表前对单元格进行安全清洁处理。
+    每次执行在 output/xlsx_merge/<run_id>/ 目录下生成独立产物与 merge_report.json 报告。
 
     Args:
         folder: 源 Excel 文件所在的目录。
         keyword: 文件名包含的关键字，用于定位要合并的子集。
         platform: 对应的平台前缀，作为自动命名时子文件夹与前缀标识。
-        output_file: 可选。指定合并后导出的绝对路径。若空则自动生成。
+        output_file: 可选。指定合并后导出的文件名或完整绝对路径。
+        schema_mode: 合并模式，"strict" 或 "union_schema"。
+        run_id: 任务执行 ID，留空则自动生成。
+        stop_event: 停止事件信号。
+        pause_event: 暂停事件信号。
 
     Returns:
-        tuple[str, int, int]: (最终保存的文件绝对路径, 成功合并的文件总数, 累计合并的有效数据行数)。
+        RunOutcome: 标准化执行结果对象。
     """
     platform_prefix = normalize_platform(platform)
-    output_path = Path(output_file) if output_file else Path(
-        build_output_path(platform_prefix, f"{platform_prefix}_merge_{time.strftime('%Y%m%d_%H%M%S')}.xlsx")
+    actual_run_id = run_id or generate_run_id()
+    run_dir = build_run_output_dir("xlsx_merge", actual_run_id)
+
+    # 确定输出文件名与路径
+    if output_file:
+        dest_name = Path(output_file).name
+    else:
+        dest_name = f"{platform_prefix}_merge.xlsx"
+    final_xlsx_path = run_dir / dest_name
+    final_report_path = run_dir / "merge_report.json"
+
+    outcome = RunOutcome(
+        run_id=actual_run_id,
+        tool_id="xlsx_merge",
+        status=RunStatus.SUCCEEDED,
     )
-    output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    files = find_xlsx_files(folder, keyword, output_path)
+    files = find_xlsx_files(folder, keyword, final_xlsx_path)
+    outcome.stats.input_count = len(files)
+
     if not files:
-        if keyword:
-            raise FileNotFoundError(f"没有找到文件名包含“{keyword}”的 .xlsx 文件")
-        raise FileNotFoundError("没有找到可合并的 .xlsx 文件")
+        outcome.status = RunStatus.FAILED
+        outcome.errors.append(
+            RunError(
+                code="XLSX_FILE_UNREADABLE",
+                message=f"在目录 {folder} 中未找到符合关键字 “{keyword}” 的合并目标文件",
+            )
+        )
+        outcome.save_to_json(final_report_path)
+        return outcome
 
-    output_wb = Workbook()
-    output_ws = output_wb.active
-    output_ws.title = "合并数据"
-
-    headers: list[str] | None = None
-    serial_col_index: int | None = None
-    current_no = 1
-    merged_rows = 0
-    merged_files = 0
+    # ==========================================
+    # Pass 1: 扫描各个文件，校验表头 schema
+    # ==========================================
+    valid_sheets: list[tuple[Path, str, list[str]]] = []
+    base_headers: list[str] | None = None
+    union_headers: list[str] = []
+    union_set: set[str] = set()
 
     for file_path in files:
+        if should_stop(stop_event):
+            break
+
         wb = None
         try:
-            # 开启 read_only=True 与 data_only=True 以最小内存只读方式加速加载公式计算结果值
             wb = load_workbook(file_path, read_only=True, data_only=True)
-            file_row_count = 0
-
             for ws in wb.worksheets:
                 row_iter = ws.iter_rows(values_only=True)
-                source_headers = _normalize_headers(next(row_iter, []))
+                try:
+                    raw_headers = next(row_iter, [])
+                except StopIteration:
+                    raw_headers = []
+                source_headers = _normalize_headers(raw_headers)
+
+                # 空工作表过滤
                 if not source_headers or all(not value for value in source_headers):
+                    outcome.errors.append(
+                        RunError(
+                            code="XLSX_WORKSHEET_EMPTY",
+                            message=f"工作表 {ws.title} 没有有效表头列，跳过该页",
+                            item=str(file_path),
+                        )
+                    )
+                    outcome.stats.skipped_count += 1
                     continue
 
-                # 初始化全局对齐表头
-                if headers is None:
-                    headers = list(source_headers)
-                    if "序号" in headers:
-                        serial_col_index = headers.index("序号")
+                # 重复表头过滤
+                if len(source_headers) != len(set(source_headers)):
+                    outcome.errors.append(
+                        RunError(
+                            code="XLSX_DUPLICATE_HEADER",
+                            message=f"工作表 {ws.title} 包含重复的表头列：{source_headers}，跳过该页",
+                            item=str(file_path),
+                        )
+                    )
+                    outcome.stats.failed_count += 1
+                    continue
+
+                # 初始化基础表头
+                if base_headers is None:
+                    base_headers = list(source_headers)
+                    if "序号" in base_headers:
+                        # 确保“序号”始终放在第一列
+                        union_headers = ["序号"] + [h for h in base_headers if h != "序号"]
                     else:
-                        # 若原始文件无“序号”列，动态在最前方补位加入
-                        headers.insert(0, "序号")
-                        serial_col_index = 0
-                    output_ws.append(headers)
+                        union_headers = ["序号"] + base_headers
+                    union_set = set(union_headers)
 
-                # 构建源文件表头的名称到列索引的哈希映射映射表，以防止列乱序错位
-                source_index = {name: index for index, name in enumerate(source_headers)}
-                for row_values in row_iter:
-                    # 排除全空行
-                    if not row_values or all(value is None or str(value).strip() == "" for value in row_values):
+                # Schema 匹配逻辑
+                if schema_mode == "strict":
+                    # 严格模式：要求列名和顺序完全一致
+                    if source_headers != base_headers:
+                        outcome.errors.append(
+                            RunError(
+                                code="XLSX_SCHEMA_MISMATCH",
+                                message=f"工作表 {ws.title} 表头结构不一致，拒绝合并。预期：{base_headers}，实际：{source_headers}",
+                                item=str(file_path),
+                            )
+                        )
+                        outcome.stats.failed_count += 1
                         continue
-                    output_row = []
-                    for column_index, header in enumerate(headers):
-                        if column_index == serial_col_index:
-                            # 填入全局自增行号，覆盖原始不连续的局部序号
-                            output_row.append(current_no)
-                        else:
-                            source_pos = source_index.get(header)
-                            # 根据表头名字动态定位数据，若原文件缺少该列字段，自动补位空字串
-                            value = row_values[source_pos] if source_pos is not None and source_pos < len(row_values) else ""
-                            # 调用 sanitize_xlsx_cell 滤除以 '=', '+', '-' 等起始的恶意公式注入输入
-                            output_row.append(sanitize_xlsx_cell(value))
-                    output_ws.append(output_row)
-                    current_no += 1
-                    merged_rows += 1
-                    file_row_count += 1
+                else:
+                    # 并集模式：收集新增列
+                    for header in source_headers:
+                        if header != "序号" and header not in union_set:
+                            union_headers.append(header)
+                            union_set.add(header)
 
-            if file_row_count:
-                merged_files += 1
-                output_wb.save(output_path)
+                valid_sheets.append((file_path, ws.title, source_headers))
+
         except Exception as exc:
-            print(f"警告：跳过文件 {file_path.name}（{exc}）")
+            outcome.errors.append(
+                RunError(
+                    code="XLSX_FILE_UNREADABLE",
+                    message=f"文件损坏或不可读：{exc}",
+                    item=str(file_path),
+                )
+            )
+            outcome.stats.failed_count += 1
         finally:
             if wb is not None:
                 wb.close()
 
-    if merged_rows <= 0:
-        raise ValueError("没有成功读取任何有效数据，请检查文件、关键词或表头")
+    # 中途取消检测
+    if should_stop(stop_event):
+        outcome.status = RunStatus.CANCELLED
+        outcome.errors.append(RunError(code="RUN_CANCELLED", message="合并任务已被用户停止"))
+        outcome.save_to_json(final_report_path)
+        return outcome
 
-    output_wb.save(output_path)
-    return str(output_path), merged_files, merged_rows
+    # 如果没有任何有效的数据页，标记失败
+    if not valid_sheets:
+        outcome.status = RunStatus.FAILED
+        outcome.errors.append(RunError(code="XLSX_WORKSHEET_EMPTY", message="没有找到任何包含有效表头的 Excel 数据页"))
+        outcome.save_to_json(final_report_path)
+        return outcome
+
+    # ==========================================
+    # Pass 2: 初始化最终 Workbook 并合并数据行
+    # ==========================================
+    output_wb = Workbook()
+    output_ws = output_wb.active
+    output_ws.title = "合并数据"
+    output_ws.append(union_headers)
+
+    serial_col_index = union_headers.index("序号")
+    current_no = 1
+    total_merged_rows = 0
+
+    for file_path, sheet_title, source_headers in valid_sheets:
+        if should_stop(stop_event):
+            break
+        wait_if_paused(pause_event, stop_event)
+
+        wb = None
+        try:
+            wb = load_workbook(file_path, read_only=True, data_only=True)
+            ws = wb[sheet_title]
+            row_iter = ws.iter_rows(values_only=True)
+            next(row_iter, None)  # 掠过首行表头
+
+            source_index = {name: idx for idx, name in enumerate(source_headers)}
+
+            for row_values in row_iter:
+                # 过滤全空行
+                if not row_values or all(value is None or str(value).strip() == "" for value in row_values):
+                    continue
+
+                output_row = []
+                for column_index, header in enumerate(union_headers):
+                    if column_index == serial_col_index:
+                        output_row.append(current_no)
+                    else:
+                        source_pos = source_index.get(header)
+                        # 如果当前子表缺失该并集字段，自动填补空字串
+                        val = row_values[source_pos] if source_pos is not None and source_pos < len(row_values) else ""
+                        output_row.append(sanitize_xlsx_cell(val))
+
+                output_ws.append(output_row)
+                current_no += 1
+                total_merged_rows += 1
+
+            outcome.stats.success_count += 1
+        except Exception as exc:
+            outcome.errors.append(
+                RunError(
+                    code="XLSX_FILE_UNREADABLE",
+                    message=f"数据读取中途发生未知异常：{exc}",
+                    item=str(file_path),
+                )
+            )
+            outcome.stats.failed_count += 1
+        finally:
+            if wb is not None:
+                wb.close()
+
+    # 再次检查中途取消
+    if should_stop(stop_event):
+        outcome.status = RunStatus.CANCELLED
+        outcome.errors.append(RunError(code="RUN_CANCELLED", message="合并任务在合并过程中被用户中止"))
+        outcome.save_to_json(final_report_path)
+        return outcome
+
+    # 如果最后合并的有效行数为0，不保留产物并报错
+    if total_merged_rows == 0:
+        outcome.status = RunStatus.FAILED
+        outcome.errors.append(RunError(code="XLSX_WORKSHEET_EMPTY", message="没有成功合并到任何有效数据行"))
+        outcome.save_to_json(final_report_path)
+        return outcome
+
+    # 确定终态状态
+    if outcome.stats.failed_count > 0 or outcome.stats.skipped_count > 0:
+        outcome.status = RunStatus.PARTIAL
+    else:
+        outcome.status = RunStatus.SUCCEEDED
+
+    # 写入 XLSX 文件保护 (临时文件保存后重命名原子替换)
+    temp_fd = None
+    temp_path = None
+    try:
+        import tempfile
+        temp_fd, temp_path = tempfile.mkstemp(dir=str(final_xlsx_path.parent), suffix=".tmp")
+        os.close(temp_fd)  # 立即关闭，以便 openpyxl 写入
+        output_wb.save(temp_path)
+        os.replace(temp_path, str(final_xlsx_path))
+        outcome.output_path = str(final_xlsx_path)
+        outcome.artifacts.append(
+            ArtifactRef(path=str(final_xlsx_path), label="合并后的Excel数据")
+        )
+    except Exception as exc:
+        outcome.status = RunStatus.FAILED
+        outcome.errors.append(
+            RunError(
+                code="XLSX_FILE_UNREADABLE",
+                message=f"保存合并后 Excel 临时文件失败：{exc}",
+            )
+        )
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.unlink(temp_path)
+            except Exception:
+                pass
+    
+    outcome.save_to_json(final_report_path)
+    outcome.artifacts.append(
+        ArtifactRef(path=str(final_report_path), label="合并任务报告")
+    )
+    return outcome
 
 
 def main(argv=None):
@@ -196,9 +352,22 @@ def main(argv=None):
     parser.add_argument("folder", help="包含 xlsx 文件的文件夹")
     parser.add_argument("--keyword", default="keyword", help="文件名包含的关键词，留空则合并所有 xlsx")
     parser.add_argument("--platform", default="merged", help="平台前缀，例如 youtube/tiktok/x")
-    parser.add_argument("--output", default="", help="输出 xlsx 路径，不填则自动写入 output/<platform>")
+    parser.add_argument("--output", default="", help="输出 xlsx 路径，不填则自动写入 output/xlsx_merge/<run_id>")
+    parser.add_argument("--schema_mode", default="union_schema", choices=["union_schema", "strict"], help="表头模式")
     args = parser.parse_args(argv)
-    merge_xlsx_files(args.folder, args.keyword, args.platform, args.output or None)
+    
+    outcome = merge_xlsx_files(
+        args.folder,
+        args.keyword,
+        args.platform,
+        args.output or None,
+        schema_mode=args.schema_mode
+    )
+    print(f"Status: {outcome.status.value}")
+    if outcome.output_path:
+        print(f"Merged output saved to: {outcome.output_path}")
+    else:
+        print("Merge failed or no output produced.")
 
 
 if __name__ == "__main__":

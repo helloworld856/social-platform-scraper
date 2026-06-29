@@ -353,6 +353,7 @@ class XlsxMergeWindow(SimpleToolWindow):
                 FieldSpec("folder", "XLSX 文件夹", kind="folder", required=True),
                 FieldSpec("platform", "平台前缀", kind="combo", default="tiktok", options=("youtube", "tiktok", "x")),
                 FieldSpec("keyword", "文件名包含", default="keyword", required=True),
+                FieldSpec("schema_mode", "合并模式", kind="combo", default="union_schema", options=("union_schema", "strict")),
             ],
             height=600,
         )
@@ -367,14 +368,29 @@ class XlsxMergeWindow(SimpleToolWindow):
         log_callback(f"合并文件夹：{values['folder']}")
         log_callback(f"平台前缀：{values['platform']}")
         log_callback(f"文件名关键词：{values['keyword']}")
+        log_callback(f"合并表头模式：{values['schema_mode']}")
+        
         if stop_event and stop_event.is_set():
             finish_callback(None)
             return None
-        output_path, file_count, row_count = merge_xlsx_files(values["folder"], values["keyword"], values["platform"])
-        log_callback(f"完成：合并 {file_count} 个文件，{row_count} 行。")
-        log_callback(f"输出文件：{output_path}")
-        finish_callback(output_path)
-        return output_path
+            
+        outcome = merge_xlsx_files(
+            folder=values["folder"],
+            keyword=values["keyword"],
+            platform=values["platform"],
+            schema_mode=values["schema_mode"],
+            stop_event=stop_event,
+            pause_event=pause_event
+        )
+        
+        log_callback(f"合并结果状态：{outcome.status.value}")
+        stats = outcome.stats
+        log_callback(f"成功合并数据文件数：{stats.success_count}，失败数：{stats.failed_count}，跳过数：{stats.skipped_count}")
+        if outcome.output_path:
+            log_callback(f"合并后输出文件路径：{outcome.output_path}")
+            
+        finish_callback(outcome)
+        return outcome
 
 
 class AnomalyDetectionWindow(SimpleToolWindow):
