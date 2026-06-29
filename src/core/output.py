@@ -77,3 +77,30 @@ def build_output_path(platform: str, filename: str) -> str:
     """
     return str(get_platform_output_dir(platform) / filename)
 
+
+def generate_run_id() -> str:
+    """
+    生成全局唯一的任务执行 ID（使用时间戳+随机字符，人类友好且唯一）。
+    """
+    import datetime
+    import random
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    rand = "".join(random.choices("abcdefghijklmnopqrstuvwxyz0123456789", k=4))
+    return f"{ts}_{rand}"
+
+
+def build_run_output_dir(tool_id: str, run_id: str) -> Path:
+    """
+    根据工具名和任务执行 ID 生成并创建唯一的产物输出目录。
+    结构为: output/<tool_id>/<run_id>
+    """
+    # 路径安全防护：防止恶意传入包含 '..' 或斜杠的文件名，绕过限定范围实施路径穿越攻击
+    if ".." in tool_id or "/" in tool_id or "\\" in tool_id:
+        raise ValueError(f"Invalid tool_id name: {tool_id}")
+    if ".." in run_id or "/" in run_id or "\\" in run_id:
+        raise ValueError(f"Invalid run_id name: {run_id}")
+    
+    run_dir = get_output_root() / tool_id / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
